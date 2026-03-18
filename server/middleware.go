@@ -1,0 +1,117 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+
+	"github.com/tempoxyz/mpp-go/mpp"
+)
+
+type contextKey int
+
+const (
+	credentialKey contextKey = iota
+	receiptKey
+)
+
+// CredentialFromContext extracts the Credential from the request context.
+func CredentialFromContext(ctx context.Context) *mpp.Credential {
+	v, _ := ctx.Value(credentialKey).(*mpp.Credential)
+	return v
+}
+
+// ReceiptFromContext extracts the Receipt from the request context.
+func ReceiptFromContext(ctx context.Context) *mpp.Receipt {
+	v, _ := ctx.Value(receiptKey).(*mpp.Receipt)
+	return v
+}
+
+// MiddlewareOption configures the payment middleware.
+type MiddlewareOption func(*middlewareConfig)
+
+type middlewareConfig struct {
+	intentName string
+}
+
+// WithIntent sets the intent name for the middleware (default: "charge").
+func WithIntent(name string) MiddlewareOption {
+	return func(c *middlewareConfig) {
+		c.intentName = name
+	}
+}
+
+// PaymentMiddleware creates an http.Handler middleware that requires payment.
+// It intercepts requests, handles the 402 challenge flow, and injects
+// Credential and Receipt into the request context on success.
+func PaymentMiddleware(m *Mpp, amount string, opts ...MiddlewareOption) func(http.Handler) http.Handler {
+	cfg := &middlewareConfig{
+		intentName: "charge",
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			intent, ok := m.method.Intents()[cfg.intentName]
+			if !ok {
+				http.Error(w, "unsupported payment intent", http.StatusInternalServerError)
+				return
+			}
+
+			result, err := VerifyOrChallenge(r.Context(), VerifyParams{
+				Authorization: r.Header.Get("Authorization"),
+				Intent:        intent,
+				Request: map[string]any{
+					"amount": amount,
+				},
+				Realm:     m.realm,
+				SecretKey: m.secretKey,
+				Method:    m.method.Name(),
+			})
+			if err != nil {
+				writePaymentError(w, err)
+				return
+			}
+
+			if result.Challenge != nil {
+				writeChallenge(w, result.Challenge, m.realm)
+				return
+			}
+
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, credentialKey, result.Credential)
+			ctx = context.WithValue(ctx, receiptKey, result.Receipt)
+
+			w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func writeChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
+	w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate(realm))
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusPaymentRequired)
+
+	problem := mpp.ErrPaymentRequired(realm, challenge.Description)
+	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
+}
+
+func writePaymentError(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	if pe, ok := err.(*mpp.PaymentError); ok {
+		w.WriteHeader(pe.Status)
+		json.NewEncoder(w).Encode(pe.ProblemDetails(""))
+		return
+	}
+
+	w.WriteHeader(http.StatusPaymentRequired)
+	problem := mpp.ErrVerificationFailed(err.Error())
+	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
+}
