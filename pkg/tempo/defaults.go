@@ -1,8 +1,8 @@
 package tempo
 
 import (
-	"math/big"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+	"math/big"
 )
 
 // ExpiringNonceKey is the reserved nonce key used for fee-payer transactions.
