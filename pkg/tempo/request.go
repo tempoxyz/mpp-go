@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// ChargeMode declares which Tempo credential flow a challenge accepts.
 type ChargeMode string
 
 const (
@@ -15,6 +16,7 @@ const (
 	ChargeModePush ChargeMode = "push"
 )
 
+// CredentialType identifies the Tempo credential payload shape.
 type CredentialType string
 
 const (
@@ -22,6 +24,7 @@ const (
 	CredentialTypeHash        CredentialType = "hash"
 )
 
+// MethodDetails holds Tempo-specific request fields nested under methodDetails.
 type MethodDetails struct {
 	ChainID        *int64
 	FeePayer       bool
@@ -30,6 +33,7 @@ type MethodDetails struct {
 	SupportedModes []ChargeMode
 }
 
+// ChargeRequest is the canonical Tempo request shape embedded in a Challenge.
 type ChargeRequest struct {
 	Amount        string
 	Currency      string
@@ -39,6 +43,7 @@ type ChargeRequest struct {
 	MethodDetails MethodDetails
 }
 
+// ChargeRequestParams are the human-friendly inputs used to build a ChargeRequest.
 type ChargeRequestParams struct {
 	Amount         string
 	Currency       string
@@ -53,12 +58,14 @@ type ChargeRequestParams struct {
 	SupportedModes []ChargeMode
 }
 
+// ChargeCredentialPayload is the Tempo-specific payload carried by a Credential.
 type ChargeCredentialPayload struct {
 	Type      CredentialType
 	Hash      string
 	Signature string
 }
 
+// NormalizeChargeRequest validates request parameters and produces the canonical Tempo shape.
 func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if params.Amount == "" {
 		return ChargeRequest{}, fmt.Errorf("tempo: amount is required")
@@ -109,6 +116,7 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	return request, nil
 }
 
+// ParseChargeRequest parses a generic request map into the canonical Tempo shape.
 func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 	request := ChargeRequest{
 		Amount:      asString(input["amount"]),
@@ -144,6 +152,7 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 	return request, nil
 }
 
+// ParseChargeCredentialPayload parses a generic payload map into a Tempo payload.
 func ParseChargeCredentialPayload(input map[string]any) (ChargeCredentialPayload, error) {
 	typeValue := CredentialType(asString(input["type"]))
 	switch typeValue {
@@ -164,6 +173,7 @@ func ParseChargeCredentialPayload(input map[string]any) (ChargeCredentialPayload
 	}
 }
 
+// Map converts a Tempo payload back into the generic Credential payload shape.
 func (p ChargeCredentialPayload) Map() map[string]any {
 	switch p.Type {
 	case CredentialTypeHash:
@@ -173,6 +183,7 @@ func (p ChargeCredentialPayload) Map() map[string]any {
 	}
 }
 
+// Allows reports whether the request accepts the supplied credential type.
 func (r ChargeRequest) Allows(credentialType CredentialType) bool {
 	if len(r.MethodDetails.SupportedModes) == 0 {
 		return true
@@ -188,6 +199,7 @@ func (r ChargeRequest) Allows(credentialType CredentialType) bool {
 	return false
 }
 
+// Map converts a ChargeRequest into the generic request map embedded in a Challenge.
 func (r ChargeRequest) Map() map[string]any {
 	request := map[string]any{
 		"amount":    r.Amount,

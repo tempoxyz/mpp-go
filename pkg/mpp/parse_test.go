@@ -1,9 +1,13 @@
 package mpp
 
-import "strings"
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseAuthorization_RoundTripsOpaque(t *testing.T) {
+	t.Parallel()
+
 	cred := &Credential{
 		Challenge: ChallengeEcho{
 			ID:      "challenge-id",
@@ -31,36 +35,125 @@ func TestParseAuthorization_RoundTripsOpaque(t *testing.T) {
 	}
 }
 
-func TestExtractPaymentScheme_CommaSeparatedAuthorization(t *testing.T) {
-	header := "Bearer token, Payment abc123, Basic xyz"
-	if got := ExtractPaymentScheme(header); got != "Payment abc123" {
-		t.Fatalf("ExtractPaymentScheme() = %q, want %q", got, "Payment abc123")
+func TestExtractPaymentAuthorization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{
+			name:   "payment only",
+			header: "Payment abc123",
+			want:   "Payment abc123",
+		},
+		{
+			name:   "comma separated schemes",
+			header: "Bearer token, Payment abc123, Basic xyz",
+			want:   "Payment abc123",
+		},
+		{
+			name:   "case insensitive scheme",
+			header: "Bearer token, payment abc123",
+			want:   "payment abc123",
+		},
+		{
+			name:   "missing payment scheme",
+			header: "Bearer token, Basic xyz",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		tc := tt
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ExtractPaymentAuthorization(tc.header); got != tc.want {
+				t.Fatalf("ExtractPaymentAuthorization() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestSplitWWWAuthenticate_MergedHeader(t *testing.T) {
-	tempoChallenge := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"})
-	header := `Bearer realm="example", ` + tempoChallenge.ToWWWAuthenticate("realm")
-	parts := SplitWWWAuthenticate(header)
-	if len(parts) != 2 {
-		t.Fatalf("len(parts) = %d, want 2", len(parts))
+func TestSplitChallenges(t *testing.T) {
+	t.Parallel()
+
+	tempoChallenge := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).ToWWWAuthenticate("realm")
+	tests := []struct {
+		name   string
+		header string
+		want   []string
+	}{
+		{
+			name:   "merged bearer and payment",
+			header: `Bearer realm="example", ` + tempoChallenge,
+			want:   []string{`Bearer realm="example"`, tempoChallenge},
+		},
+		{
+			name:   "quoted commas stay inside one challenge",
+			header: `Digest realm="alpha,beta", nonce="123", ` + tempoChallenge,
+			want:   []string{`Digest realm="alpha,beta", nonce="123"`, tempoChallenge},
+		},
+		{
+			name:   "single payment challenge",
+			header: tempoChallenge,
+			want:   []string{tempoChallenge},
+		},
 	}
-	if !strings.HasPrefix(parts[0], "Bearer ") {
-		t.Fatalf("parts[0] = %q, want Bearer challenge", parts[0])
-	}
-	if !strings.HasPrefix(parts[1], "Payment ") {
-		t.Fatalf("parts[1] = %q, want Payment challenge", parts[1])
+
+	for _, tt := range tests {
+		tc := tt
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			parts := SplitChallenges(tc.header)
+			if len(parts) != len(tc.want) {
+				t.Fatalf("len(parts) = %d, want %d (%#v)", len(parts), len(tc.want), parts)
+			}
+			for i := range tc.want {
+				if parts[i] != tc.want[i] {
+					t.Fatalf("parts[%d] = %q, want %q", i, parts[i], tc.want[i])
+				}
+			}
+		})
 	}
 }
 
-func TestParseWWWAuthenticate_RequiresRealmAndRequest(t *testing.T) {
-	_, err := ParseWWWAuthenticate(`Payment id="abc", method="tempo", intent="charge"`)
-	if err == nil || !strings.Contains(err.Error(), "missing required challenge fields") {
-		t.Fatalf("ParseWWWAuthenticate() error = %v, want missing required fields", err)
+func TestParseWWWAuthenticate_RequiresFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{
+			name:   "missing realm and request",
+			header: `Payment id="abc", method="tempo", intent="charge"`,
+		},
+		{
+			name:   "missing request",
+			header: `Payment id="abc", realm="api.example.com", method="tempo", intent="charge"`,
+		},
+	}
+
+	for _, tt := range tests {
+		tc := tt
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseWWWAuthenticate(tc.header)
+			if err == nil || !strings.Contains(err.Error(), "missing required challenge fields") {
+				t.Fatalf("ParseWWWAuthenticate() error = %v, want missing required fields", err)
+			}
+		})
 	}
 }
 
 func TestChallengeToWWWAuthenticate_AlwaysIncludesRequest(t *testing.T) {
+	t.Parallel()
+
 	challenge := NewChallenge("secret", "realm", "tempo", "charge", nil)
 	header := challenge.ToWWWAuthenticate("realm")
 	if !strings.Contains(header, `request="`) {

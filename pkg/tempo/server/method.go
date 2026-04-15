@@ -1,12 +1,15 @@
-package server
+// Package temposerver verifies Tempo charge Credentials and builds Tempo
+// charge Challenges for MPP HTTP servers.
+package temposerver
 
 import (
 	"fmt"
 
-	genericserver "github.com/tempoxyz/mpp-go/pkg/server"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
+// MethodConfig configures a Tempo payment method for server-side charging.
 type MethodConfig struct {
 	Intent         *ChargeIntent
 	Currency       string
@@ -19,6 +22,7 @@ type MethodConfig struct {
 	SupportedModes []tempo.ChargeMode
 }
 
+// Method adapts Tempo charge configuration to the generic server interfaces.
 type Method struct {
 	intent         *ChargeIntent
 	currency       string
@@ -31,9 +35,10 @@ type Method struct {
 	supportedModes []tempo.ChargeMode
 }
 
-var _ genericserver.Method = (*Method)(nil)
-var _ genericserver.ChargeRequestBuilder = (*Method)(nil)
+var _ mppserver.Method = (*Method)(nil)
+var _ mppserver.ChargeRequestBuilder = (*Method)(nil)
 
+// NewMethod builds a Tempo server method with request defaults.
 func NewMethod(config MethodConfig) *Method {
 	decimals := config.Decimals
 	if decimals == 0 {
@@ -61,15 +66,18 @@ func NewMethod(config MethodConfig) *Method {
 	}
 }
 
+// Name returns the method token used in Challenges and Credentials.
 func (m *Method) Name() string {
 	return tempo.MethodName
 }
 
-func (m *Method) Intents() map[string]genericserver.Intent {
-	return map[string]genericserver.Intent{tempo.IntentCharge: m.intent}
+// Intents exposes the Tempo intents handled by this method.
+func (m *Method) Intents() map[string]mppserver.Intent {
+	return map[string]mppserver.Intent{tempo.IntentCharge: m.intent}
 }
 
-func (m *Method) BuildChargeRequest(params genericserver.ChargeParams) (map[string]any, error) {
+// BuildChargeRequest normalizes server charge parameters into Tempo request data.
+func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]any, error) {
 	currency := params.Currency
 	if currency == "" {
 		currency = m.currency

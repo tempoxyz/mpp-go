@@ -1,4 +1,4 @@
-package client
+package tempoclient
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	// testPrivateKey is the fixed payer key used in Tempo client tests.
 	testPrivateKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 	testCurrency   = "0x20c0000000000000000000000000000000000001"
 	testRecipient  = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"

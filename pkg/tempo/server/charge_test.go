@@ -1,4 +1,4 @@
-package server
+package temposerver
 
 import (
 	"context"
@@ -14,14 +14,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	tempoclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 const (
-	testPrivateKey  = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	// testPrivateKey is the fixed payer key used across Tempo charge tests.
+	testPrivateKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	// feePayerKey is the co-signer key used for sponsored-transaction tests.
 	feePayerKey     = "0xdd83cd66cd98801a07e0b7c1a5b02364b369e696da7c0ab444acffea5cca86fc"
 	testCurrency    = "0x20c0000000000000000000000000000000000001"
 	testRecipient   = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"

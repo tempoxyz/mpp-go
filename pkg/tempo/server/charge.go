@@ -1,4 +1,4 @@
-package server
+package temposerver
 
 import (
 	"context"
@@ -18,6 +18,8 @@ import (
 const receiptRetryDelay = 500 * time.Millisecond
 const receiptRetryAttempts = 20
 
+// Sponsor policy caps for fee-payer transactions. These values match the
+// narrow Tempo charge flow this package supports today.
 var feePayerMaxGas = uint64(2_000_000)
 
 var feePayerMaxFeePerGas = big.NewInt(100_000_000_000)
@@ -33,6 +35,7 @@ type sourceDID struct {
 	address string
 }
 
+// ChargeIntentConfig configures Tempo charge verification.
 type ChargeIntentConfig struct {
 	RPC                tempo.RPCClient
 	RPCURL             string
@@ -41,6 +44,7 @@ type ChargeIntentConfig struct {
 	Store              tempo.Store
 }
 
+// ChargeIntent verifies Tempo charge Credentials and returns Receipts.
 type ChargeIntent struct {
 	rpc            tempo.RPCClient
 	rpcURL         string
@@ -48,6 +52,7 @@ type ChargeIntent struct {
 	store          tempo.Store
 }
 
+// NewChargeIntent constructs a Tempo charge verifier.
 func NewChargeIntent(config ChargeIntentConfig) (*ChargeIntent, error) {
 	feePayerSigner := config.FeePayerSigner
 	if feePayerSigner == nil && config.FeePayerPrivateKey != "" {
@@ -69,10 +74,12 @@ func NewChargeIntent(config ChargeIntentConfig) (*ChargeIntent, error) {
 	}, nil
 }
 
+// Name returns the intent token handled by this verifier.
 func (i *ChargeIntent) Name() string {
 	return tempo.IntentCharge
 }
 
+// Verify validates a Tempo charge Credential against the supplied request.
 func (i *ChargeIntent) Verify(
 	ctx context.Context,
 	credential *mpp.Credential,
@@ -162,8 +169,8 @@ func (i *ChargeIntent) verifyTransaction(
 	}
 
 	if request.MethodDetails.FeePayer {
-		// TODO: Upstream a higher-level sponsored transaction validation + co-sign helper into tempo-go.
-		// The low-level signing primitives live there already, but SDKs still duplicate these invariants.
+		// tempo-go exposes the signing primitives already; this package keeps the
+		// sponsor policy checks local until a shared helper exists upstream.
 		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires); err != nil {
 			return nil, err
 		}

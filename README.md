@@ -10,6 +10,8 @@ This repository is organized in a `tempo-go`-style `pkg/*` layout and focuses on
 - Tempo charge credential creation in `pkg/tempo/client`
 - Tempo charge verification, fee-payer co-signing, and receipt validation in `pkg/tempo/server`
 
+The example programs under [`examples/`](./examples) are runnable end-to-end: each one starts a local HTTP server, uses the generic MPP client, and talks to a mock Tempo RPC so you can inspect the full Challenge → Credential → Receipt flow without a devnet.
+
 ## Install
 
 ```bash
@@ -28,9 +30,9 @@ import (
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	genericserver "github.com/tempoxyz/mpp-go/pkg/server"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	temposerver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
@@ -43,10 +45,10 @@ func main() {
 		Currency:  tempo.DefaultCurrencyForChain(42431),
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
-	payment := genericserver.New(method, "api.example.com", "replace-me")
+	payment := mppserver.New(method, "api.example.com", "replace-me")
 
 	http.HandleFunc("/paid", func(w http.ResponseWriter, r *http.Request) {
-		result, err := payment.Charge(r.Context(), genericserver.ChargeParams{
+		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
 			Amount:        "0.50",
 		})
@@ -83,8 +85,8 @@ import (
 	"fmt"
 	"io"
 
-	genericclient "github.com/tempoxyz/mpp-go/pkg/client"
-	tempoclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
+	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 
 func main() {
@@ -94,7 +96,7 @@ func main() {
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
 
-	client := genericclient.New([]genericclient.Method{method})
+	client := mppclient.New([]mppclient.Method{method})
 	resp, err := client.Get(context.Background(), "https://api.example.com/paid")
 	if err != nil {
 		panic(err)
@@ -136,9 +138,9 @@ This pass intentionally does not include sessions, MCP, proxies, multi-method ne
 
 | Example | Description |
 |---------|-------------|
-| [`examples/charge-basic`](./examples/charge-basic) | Basic Tempo charge challenge + client retry flow |
-| [`examples/charge-hash`](./examples/charge-hash) | Hash credential flow (`push` mode) |
-| [`examples/charge-fee-payer`](./examples/charge-fee-payer) | Sponsored transaction flow with a fee payer |
+| [`examples/charge-basic`](./examples/charge-basic) | End-to-end Challenge, Credential, and Receipt flow |
+| [`examples/charge-hash`](./examples/charge-hash) | End-to-end hash credential flow (`push` mode) |
+| [`examples/charge-fee-payer`](./examples/charge-fee-payer) | End-to-end sponsored transaction flow with a fee payer |
 
 ## Testing
 

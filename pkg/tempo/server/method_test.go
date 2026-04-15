@@ -1,9 +1,9 @@
-package server
+package temposerver
 
 import (
 	"testing"
 
-	genericserver "github.com/tempoxyz/mpp-go/pkg/server"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
@@ -18,7 +18,7 @@ func TestMethodBuildChargeRequest_IncludesExternalIDAndFeePayerURL(t *testing.T)
 		FeePayerURL: "https://fee-payer.example.com",
 	})
 
-	requestMap, err := method.BuildChargeRequest(genericserver.ChargeParams{
+	requestMap, err := method.BuildChargeRequest(mppserver.ChargeParams{
 		Amount:      "0.50",
 		Description: "coffee",
 		ExternalID:  "ext-123",

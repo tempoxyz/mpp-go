@@ -63,9 +63,9 @@ func parseAuthParams(s string) map[string]string {
 	return params
 }
 
-// SplitWWWAuthenticate splits a potentially merged WWW-Authenticate header into
+// SplitChallenges splits a potentially merged authentication header value into
 // individual challenges while preserving commas inside quoted auth-param values.
-func SplitWWWAuthenticate(header string) []string {
+func SplitChallenges(header string) []string {
 	header = strings.TrimSpace(header)
 	if header == "" {
 		return nil
@@ -96,6 +96,11 @@ func SplitWWWAuthenticate(header string) []string {
 		parts = append(parts, tail)
 	}
 	return parts
+}
+
+// Deprecated: use SplitChallenges.
+func SplitWWWAuthenticate(header string) []string {
+	return SplitChallenges(header)
 }
 
 func nextChallengeStart(header string, start int) int {
@@ -249,7 +254,7 @@ func ParseAuthorization(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 
-	header = ExtractPaymentScheme(header)
+	header = ExtractPaymentAuthorization(header)
 	if header == "" {
 		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}

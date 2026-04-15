@@ -1,4 +1,5 @@
-package client
+// Package tempoclient creates Tempo charge Credentials for MPP HTTP clients.
+package tempoclient
 
 import (
 	"context"
@@ -8,17 +9,18 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	genericclient "github.com/tempoxyz/mpp-go/pkg/client"
+	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
-// TODO: Replace this legacy sponsored-payload handoff with a first-class helper in tempo-go.
-// tempo-go already understands the appended marker on deserialize, but SDKs still assemble it manually.
+// feePayerMarker is the legacy sponsored-transaction suffix recognized by
+// tempo-go during deserialize.
 const feePayerMarker = "feefeefeefee"
 
+// Config configures a Tempo charge client method.
 type Config struct {
 	Signer         *temposigner.Signer
 	PrivateKey     string
@@ -29,6 +31,7 @@ type Config struct {
 	CredentialType tempo.CredentialType
 }
 
+// Method implements Tempo charge credential creation for the generic MPP client.
 type Method struct {
 	signer         *temposigner.Signer
 	rpc            tempo.RPCClient
@@ -38,8 +41,9 @@ type Method struct {
 	credentialType tempo.CredentialType
 }
 
-var _ genericclient.Method = (*Method)(nil)
+var _ mppclient.Method = (*Method)(nil)
 
+// New constructs a Tempo charge client method.
 func New(config Config) (*Method, error) {
 	signer := config.Signer
 	if signer == nil {
@@ -62,10 +66,12 @@ func New(config Config) (*Method, error) {
 	}, nil
 }
 
+// Name returns the method token used in Challenges and Credentials.
 func (m *Method) Name() string {
 	return tempo.MethodName
 }
 
+// CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge.Method != tempo.MethodName {
 		return nil, fmt.Errorf("tempo client: unsupported challenge method %q", challenge.Method)

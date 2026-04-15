@@ -1,2 +1,2 @@
-// Package server contains the Tempo charge server method and verifier.
-package server
+// Package temposerver contains the Tempo charge server method and verifier.
+package temposerver

@@ -20,12 +20,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	genericclient "github.com/tempoxyz/mpp-go/pkg/client"
+	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	genericserver "github.com/tempoxyz/mpp-go/pkg/server"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	tempoclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
-	temposerver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/server"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
@@ -33,10 +33,13 @@ import (
 const (
 	defaultIntegrationRPCURL = "http://localhost:8545"
 
-	integrationRealm         = "mpp-go.local"
-	integrationSecretKey     = "integration-secret"
-	integrationCurrency      = "0x20c0000000000000000000000000000000000000"
-	integrationRecipient     = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+	integrationRealm     = "mpp-go.local"
+	integrationSecretKey = "integration-secret"
+	// integrationCurrency is the fixed TIP-20 token used in the local devnet tests.
+	integrationCurrency = "0x20c0000000000000000000000000000000000000"
+	// integrationRecipient is the account that receives paid transfers during tests.
+	integrationRecipient = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+	// integrationDevPrivateKey is Anvil's default funded dev key used for fallback funding.
 	integrationDevPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 	receiptPollingTimeout    = 45 * time.Second
 	receiptPollingInterval   = 500 * time.Millisecond
@@ -92,9 +95,9 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := genericclient.New(
-		[]genericclient.Method{clientMethod},
-		genericclient.WithHTTPClient(&http.Client{Transport: transport}),
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
 	)
 	response, err := client.Get(ctx, server.URL+"/paid")
 	if err != nil {
@@ -169,9 +172,9 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := genericclient.New(
-		[]genericclient.Method{clientMethod},
-		genericclient.WithHTTPClient(&http.Client{Transport: transport}),
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
 	)
 	response, err := client.Get(ctx, server.URL+"/paid-fee-payer")
 	if err != nil {
@@ -225,9 +228,9 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := genericclient.New(
-		[]genericclient.Method{clientMethod},
-		genericclient.WithHTTPClient(&http.Client{Transport: transport}),
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
 	)
 	response, err := client.Get(ctx, server.URL+"/paid-hash")
 	if err != nil {
@@ -516,9 +519,9 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		ChainID:        int64(chainID),
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
-	basic := genericserver.New(basicMethod, integrationRealm, integrationSecretKey)
-	feePayer := genericserver.New(feePayerMethod, integrationRealm, integrationSecretKey)
-	hash := genericserver.New(hashMethod, integrationRealm, integrationSecretKey)
+	basic := mppserver.New(basicMethod, integrationRealm, integrationSecretKey)
+	feePayer := mppserver.New(feePayerMethod, integrationRealm, integrationSecretKey)
+	hash := mppserver.New(hashMethod, integrationRealm, integrationSecretKey)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/paid", paidHandler(t, basic, false))
@@ -527,11 +530,11 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 	return httptest.NewServer(mux)
 }
 
-func paidHandler(t *testing.T, payment *genericserver.Mpp, feePayer bool) http.HandlerFunc {
+func paidHandler(t *testing.T, payment *mppserver.Mpp, feePayer bool) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, err := payment.Charge(r.Context(), genericserver.ChargeParams{
+		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
 			Amount:        "1.00",
 			FeePayer:      feePayer,

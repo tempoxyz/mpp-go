@@ -50,18 +50,30 @@ func New(method Method, realm, secretKey string) *Mpp {
 
 // ChargeParams contains the parameters for a charge operation.
 type ChargeParams struct {
+	// Authorization is the incoming Authorization header value.
 	Authorization string
-	Amount        string
-	Currency      string
-	Recipient     string
-	ExternalID    string
-	Expires       string
-	Description   string
-	Memo          string
-	FeePayer      bool
-	FeePayerURL   string
-	ChainID       int
-	Meta          map[string]string
+	// Amount is the human-readable charge amount.
+	Amount string
+	// Currency overrides the method's default currency.
+	Currency string
+	// Recipient overrides the method's default recipient.
+	Recipient string
+	// ExternalID is copied into the request and echoed back in the Receipt.
+	ExternalID string
+	// Expires overrides the default Challenge expiry.
+	Expires string
+	// Description is exposed in the server-generated Challenge.
+	Description string
+	// Memo sets a Tempo transfer memo when the method supports it.
+	Memo string
+	// FeePayer requests the sponsored Tempo flow when the method supports it.
+	FeePayer bool
+	// FeePayerURL points at a remote fee-payer signer.
+	FeePayerURL string
+	// ChainID overrides the method's default Tempo chain ID.
+	ChainID int
+	// Meta stores opaque Challenge metadata.
+	Meta map[string]string
 	// Extra is a deprecated alias for Meta.
 	Extra map[string]string
 }

@@ -1,3 +1,3 @@
-// Package client contains the Tempo charge client method for creating Payment
-// credentials that satisfy Tempo HTTP 402 challenges.
-package client
+// Package tempoclient contains the Tempo charge client method for creating
+// Payment Credentials that satisfy Tempo HTTP 402 Challenges.
+package tempoclient
