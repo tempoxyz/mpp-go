@@ -32,7 +32,7 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 	requestB64 := b64EncodeRequest(opts.Request)
 
 	opaqueB64 := ""
-	if len(opts.Opaque) > 0 {
+	if opts.Opaque != nil {
 		opaqueB64 = b64EncodeSortedStringMap(opts.Opaque)
 	}
 

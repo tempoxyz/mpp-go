@@ -120,9 +120,10 @@ func main() {
 
 | Example | Description |
 |---------|-------------|
-| [charge-basic](./examples/charge-basic/) | Generic Tempo charge flow using the high-level MPP client and server helpers |
-| [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential |
-| [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer |
+| [basic](./examples/basic/) | Separate-process demo with a long-running server and standalone client, mirroring the `mpp-rs` sample layout |
+| [charge-basic](./examples/charge-basic/) | Generic Tempo charge flow using the high-level MPP client and server helpers, available in both one-command and separate-process layouts |
+| [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential, available in both one-command and separate-process layouts |
+| [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer, available in both one-command and separate-process layouts |
 
 ## Protocol
 

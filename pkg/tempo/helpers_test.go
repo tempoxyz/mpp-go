@@ -182,3 +182,64 @@ func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
 		t.Fatal("MatchTransferCalldata() = true, want false for wrong challenge binding")
 	}
 }
+
+func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   map[string]any
+		want    ChargeCredentialPayload
+		wantErr string
+	}{
+		{
+			name:  "hash payload",
+			input: map[string]any{"type": "hash", "hash": "0xabc123"},
+			want:  ChargeCredentialPayload{Type: CredentialTypeHash, Hash: "0xabc123"},
+		},
+		{
+			name:  "transaction payload",
+			input: map[string]any{"type": "transaction", "signature": "0xsigned"},
+			want:  ChargeCredentialPayload{Type: CredentialTypeTransaction, Signature: "0xsigned"},
+		},
+		{
+			name:  "proof payload",
+			input: map[string]any{"type": "proof", "signature": "0xproof"},
+			want:  ChargeCredentialPayload{Type: CredentialTypeProof, Signature: "0xproof"},
+		},
+		{
+			name:    "missing hash",
+			input:   map[string]any{"type": "hash"},
+			wantErr: "missing hash",
+		},
+		{
+			name:    "unsupported type",
+			input:   map[string]any{"type": "other"},
+			wantErr: "unsupported credential payload type",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload, err := ParseChargeCredentialPayload(tt.input)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseChargeCredentialPayload() error = %v, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseChargeCredentialPayload() error = %v", err)
+			}
+			if !reflect.DeepEqual(payload, tt.want) {
+				t.Fatalf("ParseChargeCredentialPayload() = %#v, want %#v", payload, tt.want)
+			}
+			if !reflect.DeepEqual(payload.Map(), tt.input) {
+				t.Fatalf("payload.Map() = %#v, want %#v", payload.Map(), tt.input)
+			}
+		})
+	}
+}
