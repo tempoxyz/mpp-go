@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
@@ -26,21 +26,21 @@ func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
 		Currency:  devnet.Currency,
 		Recipient: devnet.Recipient,
 	})
-	payment := mppserver.New(method, devnet.Realm, "example-secret")
+	payment := server.New(method, devnet.Realm, "example-secret")
 
-	handler := mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+	handler := server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:      "0.50",
 		Description: "Basic Tempo charge example",
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		credential := mppserver.CredentialFromContext(r.Context())
+		credential := server.CredentialFromContext(r.Context())
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data":  "paid content",
 			"payer": credential.Source,
 		})
 	}))
 
-	server := httptest.NewServer(handler)
-	return &exampleServer{url: server.URL, server: server}, nil
+	srv := httptest.NewServer(handler)
+	return &exampleServer{url: srv.URL, server: srv}, nil
 }
 
 func (s *exampleServer) Close() {

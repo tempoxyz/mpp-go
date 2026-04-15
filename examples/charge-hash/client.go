@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
-	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
@@ -26,9 +27,13 @@ func runClient(ctx context.Context, url, rpcURL string, chainID int64) (*clientR
 	if err != nil {
 		return nil, err
 	}
-	client := mppclient.New([]mppclient.Method{method})
+	cl := client.New([]client.Method{method})
 
-	response, err := client.Get(ctx, url+"/paid")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/paid", nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := cl.Do(req)
 	if err != nil {
 		return nil, err
 	}
