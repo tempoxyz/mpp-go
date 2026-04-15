@@ -1,4 +1,4 @@
-package tempoclient
+package chargeclient
 
 import (
 	"context"
@@ -56,96 +56,155 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, _ ...interface{}
 	}
 }
 
-func TestCreateCredential_RejectsHashCredentialForFeePayerChallenge(t *testing.T) {
+func TestCreateCredentialScenarios(t *testing.T) {
 	t.Parallel()
 
-	method, err := New(Config{PrivateKey: testPrivateKey, CredentialType: tempo.CredentialTypeHash})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+	tests := []struct {
+		name             string
+		config           Config
+		rpc              *mockRPC
+		params           tempo.ChargeRequestParams
+		wantErr          string
+		wantType         tempo.CredentialType
+		wantPayloadKey   string
+		wantPayload      string
+		wantBroadcasts   int
+		wantRawPrefix    string
+		wantSourcePrefix string
+	}{
+		{
+			name: "hash credential rejected for fee payer challenge",
+			config: Config{
+				ChainID:        42431,
+				CredentialType: tempo.CredentialTypeHash,
+			},
+			rpc: &mockRPC{chainID: 42431},
+			params: tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+				FeePayer:  true,
+			},
+			wantErr:        "hash credentials cannot be used with fee payer challenges",
+			wantBroadcasts: 0,
+		},
+		{
+			name: "chain id mismatch",
+			config: Config{
+				ChainID: 42431,
+			},
+			rpc: &mockRPC{chainID: 1},
+			params: tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+			},
+			wantErr:        "chain id mismatch",
+			wantBroadcasts: 0,
+		},
+		{
+			name: "hash credential broadcasts",
+			config: Config{
+				ChainID:        42431,
+				CredentialType: tempo.CredentialTypeHash,
+			},
+			rpc: &mockRPC{
+				chainID:     42431,
+				nonce:       7,
+				gasPrice:    "0x1",
+				estimateGas: "0x5208",
+				txHash:      testTxHash,
+			},
+			params: tempo.ChargeRequestParams{
+				Amount:         "0.50",
+				Currency:       testCurrency,
+				Recipient:      testRecipient,
+				Decimals:       6,
+				ChainID:        42431,
+				SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+			},
+			wantType:         tempo.CredentialTypeHash,
+			wantPayloadKey:   "hash",
+			wantPayload:      testTxHash,
+			wantBroadcasts:   1,
+			wantRawPrefix:    "0x76",
+			wantSourcePrefix: "did:pkh:eip155:42431:0x",
+		},
+		{
+			name: "zero amount uses proof credential",
+			config: Config{
+				ChainID:        42431,
+				CredentialType: tempo.CredentialTypeHash,
+			},
+			rpc: &mockRPC{chainID: 42431},
+			params: tempo.ChargeRequestParams{
+				Amount:    "0",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+			},
+			wantType:         tempo.CredentialTypeProof,
+			wantPayloadKey:   "signature",
+			wantBroadcasts:   0,
+			wantSourcePrefix: "did:pkh:eip155:42431:0x",
+		},
 	}
 
-	challenge := buildChallenge(t, tempo.ChargeRequestParams{
-		Amount:    "0.50",
-		Currency:  testCurrency,
-		Recipient: testRecipient,
-		Decimals:  6,
-		ChainID:   42431,
-		FeePayer:  true,
-	})
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err = method.CreateCredential(context.Background(), challenge)
-	if err == nil || !strings.Contains(err.Error(), "hash credentials cannot be used with fee payer challenges") {
-		t.Fatalf("CreateCredential() error = %v, want fee payer hash rejection", err)
-	}
-}
+			config := tt.config
+			config.PrivateKey = testPrivateKey
+			config.RPC = tt.rpc
 
-func TestCreateCredential_RejectsChainIDMismatch(t *testing.T) {
-	t.Parallel()
+			method, err := New(config)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
 
-	rpc := &mockRPC{chainID: 1}
-	method, err := New(Config{PrivateKey: testPrivateKey, RPC: rpc, ChainID: 42431})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
+			challenge := buildChallenge(t, tt.params)
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("CreateCredential() error = %v, want substring %q", err, tt.wantErr)
+				}
+				if got := len(tt.rpc.sentRawTxs); got != tt.wantBroadcasts {
+					t.Fatalf("len(tt.rpc.sentRawTxs) = %d, want %d", got, tt.wantBroadcasts)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateCredential() error = %v", err)
+			}
 
-	challenge := buildChallenge(t, tempo.ChargeRequestParams{
-		Amount:    "0.50",
-		Currency:  testCurrency,
-		Recipient: testRecipient,
-		Decimals:  6,
-		ChainID:   42431,
-	})
-
-	_, err = method.CreateCredential(context.Background(), challenge)
-	if err == nil || !strings.Contains(err.Error(), "chain id mismatch") {
-		t.Fatalf("CreateCredential() error = %v, want chain mismatch error", err)
-	}
-}
-
-func TestCreateCredential_HashCredentialBroadcasts(t *testing.T) {
-	t.Parallel()
-
-	rpc := &mockRPC{
-		chainID:     42431,
-		nonce:       7,
-		gasPrice:    "0x1",
-		estimateGas: "0x5208",
-		txHash:      testTxHash,
-	}
-	method, err := New(Config{
-		PrivateKey:     testPrivateKey,
-		RPC:            rpc,
-		ChainID:        42431,
-		CredentialType: tempo.CredentialTypeHash,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	challenge := buildChallenge(t, tempo.ChargeRequestParams{
-		Amount:         "0.50",
-		Currency:       testCurrency,
-		Recipient:      testRecipient,
-		Decimals:       6,
-		ChainID:        42431,
-		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
-	})
-
-	credential, err := method.CreateCredential(context.Background(), challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
-	}
-	if credential.Payload["type"] != string(tempo.CredentialTypeHash) {
-		t.Fatalf("credential.Payload[type] = %#v, want hash", credential.Payload["type"])
-	}
-	if credential.Payload["hash"] != testTxHash {
-		t.Fatalf("credential.Payload[hash] = %#v, want %q", credential.Payload["hash"], testTxHash)
-	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("len(rpc.sentRawTxs) = %d, want 1", len(rpc.sentRawTxs))
-	}
-	if !strings.HasPrefix(rpc.sentRawTxs[0], "0x76") {
-		t.Fatalf("sent raw tx prefix = %q, want 0x76", rpc.sentRawTxs[0][:4])
+			if credential.Payload["type"] != string(tt.wantType) {
+				t.Fatalf("credential.Payload[type] = %#v, want %q", credential.Payload["type"], tt.wantType)
+			}
+			if tt.wantPayload != "" && credential.Payload[tt.wantPayloadKey] != tt.wantPayload {
+				t.Fatalf("credential.Payload[%s] = %#v, want %q", tt.wantPayloadKey, credential.Payload[tt.wantPayloadKey], tt.wantPayload)
+			}
+			if tt.wantPayloadKey == "signature" {
+				if _, ok := credential.Payload[tt.wantPayloadKey].(string); !ok {
+					t.Fatalf("credential.Payload[%s] = %#v, want string", tt.wantPayloadKey, credential.Payload[tt.wantPayloadKey])
+				}
+			}
+			if tt.wantSourcePrefix != "" && !strings.HasPrefix(credential.Source, tt.wantSourcePrefix) {
+				t.Fatalf("credential.Source = %q, want prefix %q", credential.Source, tt.wantSourcePrefix)
+			}
+			if got := len(tt.rpc.sentRawTxs); got != tt.wantBroadcasts {
+				t.Fatalf("len(tt.rpc.sentRawTxs) = %d, want %d", got, tt.wantBroadcasts)
+			}
+			if tt.wantRawPrefix != "" && !strings.HasPrefix(tt.rpc.sentRawTxs[0], tt.wantRawPrefix) {
+				t.Fatalf("sent raw tx prefix = %q, want %q", tt.rpc.sentRawTxs[0][:4], tt.wantRawPrefix)
+			}
+		})
 	}
 }
 

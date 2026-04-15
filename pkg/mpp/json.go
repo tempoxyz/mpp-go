@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// CanonicalEqual compares two JSON-like values using their canonical JSON form.
-func CanonicalEqual(left, right any) bool {
+// JSONEqual compares two JSON-like values using Go's stable JSON encoding.
+func JSONEqual(left, right any) bool {
 	leftJSON, err := json.Marshal(left)
 	if err != nil {
 		return false
@@ -19,22 +19,35 @@ func CanonicalEqual(left, right any) bool {
 	return bytes.Equal(leftJSON, rightJSON)
 }
 
-// ExtractPaymentAuthorization returns the Payment credential from an
-// Authorization header. It tolerates comma-separated schemes and ignores
-// non-Payment values.
-func ExtractPaymentAuthorization(header string) string {
-	for _, scheme := range strings.Split(header, ",") {
-		scheme = strings.TrimSpace(scheme)
-		if len(scheme) >= len("Payment ") && strings.EqualFold(scheme[:len("Payment")], "Payment") {
-			if len(scheme) > len("Payment") && scheme[len("Payment")] == ' ' {
-				return scheme
-			}
+// Deprecated: use JSONEqual.
+func CanonicalEqual(left, right any) bool {
+	return JSONEqual(left, right)
+}
+
+// ExtractAuthorizationScheme returns the first authorization value that matches
+// the requested scheme from a possibly merged Authorization header.
+func ExtractAuthorizationScheme(header, scheme string) string {
+	for _, value := range SplitAuthenticate(header) {
+		name, _, ok := strings.Cut(strings.TrimSpace(value), " ")
+		if ok && strings.EqualFold(name, scheme) {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
 }
 
-// Deprecated: use ExtractPaymentAuthorization.
+// FindPaymentAuthorization returns the Payment credential from an Authorization
+// header. It tolerates comma-separated schemes and ignores non-Payment values.
+func FindPaymentAuthorization(header string) string {
+	return ExtractAuthorizationScheme(header, "Payment")
+}
+
+// Deprecated: use FindPaymentAuthorization.
+func ExtractPaymentAuthorization(header string) string {
+	return FindPaymentAuthorization(header)
+}
+
+// Deprecated: use FindPaymentAuthorization.
 func ExtractPaymentScheme(header string) string {
-	return ExtractPaymentAuthorization(header)
+	return FindPaymentAuthorization(header)
 }

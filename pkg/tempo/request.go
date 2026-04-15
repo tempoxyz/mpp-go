@@ -3,6 +3,7 @@ package tempo
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -12,7 +13,9 @@ import (
 type ChargeMode string
 
 const (
+	// ChargeModePull allows clients to return a signed transaction credential.
 	ChargeModePull ChargeMode = "pull"
+	// ChargeModePush allows clients to broadcast first and return a hash credential.
 	ChargeModePush ChargeMode = "push"
 )
 
@@ -20,48 +23,101 @@ const (
 type CredentialType string
 
 const (
+	// CredentialTypeTransaction carries a signed Tempo transaction.
 	CredentialTypeTransaction CredentialType = "transaction"
-	CredentialTypeHash        CredentialType = "hash"
+	// CredentialTypeHash carries a submitted Tempo transaction hash.
+	CredentialTypeHash CredentialType = "hash"
+	// CredentialTypeProof carries a zero-amount proof signature.
+	CredentialTypeProof CredentialType = "proof"
 )
+
+// Split is a canonical additional transfer nested under methodDetails.splits.
+type Split struct {
+	// Amount is the base-unit amount routed to this split recipient.
+	Amount string
+	// Memo is an optional split-specific Tempo memo.
+	Memo string
+	// Recipient is the split recipient address.
+	Recipient string
+}
+
+// SplitParams are the human-friendly inputs used to build a canonical Split.
+type SplitParams struct {
+	// Amount is the human-readable amount routed to this split recipient.
+	Amount string
+	// Memo is an optional split-specific Tempo memo.
+	Memo string
+	// Recipient is the split recipient address.
+	Recipient string
+}
 
 // MethodDetails holds Tempo-specific request fields nested under methodDetails.
 type MethodDetails struct {
-	ChainID        *int64
-	FeePayer       bool
-	FeePayerURL    string
-	Memo           string
+	// ChainID binds the charge to a specific Tempo chain when present.
+	ChainID *int64
+	// FeePayer enables the sponsored transaction flow.
+	FeePayer bool
+	// FeePayerURL points at a remote fee-payer signer.
+	FeePayerURL string
+	// Memo overrides the default attribution memo for the primary transfer.
+	Memo string
+	// Splits lists any additional transfers included in the charge.
+	Splits []Split
+	// SupportedModes restricts which credential submission modes are allowed.
 	SupportedModes []ChargeMode
 }
 
 // ChargeRequest is the canonical Tempo request shape embedded in a Challenge.
 type ChargeRequest struct {
-	Amount        string
-	Currency      string
-	Recipient     string
-	Description   string
-	ExternalID    string
+	// Amount is the canonical base-unit amount.
+	Amount string
+	// Currency is the token contract address.
+	Currency string
+	// Recipient is the primary payee address.
+	Recipient string
+	// Description is a human-readable challenge description.
+	Description string
+	// ExternalID is application metadata echoed into receipts.
+	ExternalID string
+	// MethodDetails stores Tempo-specific extensions for the charge.
 	MethodDetails MethodDetails
 }
 
 // ChargeRequestParams are the human-friendly inputs used to build a ChargeRequest.
 type ChargeRequestParams struct {
-	Amount         string
-	Currency       string
-	Recipient      string
-	Decimals       int
-	Description    string
-	ExternalID     string
-	ChainID        int64
-	FeePayer       bool
-	FeePayerURL    string
-	Memo           string
+	// Amount is the human-readable decimal amount.
+	Amount string
+	// Currency is the token contract address.
+	Currency string
+	// Recipient is the primary payee address.
+	Recipient string
+	// Decimals controls how Amount values are converted to base units.
+	Decimals int
+	// Description is copied into the challenge for display.
+	Description string
+	// ExternalID is opaque application metadata echoed into receipts.
+	ExternalID string
+	// ChainID binds the charge to a specific Tempo chain when set.
+	ChainID int64
+	// FeePayer enables the sponsored transaction flow.
+	FeePayer bool
+	// FeePayerURL points at a remote fee-payer signer.
+	FeePayerURL string
+	// Memo overrides the default attribution memo for the primary transfer.
+	Memo string
+	// Splits lists any additional transfers included in the charge.
+	Splits []SplitParams
+	// SupportedModes restricts which credential submission modes are allowed.
 	SupportedModes []ChargeMode
 }
 
 // ChargeCredentialPayload is the Tempo-specific payload carried by a Credential.
 type ChargeCredentialPayload struct {
-	Type      CredentialType
-	Hash      string
+	// Type selects the payload variant.
+	Type CredentialType
+	// Hash stores the submitted transaction hash for push flows.
+	Hash string
+	// Signature stores the raw transaction or proof signature.
 	Signature string
 }
 
@@ -96,6 +152,10 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err != nil {
 		return ChargeRequest{}, err
 	}
+	splits, err := normalizeSplits(params.Splits, decimals, amount)
+	if err != nil {
+		return ChargeRequest{}, err
+	}
 	request := ChargeRequest{
 		Amount:      amount,
 		Currency:    currency,
@@ -106,6 +166,7 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 			FeePayer:       params.FeePayer,
 			FeePayerURL:    params.FeePayerURL,
 			Memo:           memo,
+			Splits:         splits,
 			SupportedModes: append([]ChargeMode(nil), params.SupportedModes...),
 		},
 	}
@@ -128,6 +189,9 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 	if request.Amount == "" || request.Currency == "" || request.Recipient == "" {
 		return ChargeRequest{}, fmt.Errorf("tempo: charge request requires amount, currency, and recipient")
 	}
+	if _, err := parseBaseUnitAmount(request.Amount); err != nil {
+		return ChargeRequest{}, err
+	}
 	var err error
 	request.Currency, err = normalizeAddress("currency", request.Currency)
 	if err != nil {
@@ -147,7 +211,14 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		if err != nil {
 			return ChargeRequest{}, err
 		}
+		request.MethodDetails.Splits, err = parseSplits(raw["splits"])
+		if err != nil {
+			return ChargeRequest{}, err
+		}
 		request.MethodDetails.SupportedModes = parseModes(raw["supportedModes"])
+	}
+	if err := validateCanonicalSplits(request.Amount, request.MethodDetails.Splits); err != nil {
+		return ChargeRequest{}, err
 	}
 	return request, nil
 }
@@ -168,6 +239,12 @@ func ParseChargeCredentialPayload(input map[string]any) (ChargeCredentialPayload
 			return ChargeCredentialPayload{}, fmt.Errorf("tempo: transaction credential payload is missing signature")
 		}
 		return ChargeCredentialPayload{Type: typeValue, Signature: signature}, nil
+	case CredentialTypeProof:
+		signature := asString(input["signature"])
+		if signature == "" {
+			return ChargeCredentialPayload{}, fmt.Errorf("tempo: proof credential payload is missing signature")
+		}
+		return ChargeCredentialPayload{Type: typeValue, Signature: signature}, nil
 	default:
 		return ChargeCredentialPayload{}, fmt.Errorf("tempo: unsupported credential payload type %q", typeValue)
 	}
@@ -178,6 +255,8 @@ func (p ChargeCredentialPayload) Map() map[string]any {
 	switch p.Type {
 	case CredentialTypeHash:
 		return map[string]any{"type": string(p.Type), "hash": p.Hash}
+	case CredentialTypeProof:
+		return map[string]any{"type": string(CredentialTypeProof), "signature": p.Signature}
 	default:
 		return map[string]any{"type": string(CredentialTypeTransaction), "signature": p.Signature}
 	}
@@ -185,6 +264,9 @@ func (p ChargeCredentialPayload) Map() map[string]any {
 
 // Allows reports whether the request accepts the supplied credential type.
 func (r ChargeRequest) Allows(credentialType CredentialType) bool {
+	if credentialType == CredentialTypeProof {
+		return true
+	}
 	if len(r.MethodDetails.SupportedModes) == 0 {
 		return true
 	}
@@ -224,6 +306,20 @@ func (r ChargeRequest) Map() map[string]any {
 	}
 	if r.MethodDetails.Memo != "" {
 		methodDetails["memo"] = r.MethodDetails.Memo
+	}
+	if len(r.MethodDetails.Splits) > 0 {
+		splits := make([]map[string]any, 0, len(r.MethodDetails.Splits))
+		for _, split := range r.MethodDetails.Splits {
+			entry := map[string]any{
+				"amount":    split.Amount,
+				"recipient": split.Recipient,
+			}
+			if split.Memo != "" {
+				entry["memo"] = split.Memo
+			}
+			splits = append(splits, entry)
+		}
+		methodDetails["splits"] = splits
 	}
 	if len(r.MethodDetails.SupportedModes) > 0 {
 		modes := make([]string, 0, len(r.MethodDetails.SupportedModes))
@@ -343,6 +439,122 @@ func parseModes(value any) []ChargeMode {
 		}
 	}
 	return modes
+}
+
+func normalizeSplits(splits []SplitParams, decimals int, totalAmount string) ([]Split, error) {
+	if len(splits) == 0 {
+		return nil, nil
+	}
+	if len(splits) > 10 {
+		return nil, fmt.Errorf("tempo: splits must contain at most 10 entries")
+	}
+	canonical := make([]Split, 0, len(splits))
+	for _, split := range splits {
+		amount, err := parseUnitsString(split.Amount, decimals)
+		if err != nil {
+			return nil, err
+		}
+		recipient, err := normalizeAddress("split recipient", split.Recipient)
+		if err != nil {
+			return nil, err
+		}
+		memo, err := normalizeMemo(split.Memo)
+		if err != nil {
+			return nil, err
+		}
+		canonical = append(canonical, Split{Amount: amount, Recipient: recipient, Memo: memo})
+	}
+	if err := validateCanonicalSplits(totalAmount, canonical); err != nil {
+		return nil, err
+	}
+	return canonical, nil
+}
+
+func parseSplits(value any) ([]Split, error) {
+	if value == nil {
+		return nil, nil
+	}
+	var rawSplits []map[string]any
+	switch typed := value.(type) {
+	case []any:
+		rawSplits = make([]map[string]any, 0, len(typed))
+		for _, rawSplit := range typed {
+			splitMap, ok := rawSplit.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("tempo: split must be an object")
+			}
+			rawSplits = append(rawSplits, splitMap)
+		}
+	case []map[string]any:
+		rawSplits = typed
+	default:
+		return nil, fmt.Errorf("tempo: splits must be an array")
+	}
+	if len(rawSplits) == 0 {
+		return nil, fmt.Errorf("tempo: splits must contain at least one entry")
+	}
+	if len(rawSplits) > 10 {
+		return nil, fmt.Errorf("tempo: splits must contain at most 10 entries")
+	}
+	splits := make([]Split, 0, len(rawSplits))
+	for _, splitMap := range rawSplits {
+		amount := asString(splitMap["amount"])
+		if _, err := parseBaseUnitAmount(amount); err != nil {
+			return nil, err
+		}
+		recipient, err := normalizeAddress("split recipient", asString(splitMap["recipient"]))
+		if err != nil {
+			return nil, err
+		}
+		memo, err := normalizeMemo(asString(splitMap["memo"]))
+		if err != nil {
+			return nil, err
+		}
+		splits = append(splits, Split{Amount: amount, Recipient: recipient, Memo: memo})
+	}
+	return splits, nil
+}
+
+func validateCanonicalSplits(totalAmount string, splits []Split) error {
+	if len(splits) == 0 {
+		return nil
+	}
+	total, err := parseBaseUnitAmount(totalAmount)
+	if err != nil {
+		return err
+	}
+	splitTotal := new(big.Int)
+	for _, split := range splits {
+		amount, err := parseBaseUnitAmount(split.Amount)
+		if err != nil {
+			return err
+		}
+		if amount.Sign() <= 0 {
+			return fmt.Errorf("tempo: split amounts must be positive")
+		}
+		splitTotal.Add(splitTotal, amount)
+	}
+	if splitTotal.Cmp(total) >= 0 {
+		return fmt.Errorf("tempo: split total must be less than the total amount")
+	}
+	return nil
+}
+
+func parseBaseUnitAmount(value string) (*big.Int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("tempo: amount is required")
+	}
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return nil, fmt.Errorf("tempo: invalid amount %q", value)
+		}
+	}
+	parsed, ok := new(big.Int).SetString(value, 10)
+	if !ok {
+		return nil, fmt.Errorf("tempo: invalid amount %q", value)
+	}
+	return parsed, nil
 }
 
 func normalizeAddress(field, value string) (string, error) {

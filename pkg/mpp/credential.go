@@ -10,7 +10,7 @@ type Credential struct {
 
 // FromAuthorization parses an Authorization header value into a Credential.
 func FromAuthorization(header string) (*Credential, error) {
-	return ParseAuthorization(header)
+	return ParseCredential(header)
 }
 
 // ToAuthorization formats this Credential as an Authorization header value.

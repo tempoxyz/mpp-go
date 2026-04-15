@@ -13,16 +13,21 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 	t.Parallel()
 
 	request, err := NormalizeChargeRequest(ChargeRequestParams{
-		Amount:         "0.50",
-		Currency:       "0x20c0000000000000000000000000000000000001",
-		Recipient:      "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-		Decimals:       6,
-		Description:    "Coffee",
-		ExternalID:     "ext-123",
-		ChainID:        42431,
-		FeePayer:       true,
-		FeePayerURL:    "https://fee-payer.example.com",
-		Memo:           "0x" + strings.ToUpper(strings.Repeat("ab", 32)),
+		Amount:      "0.50",
+		Currency:    "0x20c0000000000000000000000000000000000001",
+		Recipient:   "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Decimals:    6,
+		Description: "Coffee",
+		ExternalID:  "ext-123",
+		ChainID:     42431,
+		FeePayer:    true,
+		FeePayerURL: "https://fee-payer.example.com",
+		Memo:        "0x" + strings.ToUpper(strings.Repeat("ab", 32)),
+		Splits: []SplitParams{{
+			Amount:    "0.10",
+			Memo:      "0x" + strings.Repeat("cd", 32),
+			Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+		}},
 		SupportedModes: []ChargeMode{ChargeModePull, ChargeModePush},
 	})
 	if err != nil {
@@ -43,6 +48,12 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 	}
 	if request.MethodDetails.FeePayerURL != "https://fee-payer.example.com" {
 		t.Fatalf("request.MethodDetails.FeePayerURL = %q", request.MethodDetails.FeePayerURL)
+	}
+	if got := len(request.MethodDetails.Splits); got != 1 {
+		t.Fatalf("len(request.MethodDetails.Splits) = %d, want 1", got)
+	}
+	if request.MethodDetails.Splits[0].Amount != "100000" {
+		t.Fatalf("request.MethodDetails.Splits[0].Amount = %q, want 100000", request.MethodDetails.Splits[0].Amount)
 	}
 
 	parsed, err := ParseChargeRequest(request.Map())
@@ -86,6 +97,23 @@ func TestNormalizeChargeRequest_RejectsNegativeDecimals(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "decimals must be non-negative") {
 		t.Fatalf("NormalizeChargeRequest() error = %v, want negative decimals error", err)
+	}
+}
+
+func TestNormalizeChargeRequest_RejectsInvalidSplits(t *testing.T) {
+	t.Parallel()
+
+	_, err := NormalizeChargeRequest(ChargeRequestParams{
+		Amount:    "1",
+		Currency:  "0x20c0000000000000000000000000000000000001",
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Splits: []SplitParams{{
+			Amount:    "1",
+			Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "split total must be less than the total amount") {
+		t.Fatalf("NormalizeChargeRequest() error = %v, want invalid split total", err)
 	}
 }
 

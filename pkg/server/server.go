@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
 // Intent is the interface for payment intents (server-side verification).
@@ -66,23 +67,31 @@ type ChargeParams struct {
 	Description string
 	// Memo sets a Tempo transfer memo when the method supports it.
 	Memo string
+	// Splits adds Tempo split-payment transfers under methodDetails.splits.
+	Splits []tempo.SplitParams
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
 	FeePayer bool
 	// FeePayerURL points at a remote fee-payer signer.
 	FeePayerURL string
+	// SupportedModes advertises the Tempo submission modes allowed for this challenge.
+	SupportedModes []tempo.ChargeMode
 	// ChainID overrides the method's default Tempo chain ID.
 	ChainID int
 	// Meta stores opaque Challenge metadata.
 	Meta map[string]string
+	// Deprecated: use Meta.
 	// Extra is a deprecated alias for Meta.
 	Extra map[string]string
 }
 
 // ChargeResult is either a Challenge or a verified (Credential, Receipt) pair.
 type ChargeResult struct {
-	Challenge  *mpp.Challenge
+	// Challenge is returned when the client still needs to satisfy the payment.
+	Challenge *mpp.Challenge
+	// Credential is the verified client credential on success.
 	Credential *mpp.Credential
-	Receipt    *mpp.Receipt
+	// Receipt acknowledges a successfully verified payment.
+	Receipt *mpp.Receipt
 }
 
 // IsChallenge returns true if the result is a 402 challenge.

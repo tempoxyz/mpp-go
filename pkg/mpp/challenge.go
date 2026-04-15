@@ -94,7 +94,7 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 
 // FromWWWAuthenticate parses a WWW-Authenticate header value into a Challenge.
 func FromWWWAuthenticate(header string) (*Challenge, error) {
-	return ParseWWWAuthenticate(header)
+	return ParseChallenge(header)
 }
 
 // ToWWWAuthenticate formats this Challenge as a WWW-Authenticate header value.

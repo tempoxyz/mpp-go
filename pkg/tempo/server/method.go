@@ -1,6 +1,6 @@
-// Package temposerver verifies Tempo charge Credentials and builds Tempo
+// Package chargeserver verifies Tempo charge Credentials and builds Tempo
 // charge Challenges for MPP HTTP servers.
-package temposerver
+package chargeserver
 
 import (
 	"fmt"
@@ -11,14 +11,23 @@ import (
 
 // MethodConfig configures a Tempo payment method for server-side charging.
 type MethodConfig struct {
-	Intent         *ChargeIntent
-	Currency       string
-	Recipient      string
-	Decimals       int
-	ChainID        int64
-	FeePayer       bool
-	FeePayerURL    string
-	Memo           string
+	// Intent verifies Tempo charge credentials for this method.
+	Intent *ChargeIntent
+	// Currency is the default token contract address for issued challenges.
+	Currency string
+	// Recipient is the default payee address for issued challenges.
+	Recipient string
+	// Decimals controls how human-readable amounts are normalized.
+	Decimals int
+	// ChainID binds issued challenges to a specific Tempo chain when set.
+	ChainID int64
+	// FeePayer enables sponsored transaction flows by default.
+	FeePayer bool
+	// FeePayerURL points at a remote co-signer when the server does not sign locally.
+	FeePayerURL string
+	// Memo overrides the default attribution memo generation.
+	Memo string
+	// SupportedModes limits the credential submission modes advertised to clients.
 	SupportedModes []tempo.ChargeMode
 }
 
@@ -115,10 +124,18 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		FeePayer:       params.FeePayer || m.feePayer,
 		FeePayerURL:    feePayerURL,
 		Memo:           memo,
-		SupportedModes: append([]tempo.ChargeMode(nil), m.supportedModes...),
+		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
+		SupportedModes: resolvedModes(params.SupportedModes, m.supportedModes),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return request.Map(), nil
+}
+
+func resolvedModes(requestModes, defaultModes []tempo.ChargeMode) []tempo.ChargeMode {
+	if len(requestModes) > 0 {
+		return append([]tempo.ChargeMode(nil), requestModes...)
+	}
+	return append([]tempo.ChargeMode(nil), defaultModes...)
 }

@@ -121,13 +121,13 @@ func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []erro
 	var challenges []mpp.Challenge
 	var errs []error
 	for _, h := range header.Values("WWW-Authenticate") {
-		for _, part := range mpp.SplitChallenges(h) {
+		for _, part := range mpp.SplitAuthenticate(h) {
 			part = strings.TrimSpace(part)
 			scheme, _, ok := strings.Cut(part, " ")
 			if !ok || !strings.EqualFold(scheme, "Payment") {
 				continue
 			}
-			ch, err := mpp.ParseWWWAuthenticate(part)
+			ch, err := mpp.ParseChallenge(part)
 			if err != nil {
 				errs = append(errs, err)
 				continue

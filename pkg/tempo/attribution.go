@@ -8,37 +8,50 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+const (
+	attributionTagSize         = 4
+	attributionVersionOffset   = attributionTagSize
+	attributionServerOffset    = 5
+	attributionServerSize      = 10
+	attributionClientOffset    = 15
+	attributionClientSize      = 10
+	attributionChallengeOffset = 25
+	attributionChallengeSize   = 7
+	attributionMemoSize        = 32
+	attributionMemoHexLength   = attributionMemoSize * 2
+)
+
 var attributionTag = crypto.Keccak256([]byte("mpp"))[:4]
 
 const attributionVersion = byte(0x01)
 
-// Attribution memos match the first-pass Tempo charge implementations in mppx
-// and pympp so Challenge binding stays consistent across SDKs.
+// Attribution memos match the Tempo charge reference implementations in mppx
+// and pympp so challenge binding stays consistent across SDKs.
 
 // EncodeAttribution builds the 32-byte Tempo attribution memo for a Challenge.
 func EncodeAttribution(serverID, clientID, challengeID string) string {
-	buf := make([]byte, 32)
-	copy(buf[0:4], attributionTag)
-	buf[4] = attributionVersion
-	copy(buf[5:15], attributionFingerprint(serverID))
+	buf := make([]byte, attributionMemoSize)
+	copy(buf[:attributionTagSize], attributionTag)
+	buf[attributionVersionOffset] = attributionVersion
+	copy(buf[attributionServerOffset:attributionServerOffset+attributionServerSize], attributionFingerprint(serverID))
 	if clientID != "" {
-		copy(buf[15:25], attributionFingerprint(clientID))
+		copy(buf[attributionClientOffset:attributionClientOffset+attributionClientSize], attributionFingerprint(clientID))
 	}
-	copy(buf[25:32], attributionChallengeNonce(challengeID))
+	copy(buf[attributionChallengeOffset:attributionChallengeOffset+attributionChallengeSize], attributionChallengeNonce(challengeID))
 	return "0x" + hex.EncodeToString(buf)
 }
 
 // IsAttributionMemo reports whether a memo uses the Tempo attribution layout.
 func IsAttributionMemo(memo string) bool {
 	memo = strings.TrimPrefix(strings.ToLower(memo), "0x")
-	if len(memo) != 64 {
+	if len(memo) != attributionMemoHexLength {
 		return false
 	}
 	raw, err := hex.DecodeString(memo)
 	if err != nil {
 		return false
 	}
-	return slices.Equal(raw[0:4], attributionTag) && raw[4] == attributionVersion
+	return slices.Equal(raw[:attributionTagSize], attributionTag) && raw[attributionVersionOffset] == attributionVersion
 }
 
 // VerifyAttributionServer reports whether a memo matches the Challenge realm fingerprint.
@@ -51,7 +64,7 @@ func VerifyAttributionServer(memo, serverID string) bool {
 	if err != nil {
 		return false
 	}
-	return slices.Equal(raw[5:15], attributionFingerprint(serverID))
+	return slices.Equal(raw[attributionServerOffset:attributionServerOffset+attributionServerSize], attributionFingerprint(serverID))
 }
 
 // VerifyAttributionChallenge reports whether a memo matches a specific Challenge ID.
@@ -64,19 +77,19 @@ func VerifyAttributionChallenge(memo, challengeID string) bool {
 	if err != nil {
 		return false
 	}
-	return slices.Equal(raw[25:32], attributionChallengeNonce(challengeID))
+	return slices.Equal(raw[attributionChallengeOffset:attributionChallengeOffset+attributionChallengeSize], attributionChallengeNonce(challengeID))
 }
 
 func attributionFingerprint(value string) []byte {
 	if value == "" {
-		return make([]byte, 10)
+		return make([]byte, attributionServerSize)
 	}
-	return crypto.Keccak256([]byte(value))[:10]
+	return crypto.Keccak256([]byte(value))[:attributionServerSize]
 }
 
 func attributionChallengeNonce(challengeID string) []byte {
 	if challengeID == "" {
-		return make([]byte, 7)
+		return make([]byte, attributionChallengeSize)
 	}
-	return crypto.Keccak256([]byte(challengeID))[:7]
+	return crypto.Keccak256([]byte(challengeID))[:attributionChallengeSize]
 }

@@ -24,8 +24,8 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
-	"github.com/tempoxyz/mpp-go/pkg/tempo/server"
+	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
+	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
@@ -85,7 +85,7 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := tempoclient.New(tempoclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -140,9 +140,9 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 	if authorization == "" {
 		t.Fatal("retry authorization header missing")
 	}
-	credential, err := mpp.ParseAuthorization(authorization)
+	credential, err := mpp.ParseCredential(authorization)
 	if err != nil {
-		t.Fatalf("ParseAuthorization() error = %v", err)
+		t.Fatalf("ParseCredential() error = %v", err)
 	}
 	if credential.Payload["type"] != string(tempo.CredentialTypeTransaction) {
 		t.Fatalf("credential payload type = %#v, want transaction", credential.Payload["type"])
@@ -162,7 +162,7 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, feePayerSigner)
 	defer server.Close()
 
-	clientMethod, err := tempoclient.New(tempoclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -193,9 +193,9 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 	if authorization == "" {
 		t.Fatal("retry authorization header missing")
 	}
-	credential, err := mpp.ParseAuthorization(authorization)
+	credential, err := mpp.ParseCredential(authorization)
 	if err != nil {
-		t.Fatalf("ParseAuthorization() error = %v", err)
+		t.Fatalf("ParseCredential() error = %v", err)
 	}
 	if credential.Payload["type"] != string(tempo.CredentialTypeTransaction) {
 		t.Fatalf("credential payload type = %#v, want transaction", credential.Payload["type"])
@@ -217,7 +217,7 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := tempoclient.New(tempoclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{
 		Signer:         payerSigner,
 		RPCURL:         rpcURL,
 		ChainID:        int64(chainID),
@@ -249,9 +249,9 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	if authorization == "" {
 		t.Fatal("retry authorization header missing")
 	}
-	credential, err := mpp.ParseAuthorization(authorization)
+	credential, err := mpp.ParseCredential(authorization)
 	if err != nil {
-		t.Fatalf("ParseAuthorization() error = %v", err)
+		t.Fatalf("ParseCredential() error = %v", err)
 	}
 	if credential.Payload["type"] != string(tempo.CredentialTypeHash) {
 		t.Fatalf("credential payload type = %#v, want hash", credential.Payload["type"])
@@ -491,7 +491,7 @@ func newSigner(t *testing.T) *temposigner.Signer {
 func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *temposigner.Signer) *httptest.Server {
 	t.Helper()
 
-	intent, err := temposerver.NewChargeIntent(temposerver.ChargeIntentConfig{
+	intent, err := chargeserver.NewChargeIntent(chargeserver.ChargeIntentConfig{
 		RPCURL:         rpcURL,
 		FeePayerSigner: feePayerSigner,
 	})
@@ -499,20 +499,20 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		t.Fatalf("NewChargeIntent() error = %v", err)
 	}
 
-	basicMethod := temposerver.NewMethod(temposerver.MethodConfig{
+	basicMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
 		Intent:    intent,
 		Currency:  integrationCurrency,
 		Recipient: integrationRecipient,
 		ChainID:   int64(chainID),
 	})
-	feePayerMethod := temposerver.NewMethod(temposerver.MethodConfig{
+	feePayerMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
 		Intent:    intent,
 		Currency:  integrationCurrency,
 		Recipient: integrationRecipient,
 		ChainID:   int64(chainID),
 		FeePayer:  true,
 	})
-	hashMethod := temposerver.NewMethod(temposerver.MethodConfig{
+	hashMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
 		Intent:         intent,
 		Currency:       integrationCurrency,
 		Recipient:      integrationRecipient,

@@ -8,9 +8,6 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
-// defaultExpiry is 5 minutes from now.
-const defaultExpiry = 5 * time.Minute
-
 // VerifyParams contains the parameters for VerifyOrChallenge.
 type VerifyParams struct {
 	// Authorization is the incoming Authorization header value.
@@ -90,13 +87,13 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 
 	// 2. Extract the Payment credential from Authorization.
-	authHeader := mpp.ExtractPaymentAuthorization(params.Authorization)
+	authHeader := mpp.FindPaymentAuthorization(params.Authorization)
 	if authHeader == "" {
 		return &VerifyResult{Challenge: challenge}, nil
 	}
 
 	// 3. Parse credential.
-	credential, err := mpp.ParseAuthorization(authHeader)
+	credential, err := mpp.ParseCredential(authHeader)
 	if err != nil {
 		return nil, mpp.ErrMalformedCredential(err.Error())
 	}
@@ -136,7 +133,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return nil, mpp.ErrInvalidChallenge(echoed.ID, "intent mismatch")
 	}
 
-	if !mpp.CanonicalEqual(echoedRequest, params.Request) {
+	if !mpp.JSONEqual(echoedRequest, params.Request) {
 		return nil, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential request does not match this route's requirements",

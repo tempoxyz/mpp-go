@@ -1,41 +1,71 @@
 package mpp
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestParseAuthorization_RoundTripsOpaque(t *testing.T) {
+func TestSplitAuthenticate(t *testing.T) {
 	t.Parallel()
 
-	cred := &Credential{
-		Challenge: ChallengeEcho{
-			ID:      "challenge-id",
-			Realm:   "api.example.com",
-			Method:  "tempo",
-			Intent:  "charge",
-			Request: b64EncodeAny(map[string]any{"amount": "100", "currency": "0xabc"}),
-			Opaque:  map[string]string{"trace": "123", "route": "paid"},
+	payment := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).ToWWWAuthenticate("realm")
+
+	tests := []struct {
+		name   string
+		header string
+		want   []string
+	}{
+		{
+			name:   "empty header",
+			header: "",
+			want:   nil,
 		},
-		Payload: map[string]any{"type": "hash", "hash": "0xabc123"},
-		Source:  "did:pkh:eip155:42431:0x1234",
+		{
+			name:   "single payment challenge",
+			header: payment,
+			want:   []string{payment},
+		},
+		{
+			name:   "merged schemes",
+			header: `Bearer realm="example", ` + payment,
+			want:   []string{`Bearer realm="example"`, payment},
+		},
+		{
+			name:   "quoted commas stay inside one scheme",
+			header: `Digest realm="alpha,beta", nonce="123", ` + payment,
+			want:   []string{`Digest realm="alpha,beta", nonce="123"`, payment},
+		},
+		{
+			name:   "escaped quotes do not break splitting",
+			header: `Digest realm="alpha\"beta,beta", nonce="123", ` + payment,
+			want:   []string{`Digest realm="alpha\"beta,beta", nonce="123"`, payment},
+		},
 	}
 
-	parsed, err := ParseAuthorization(cred.ToAuthorization())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(parsed.Challenge.Opaque) != len(cred.Challenge.Opaque) {
-		t.Fatalf("opaque map length mismatch: got %d want %d", len(parsed.Challenge.Opaque), len(cred.Challenge.Opaque))
-	}
-	for key, value := range cred.Challenge.Opaque {
-		if parsed.Challenge.Opaque[key] != value {
-			t.Fatalf("opaque[%q] = %q, want %q", key, parsed.Challenge.Opaque[key], value)
-		}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, split := range []struct {
+				name string
+				fn   func(string) []string
+			}{
+				{name: "SplitAuthenticate", fn: SplitAuthenticate},
+				{name: "SplitChallenges", fn: SplitChallenges},
+				{name: "SplitWWWAuthenticate", fn: SplitWWWAuthenticate},
+			} {
+				got := split.fn(tt.header)
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Fatalf("%s() = %#v, want %#v", split.name, got, tt.want)
+				}
+			}
+		})
 	}
 }
 
-func TestExtractPaymentAuthorization(t *testing.T) {
+func TestFindPaymentAuthorization(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -49,7 +79,7 @@ func TestExtractPaymentAuthorization(t *testing.T) {
 			want:   "Payment abc123",
 		},
 		{
-			name:   "comma separated schemes",
+			name:   "merged schemes",
 			header: "Bearer token, Payment abc123, Basic xyz",
 			want:   "Payment abc123",
 		},
@@ -59,6 +89,11 @@ func TestExtractPaymentAuthorization(t *testing.T) {
 			want:   "payment abc123",
 		},
 		{
+			name:   "quoted comma before payment",
+			header: `Digest realm="alpha,beta", nonce="123", Payment abc123`,
+			want:   "Payment abc123",
+		},
+		{
 			name:   "missing payment scheme",
 			header: "Bearer token, Basic xyz",
 			want:   "",
@@ -66,104 +101,246 @@ func TestExtractPaymentAuthorization(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tc := tt
-		t.Run(tc.name, func(t *testing.T) {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := ExtractPaymentAuthorization(tc.header); got != tc.want {
-				t.Fatalf("ExtractPaymentAuthorization() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestSplitChallenges(t *testing.T) {
-	t.Parallel()
-
-	tempoChallenge := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).ToWWWAuthenticate("realm")
-	tests := []struct {
-		name   string
-		header string
-		want   []string
-	}{
-		{
-			name:   "merged bearer and payment",
-			header: `Bearer realm="example", ` + tempoChallenge,
-			want:   []string{`Bearer realm="example"`, tempoChallenge},
-		},
-		{
-			name:   "quoted commas stay inside one challenge",
-			header: `Digest realm="alpha,beta", nonce="123", ` + tempoChallenge,
-			want:   []string{`Digest realm="alpha,beta", nonce="123"`, tempoChallenge},
-		},
-		{
-			name:   "single payment challenge",
-			header: tempoChallenge,
-			want:   []string{tempoChallenge},
-		},
-	}
-
-	for _, tt := range tests {
-		tc := tt
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			parts := SplitChallenges(tc.header)
-			if len(parts) != len(tc.want) {
-				t.Fatalf("len(parts) = %d, want %d (%#v)", len(parts), len(tc.want), parts)
-			}
-			for i := range tc.want {
-				if parts[i] != tc.want[i] {
-					t.Fatalf("parts[%d] = %q, want %q", i, parts[i], tc.want[i])
+			for _, extract := range []struct {
+				name string
+				fn   func(string) string
+			}{
+				{name: "FindPaymentAuthorization", fn: FindPaymentAuthorization},
+				{name: "ExtractPaymentAuthorization", fn: ExtractPaymentAuthorization},
+				{name: "ExtractPaymentScheme", fn: ExtractPaymentScheme},
+			} {
+				got := extract.fn(tt.header)
+				if got != tt.want {
+					t.Fatalf("%s() = %q, want %q", extract.name, got, tt.want)
 				}
 			}
 		})
 	}
 }
 
-func TestParseWWWAuthenticate_RequiresFields(t *testing.T) {
+func TestParseChallenge(t *testing.T) {
 	t.Parallel()
 
+	minimal := NewChallenge("secret", "api.example.com", "tempo", "charge", nil)
+	minimal.Request = map[string]any{}
+	optional := NewChallenge(
+		"secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "100", "currency": "0xabc"},
+		WithExpires("2026-01-01T00:00:00.000Z"),
+		WithDigest("sha-256=:abc123:"),
+		WithDescription("Pay for API access"),
+		WithMeta(map[string]string{"trace": "123", "route": "paid"}),
+	)
+
 	tests := []struct {
-		name   string
-		header string
+		name    string
+		header  string
+		want    *Challenge
+		wantErr string
 	}{
 		{
-			name:   "missing realm and request",
-			header: `Payment id="abc", method="tempo", intent="charge"`,
+			name:   "roundtrip with empty request",
+			header: minimal.ToWWWAuthenticate("api.example.com"),
+			want:   minimal,
 		},
 		{
-			name:   "missing request",
-			header: `Payment id="abc", realm="api.example.com", method="tempo", intent="charge"`,
+			name:   "roundtrip with optional fields",
+			header: optional.ToWWWAuthenticate("api.example.com"),
+			want:   optional,
+		},
+		{
+			name:    "invalid scheme",
+			header:  `Bearer realm="api.example.com"`,
+			wantErr: `expected Payment scheme`,
+		},
+		{
+			name:    "missing required fields",
+			header:  `Payment id="abc", method="tempo", intent="charge"`,
+			wantErr: `missing required challenge fields`,
+		},
+		{
+			name:    "duplicate auth params",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", intent="session", request="e30"`,
+			wantErr: `duplicate auth-param`,
+		},
+		{
+			name:    "invalid request encoding",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="not-base64"`,
+			wantErr: `invalid request field`,
 		},
 	}
 
 	for _, tt := range tests {
-		tc := tt
-		t.Run(tc.name, func(t *testing.T) {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := ParseWWWAuthenticate(tc.header)
-			if err == nil || !strings.Contains(err.Error(), "missing required challenge fields") {
-				t.Fatalf("ParseWWWAuthenticate() error = %v, want missing required fields", err)
+			for _, parse := range []struct {
+				name string
+				fn   func(string) (*Challenge, error)
+			}{
+				{name: "ParseChallenge", fn: ParseChallenge},
+				{name: "ParseWWWAuthenticate", fn: ParseWWWAuthenticate},
+				{name: "FromWWWAuthenticate", fn: FromWWWAuthenticate},
+			} {
+				got, err := parse.fn(tt.header)
+				if tt.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+						t.Fatalf("%s() error = %v, want substring %q", parse.name, err, tt.wantErr)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("%s() unexpected error: %v", parse.name, err)
+				}
+				assertChallengeEqual(t, got, tt.want)
+				if got.Request == nil {
+					t.Fatalf("%s() returned nil Request, want empty object", parse.name)
+				}
 			}
 		})
 	}
 }
 
-func TestChallengeToWWWAuthenticate_AlwaysIncludesRequest(t *testing.T) {
+func TestParseCredential(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge("secret", "realm", "tempo", "charge", nil)
-	header := challenge.ToWWWAuthenticate("realm")
-	if !strings.Contains(header, `request="`) {
-		t.Fatalf("header = %q, want request auth-param", header)
+	credential := &Credential{
+		Challenge: ChallengeEcho{
+			ID:      "challenge-id",
+			Realm:   "api.example.com",
+			Method:  "tempo",
+			Intent:  "charge",
+			Request: b64EncodeAny(map[string]any{"amount": "100", "currency": "0xabc"}),
+			Opaque:  map[string]string{"trace": "123", "route": "paid"},
+		},
+		Payload: map[string]any{"type": "hash", "hash": "0xabc123"},
+		Source:  "did:pkh:eip155:42431:0x1234",
 	}
-	parsed, err := ParseWWWAuthenticate(header)
-	if err != nil {
-		t.Fatalf("ParseWWWAuthenticate() error = %v", err)
+
+	tests := []struct {
+		name    string
+		header  string
+		want    *Credential
+		wantErr string
+	}{
+		{
+			name:   "roundtrip payment credential",
+			header: credential.ToAuthorization(),
+			want:   credential,
+		},
+		{
+			name:   "merged authorization header",
+			header: `Digest realm="alpha,beta", nonce="123", ` + credential.ToAuthorization(),
+			want:   credential,
+		},
+		{
+			name:    "missing payment scheme",
+			header:  "Bearer token",
+			wantErr: `expected Payment scheme`,
+		},
+		{
+			name:    "missing challenge object",
+			header:  "Payment " + b64EncodeAny(map[string]any{"payload": map[string]any{}}),
+			wantErr: `credential missing required field: challenge`,
+		},
+		{
+			name:    "challenge must be object",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": "not-an-object", "payload": map[string]any{}}),
+			wantErr: `credential challenge must be an object`,
+		},
+		{
+			name:    "missing payload",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo", "intent": "charge", "request": "e30"}}),
+			wantErr: `credential missing required field: payload`,
+		},
+		{
+			name:    "missing echoed challenge id",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"method": "tempo", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
+			wantErr: `credential challenge missing required field: id`,
+		},
+		{
+			name:    "invalid opaque encoding",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo", "intent": "charge", "request": "e30", "opaque": "not-base64"}, "payload": map[string]any{}}),
+			wantErr: `invalid credential opaque field`,
+		},
 	}
-	if parsed.Request == nil {
-		t.Fatal("parsed.Request is nil, want empty request object")
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, parse := range []struct {
+				name string
+				fn   func(string) (*Credential, error)
+			}{
+				{name: "ParseCredential", fn: ParseCredential},
+				{name: "ParseAuthorization", fn: ParseAuthorization},
+				{name: "FromAuthorization", fn: FromAuthorization},
+			} {
+				got, err := parse.fn(tt.header)
+				if tt.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+						t.Fatalf("%s() error = %v, want substring %q", parse.name, err, tt.wantErr)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("%s() unexpected error: %v", parse.name, err)
+				}
+				assertCredentialEqual(t, got, tt.want)
+			}
+		})
+	}
+}
+
+func assertChallengeEqual(t *testing.T, got, want *Challenge) {
+	t.Helper()
+
+	if got == nil || want == nil {
+		if got != want {
+			t.Fatalf("challenge mismatch: got %#v want %#v", got, want)
+		}
+		return
+	}
+	if got.ID != want.ID || got.Realm != want.Realm || got.Method != want.Method || got.Intent != want.Intent {
+		t.Fatalf("challenge identity mismatch: got %#v want %#v", got, want)
+	}
+	if got.RequestB64 != want.RequestB64 || got.Digest != want.Digest || got.Expires != want.Expires || got.Description != want.Description {
+		t.Fatalf("challenge metadata mismatch: got %#v want %#v", got, want)
+	}
+	if !JSONEqual(got.Request, want.Request) {
+		t.Fatalf("challenge request mismatch: got %#v want %#v", got.Request, want.Request)
+	}
+	if !reflect.DeepEqual(got.Opaque, want.Opaque) {
+		t.Fatalf("challenge opaque mismatch: got %#v want %#v", got.Opaque, want.Opaque)
+	}
+}
+
+func assertCredentialEqual(t *testing.T, got, want *Credential) {
+	t.Helper()
+
+	if got == nil || want == nil {
+		if got != want {
+			t.Fatalf("credential mismatch: got %#v want %#v", got, want)
+		}
+		return
+	}
+	if got.Source != want.Source {
+		t.Fatalf("credential source mismatch: got %q want %q", got.Source, want.Source)
+	}
+	if !reflect.DeepEqual(got.Challenge, want.Challenge) {
+		t.Fatalf("credential challenge mismatch: got %#v want %#v", got.Challenge, want.Challenge)
+	}
+	if !JSONEqual(got.Payload, want.Payload) {
+		t.Fatalf("credential payload mismatch: got %#v want %#v", got.Payload, want.Payload)
 	}
 }

@@ -1,5 +1,5 @@
-// Package tempoclient creates Tempo charge Credentials for MPP HTTP clients.
-package tempoclient
+// Package chargeclient creates Tempo charge Credentials for MPP HTTP clients.
+package chargeclient
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -22,12 +23,19 @@ const feePayerMarker = "feefeefeefee"
 
 // Config configures a Tempo charge client method.
 type Config struct {
-	Signer         *temposigner.Signer
-	PrivateKey     string
-	RPC            tempo.RPCClient
-	RPCURL         string
-	ChainID        int64
-	ClientID       string
+	// Signer signs Tempo transactions and proof payloads.
+	Signer *temposigner.Signer
+	// PrivateKey constructs Signer when Signer is nil.
+	PrivateKey string
+	// RPC overrides the Tempo JSON-RPC client used for signing flows.
+	RPC tempo.RPCClient
+	// RPCURL is used to build an RPC client when RPC is nil.
+	RPCURL string
+	// ChainID constrains the challenge to a specific Tempo chain when set.
+	ChainID int64
+	// ClientID is folded into automatically generated attribution memos.
+	ClientID string
+	// CredentialType selects transaction, hash, or proof credentials.
 	CredentialType tempo.CredentialType
 }
 
@@ -89,12 +97,6 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	if credentialType == "" {
 		credentialType = tempo.CredentialTypeTransaction
 	}
-	if !request.Allows(credentialType) {
-		return nil, fmt.Errorf("tempo client: credential type %q is not allowed for this challenge", credentialType)
-	}
-	if credentialType == tempo.CredentialTypeHash && request.MethodDetails.FeePayer {
-		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
-	}
 
 	rpc, rpcURL := m.resolveRPC(request)
 	if rpc == nil {
@@ -107,6 +109,29 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	}
 	if expected := m.expectedChainID(request); expected != 0 && int64(chainID) != expected {
 		return nil, fmt.Errorf("tempo client: chain id mismatch (rpc=%d, expected=%d)", chainID, expected)
+	}
+	if request.Amount == "0" {
+		signature, err := m.signProof(int64(chainID), challenge.ID)
+		if err != nil {
+			return nil, err
+		}
+		return &mpp.Credential{
+			Challenge: challenge.ToEcho(),
+			Payload: tempo.ChargeCredentialPayload{
+				Type:      tempo.CredentialTypeProof,
+				Signature: signature,
+			}.Map(),
+			Source: tempo.ProofSource(int64(chainID), m.signer.Address()),
+		}, nil
+	}
+	if !request.Allows(credentialType) {
+		return nil, fmt.Errorf("tempo client: credential type %q is not allowed for this challenge", credentialType)
+	}
+	if credentialType == tempo.CredentialTypeProof {
+		return nil, fmt.Errorf("tempo client: proof credentials are only valid for zero-amount challenges")
+	}
+	if credentialType == tempo.CredentialTypeHash && request.MethodDetails.FeePayer {
+		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
 	}
 
 	memo := request.MethodDetails.Memo
@@ -133,7 +158,7 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	return &mpp.Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   payload.Map(),
-		Source:    fmt.Sprintf("did:pkh:eip155:%d:%s", chainID, m.signer.Address().Hex()),
+		Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
 	}, nil
 }
 
@@ -144,16 +169,10 @@ func (m *Method) buildTransfer(
 	memo string,
 	chainID int64,
 ) (string, error) {
-	amount, ok := new(big.Int).SetString(request.Amount, 10)
-	if !ok {
-		return "", fmt.Errorf("tempo client: invalid amount %q", request.Amount)
-	}
-
-	dataHex, err := tempo.EncodeTransferWithMemo(request.Recipient, amount, memo)
+	transfers, err := buildTransfers(request, memo)
 	if err != nil {
 		return "", err
 	}
-	data := common.FromHex(dataHex)
 
 	gasPrice, err := m.gasPrice(ctx, rpc)
 	if err != nil {
@@ -161,16 +180,21 @@ func (m *Method) buildTransfer(
 	}
 	token := common.HexToAddress(request.Currency)
 	gasLimit := tempo.DefaultGasLimit
-	if estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex); err == nil && estimated+5_000 > gasLimit {
-		gasLimit = estimated + 5_000
+	if len(transfers) == 1 {
+		dataHex := transferDataHex(transfers[0])
+		if estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex); err == nil && estimated+5_000 > gasLimit {
+			gasLimit = estimated + 5_000
+		}
 	}
 
 	builder := tempotx.NewBuilder(big.NewInt(chainID)).
 		SetMaxFeePerGas(gasPrice).
 		SetMaxPriorityFeePerGas(new(big.Int).Set(gasPrice)).
 		SetGas(gasLimit).
-		SetNonceKey(big.NewInt(0)).
-		AddCall(token, big.NewInt(0), data)
+		SetNonceKey(big.NewInt(0))
+	for _, transfer := range transfers {
+		builder.AddCall(token, big.NewInt(0), common.FromHex(transferDataHex(transfer)))
+	}
 
 	if request.MethodDetails.FeePayer {
 		builder.
@@ -202,6 +226,63 @@ func (m *Method) buildTransfer(
 		return serialized + strings.TrimPrefix(strings.ToLower(m.signer.Address().Hex()), "0x") + feePayerMarker, nil
 	}
 	return serialized, nil
+}
+
+func (m *Method) signProof(chainID int64, challengeID string) (string, error) {
+	hash, err := tempo.ProofTypedDataHash(chainID, challengeID)
+	if err != nil {
+		return "", fmt.Errorf("tempo client: build proof payload: %w", err)
+	}
+	signature, err := m.signer.Sign(hash)
+	if err != nil {
+		return "", fmt.Errorf("tempo client: sign proof payload: %w", err)
+	}
+	raw := make([]byte, 65)
+	signature.R.FillBytes(raw[:32])
+	signature.S.FillBytes(raw[32:64])
+	raw[64] = signature.YParity
+	return hexutil.Encode(raw), nil
+}
+
+type transfer struct {
+	amount    *big.Int
+	memo      string
+	recipient string
+}
+
+func buildTransfers(request tempo.ChargeRequest, memo string) ([]transfer, error) {
+	totalAmount, ok := new(big.Int).SetString(request.Amount, 10)
+	if !ok {
+		return nil, fmt.Errorf("tempo client: invalid amount %q", request.Amount)
+	}
+	primaryAmount := new(big.Int).Set(totalAmount)
+	transfers := make([]transfer, 0, len(request.MethodDetails.Splits)+1)
+	for _, split := range request.MethodDetails.Splits {
+		splitAmount, ok := new(big.Int).SetString(split.Amount, 10)
+		if !ok {
+			return nil, fmt.Errorf("tempo client: invalid split amount %q", split.Amount)
+		}
+		primaryAmount.Sub(primaryAmount, splitAmount)
+		transfers = append(transfers, transfer{
+			amount:    splitAmount,
+			memo:      split.Memo,
+			recipient: split.Recipient,
+		})
+	}
+	transfers = append([]transfer{{
+		amount:    primaryAmount,
+		memo:      memo,
+		recipient: request.Recipient,
+	}}, transfers...)
+	return transfers, nil
+}
+
+func transferDataHex(transfer transfer) string {
+	if transfer.memo != "" {
+		dataHex, _ := tempo.EncodeTransferWithMemo(transfer.recipient, transfer.amount, transfer.memo)
+		return dataHex
+	}
+	return tempo.EncodeTransfer(transfer.recipient, transfer.amount)
 }
 
 // TODO(tempo-go): replace these JSON-RPC helpers with shared transaction-prep

@@ -1,4 +1,4 @@
-package temposerver
+package chargeserver
 
 import (
 	"context"
@@ -12,10 +12,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
+	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
@@ -36,6 +39,7 @@ type mockRPC struct {
 	nonce       uint64
 	gasPrice    string
 	estimateGas string
+	callResult  string
 	receipts    map[string]map[string]any
 	sentRawTxs  []string
 	onSend      func(raw string) (string, map[string]any, error)
@@ -70,6 +74,8 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 		return &temporpc.JSONRPCResponse{Result: m.gasPrice}, nil
 	case "eth_estimateGas":
 		return &temporpc.JSONRPCResponse{Result: m.estimateGas}, nil
+	case "eth_call":
+		return &temporpc.JSONRPCResponse{Result: m.callResult}, nil
 	case "eth_getTransactionReceipt":
 		hash := params[0].(string)
 		return &temporpc.JSONRPCResponse{Result: m.receipts[hash]}, nil
@@ -246,6 +252,304 @@ func TestChargeFlow_HashCredentialReplayProtected(t *testing.T) {
 	}
 }
 
+func TestChargeFlow_HashCredentialRequiresSource(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePush})
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeHash)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	credential.Source = ""
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "must include a source") {
+		t.Fatalf("Verify() error = %v, want missing source rejection", err)
+	}
+}
+
+func TestChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeHash)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	if credential.Payload["type"] != string(tempo.CredentialTypeProof) {
+		t.Fatalf("credential.Payload[type] = %#v, want proof", credential.Payload["type"])
+	}
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if receipt.Reference != challenge.ID {
+		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, challenge.ID)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil {
+		t.Fatal("expected proof replay-protection error on second verification")
+	}
+}
+
+func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	challenge := buildChallenge(t, request)
+
+	rootSigner, err := temposigner.NewSigner(testPrivateKey)
+	if err != nil {
+		t.Fatalf("NewSigner(root) error = %v", err)
+	}
+	accessKey, err := temposigner.NewSigner(feePayerKey)
+	if err != nil {
+		t.Fatalf("NewSigner(access key) error = %v", err)
+	}
+	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID)
+	if err != nil {
+		t.Fatalf("ProofTypedDataHash() error = %v", err)
+	}
+	v2Payload := make([]byte, 0, 1+len(proofHash.Bytes())+common.AddressLength)
+	v2Payload = append(v2Payload, keychain.KeychainSignatureType)
+	v2Payload = append(v2Payload, proofHash.Bytes()...)
+	v2Payload = append(v2Payload, rootSigner.Address().Bytes()...)
+	innerSignature, err := accessKey.Sign(crypto.Keccak256Hash(v2Payload))
+	if err != nil {
+		t.Fatalf("accessKey.Sign() error = %v", err)
+	}
+	rpc.callResult = encodeActiveKeyInfo(accessKey.Address(), time.Now().Add(time.Hour).Unix())
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload: tempo.ChargeCredentialPayload{
+			Type:      tempo.CredentialTypeProof,
+			Signature: hexutil.Encode(keychain.BuildKeychainSignature(innerSignature, rootSigner.Address())),
+		}.Map(),
+		Source: tempo.ProofSource(42431, rootSigner.Address()),
+	}
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if receipt.Reference != challenge.ID {
+		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, challenge.ID)
+	}
+}
+
+func TestChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name           string
+		params         tempo.ChargeRequestParams
+		credentialType tempo.CredentialType
+		wantReference  string
+	}{
+		{
+			name: "transaction receipt",
+			params: tempo.ChargeRequestParams{
+				Amount:     "0.50",
+				Currency:   testCurrency,
+				Recipient:  testRecipient,
+				Decimals:   6,
+				ChainID:    42431,
+				ExternalID: "ext-123",
+			},
+			credentialType: tempo.CredentialTypeTransaction,
+			wantReference:  testReceiptHash,
+		},
+		{
+			name: "hash receipt",
+			params: tempo.ChargeRequestParams{
+				Amount:         "0.50",
+				Currency:       testCurrency,
+				Recipient:      testRecipient,
+				Decimals:       6,
+				ChainID:        42431,
+				ExternalID:     "ext-123",
+				SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+			},
+			credentialType: tempo.CredentialTypeHash,
+			wantReference:  testReceiptHash,
+		},
+		{
+			name: "proof receipt",
+			params: tempo.ChargeRequestParams{
+				Amount:     "0",
+				Currency:   testCurrency,
+				Recipient:  testRecipient,
+				Decimals:   6,
+				ChainID:    42431,
+				ExternalID: "ext-123",
+			},
+			credentialType: tempo.CredentialTypeHash,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			request, err := tempo.NormalizeChargeRequest(tt.params)
+			if err != nil {
+				t.Fatalf("NormalizeChargeRequest() error = %v", err)
+			}
+			rpc := newMockRPC(request)
+			clientMethod := newClientMethod(t, rpc, tt.credentialType)
+			challenge := buildChallenge(t, request)
+
+			credential, err := clientMethod.CreateCredential(ctx, challenge)
+			if err != nil {
+				t.Fatalf("CreateCredential() error = %v", err)
+			}
+
+			intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+			if err != nil {
+				t.Fatalf("NewChargeIntent() error = %v", err)
+			}
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			if err != nil {
+				t.Fatalf("Verify() error = %v", err)
+			}
+			if receipt.ExternalID != tt.params.ExternalID {
+				t.Fatalf("receipt.ExternalID = %q, want %q", receipt.ExternalID, tt.params.ExternalID)
+			}
+			wantReference := tt.wantReference
+			if wantReference == "" {
+				wantReference = challenge.ID
+			}
+			if receipt.Reference != wantReference {
+				t.Fatalf("receipt.Reference = %q, want %q", receipt.Reference, wantReference)
+			}
+		})
+	}
+}
+
+func TestChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+		Splits: []tempo.SplitParams{
+			{Amount: "0.10", Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"},
+			{Amount: "0.05", Memo: "0x" + strings.Repeat("ab", 32), Recipient: "0x90f79bf6eb2c4f870365e785982e1f101e93b906"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if receipt.Reference != testReceiptHash {
+		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, testReceiptHash)
+	}
+}
+
+func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:         "0.50",
+		Currency:       testCurrency,
+		Recipient:      testRecipient,
+		Decimals:       6,
+		ChainID:        42431,
+		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+		Splits: []tempo.SplitParams{{
+			Amount:    "0.10",
+			Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		receipt := buildReceipt(raw, request, sender)
+		logs := append([]any(nil), receipt["logs"].([]any)...)
+		logs = append(logs, transferLog(request.Currency, sender.Hex(), request.Recipient, big.NewInt(1), ""))
+		receipt["logs"] = logs
+		return testReceiptHash, receipt, nil
+	}
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeHash)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "does not satisfy") {
+		t.Fatalf("Verify() error = %v, want receipt mismatch", err)
+	}
+}
+
 func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
@@ -305,9 +609,9 @@ func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
-func newClientMethod(t *testing.T, rpc tempo.RPCClient, credentialType tempo.CredentialType) *tempoclient.Method {
+func newClientMethod(t *testing.T, rpc tempo.RPCClient, credentialType tempo.CredentialType) *chargeclient.Method {
 	t.Helper()
-	method, err := tempoclient.New(tempoclient.Config{
+	method, err := chargeclient.New(chargeclient.Config{
 		PrivateKey:     testPrivateKey,
 		RPC:            rpc,
 		ChainID:        42431,
@@ -372,24 +676,60 @@ func newMockRPC(request tempo.ChargeRequest) *mockRPC {
 
 func buildReceipt(raw string, request tempo.ChargeRequest, sender common.Address) map[string]any {
 	tx, _ := tempotx.Deserialize(raw)
-	callData := common.Bytes2Hex(tx.Calls[0].Data)
-	amount, _ := new(big.Int).SetString(request.Amount, 10)
-	topics := []any{
-		tempo.TransferWithMemoTopic.Hex(),
-		addressTopic(sender.Hex()),
-		addressTopic(request.Recipient),
-		"0x" + callData[136:200],
+	logs := make([]any, 0, len(tx.Calls))
+	for _, call := range tx.Calls {
+		callData := common.Bytes2Hex(call.Data)
+		amount := new(big.Int)
+		amount.SetString(callData[72:136], 16)
+		recipient := common.HexToAddress("0x" + callData[32:72]).Hex()
+		topics := []any{
+			tempo.TransferTopic.Hex(),
+			addressTopic(sender.Hex()),
+			addressTopic(recipient),
+		}
+		if strings.HasPrefix(callData, tempo.TransferWithMemoSelector) {
+			topics[0] = tempo.TransferWithMemoTopic.Hex()
+			topics = append(topics, "0x"+callData[136:200])
+		}
+		logs = append(logs, transferLog(request.Currency, sender.Hex(), recipient, amount, asOptionalMemo(topics)))
 	}
 	return map[string]any{
 		"status": "0x1",
-		"logs": []any{
-			map[string]any{
-				"address": request.Currency,
-				"topics":  topics,
-				"data":    fmt.Sprintf("0x%064x", amount),
-			},
-		},
+		"logs":   logs,
 	}
+}
+
+func transferLog(currency, sender, recipient string, amount *big.Int, memo string) map[string]any {
+	topics := []any{
+		tempo.TransferTopic.Hex(),
+		addressTopic(sender),
+		addressTopic(recipient),
+	}
+	if memo != "" {
+		topics[0] = tempo.TransferWithMemoTopic.Hex()
+		topics = append(topics, memo)
+	}
+	return map[string]any{
+		"address": currency,
+		"topics":  topics,
+		"data":    fmt.Sprintf("0x%064x", amount),
+	}
+}
+
+func asOptionalMemo(topics []any) string {
+	if len(topics) >= 4 {
+		if memo, ok := topics[3].(string); ok {
+			return memo
+		}
+	}
+	return ""
+}
+
+func encodeActiveKeyInfo(accessKey common.Address, expiry int64) string {
+	result := make([]byte, 160)
+	copy(result[44:64], accessKey.Bytes())
+	new(big.Int).SetInt64(expiry).FillBytes(result[64:96])
+	return hexutil.Encode(result)
 }
 
 func addressTopic(address string) string {

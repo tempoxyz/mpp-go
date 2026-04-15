@@ -10,17 +10,21 @@ import (
 )
 
 var (
-	TransferTopic         = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+	// TransferTopic is the TIP-20 Transfer event topic hash.
+	TransferTopic = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+	// TransferWithMemoTopic is the Tempo TransferWithMemo event topic hash.
 	TransferWithMemoTopic = crypto.Keccak256Hash([]byte("TransferWithMemo(address,address,uint256,bytes32)"))
 )
 
 // TODO: Move shared TIP-20 transfer encoding and calldata/log matching helpers into tempo-go.
 // Both mpp-go and pympp now carry nearly identical Tempo-specific logic here.
 
+// EncodeTransfer builds TIP-20 transfer calldata for the supplied recipient and amount.
 func EncodeTransfer(recipient string, amount *big.Int) string {
 	return fmt.Sprintf("0x%s%s%s", TransferSelector, padAddress(recipient), padBigInt(amount))
 }
 
+// EncodeTransferWithMemo builds Tempo transfer-with-memo calldata for the supplied values.
 func EncodeTransferWithMemo(recipient string, amount *big.Int, memo string) (string, error) {
 	memo = strings.TrimPrefix(strings.ToLower(memo), "0x")
 	if len(memo) != 64 {
@@ -29,6 +33,7 @@ func EncodeTransferWithMemo(recipient string, amount *big.Int, memo string) (str
 	return fmt.Sprintf("0x%s%s%s%s", TransferWithMemoSelector, padAddress(recipient), padBigInt(amount), memo), nil
 }
 
+// MatchTransferCalldata reports whether calldata satisfies the canonical Tempo charge transfer.
 func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challengeID string) bool {
 	dataHex = strings.TrimPrefix(strings.ToLower(dataHex), "0x")
 	if len(dataHex) < 8+64+64 {
@@ -70,6 +75,7 @@ func padBigInt(value *big.Int) string {
 	return fmt.Sprintf("%064s", value.Text(16))
 }
 
+// ParseTopicAddress extracts the address stored in an indexed log topic.
 func ParseTopicAddress(topic string) string {
 	topic = strings.TrimPrefix(strings.ToLower(topic), "0x")
 	if len(topic) < 40 {

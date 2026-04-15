@@ -1,7 +1,8 @@
-package temposerver
+package chargeserver
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -9,8 +10,11 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
@@ -37,11 +41,16 @@ type sourceDID struct {
 
 // ChargeIntentConfig configures Tempo charge verification.
 type ChargeIntentConfig struct {
-	RPC                tempo.RPCClient
-	RPCURL             string
-	FeePayerSigner     *temposigner.Signer
+	// RPC overrides the Tempo JSON-RPC client used for verification.
+	RPC tempo.RPCClient
+	// RPCURL is used to build an RPC client when RPC is nil.
+	RPCURL string
+	// FeePayerSigner co-signs sponsored transactions locally when provided.
+	FeePayerSigner *temposigner.Signer
+	// FeePayerPrivateKey constructs FeePayerSigner when FeePayerSigner is nil.
 	FeePayerPrivateKey string
-	Store              tempo.Store
+	// Store persists replay-protection keys for hash and proof credentials.
+	Store tempo.Store
 }
 
 // ChargeIntent verifies Tempo charge Credentials and returns Receipts.
@@ -100,7 +109,7 @@ func (i *ChargeIntent) Verify(
 	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	if request.MethodDetails.FeePayer && payload.Type != tempo.CredentialTypeTransaction {
+	if request.MethodDetails.FeePayer && request.Amount != "0" && payload.Type != tempo.CredentialTypeTransaction {
 		return nil, mpp.ErrInvalidPayload("fee payer challenges require a transaction credential")
 	}
 	if !request.Allows(payload.Type) {
@@ -112,6 +121,8 @@ func (i *ChargeIntent) Verify(
 	switch payload.Type {
 	case tempo.CredentialTypeHash:
 		return i.verifyHash(ctx, rpc, credential, request, payload.Hash, source)
+	case tempo.CredentialTypeProof:
+		return i.verifyProof(ctx, rpc, credential, request, payload.Signature, source)
 	case tempo.CredentialTypeTransaction:
 		return i.verifyTransaction(ctx, rpc, credential, request, payload.Signature, source)
 	default:
@@ -127,11 +138,14 @@ func (i *ChargeIntent) verifyHash(
 	hash string,
 	source *sourceDID,
 ) (*mpp.Receipt, error) {
+	if source == nil {
+		return nil, mpp.ErrInvalidPayload("hash credential must include a source")
+	}
 	receiptMap, err := fetchReceipt(ctx, rpc, hash)
 	if err != nil {
 		return nil, err
 	}
-	if !receiptMatches(receiptMap, credential, request, source) {
+	if !receiptMatches(receiptMap, credential, request, source.address) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
@@ -141,7 +155,60 @@ func (i *ChargeIntent) verifyHash(
 	if !accepted {
 		return nil, mpp.ErrVerificationFailed("transaction hash already used")
 	}
-	return mpp.Success(hash, mpp.WithReceiptMethod(tempo.MethodName)), nil
+	return mpp.Success(
+		hash,
+		mpp.WithReceiptMethod(tempo.MethodName),
+		mpp.WithExternalID(request.ExternalID),
+	), nil
+}
+
+func (i *ChargeIntent) verifyProof(
+	ctx context.Context,
+	rpc tempo.RPCClient,
+	credential *mpp.Credential,
+	request tempo.ChargeRequest,
+	signature string,
+	source *sourceDID,
+) (*mpp.Receipt, error) {
+	if request.Amount != "0" {
+		return nil, mpp.ErrInvalidPayload("proof credentials are only valid for zero-amount challenges")
+	}
+	if source == nil {
+		return nil, mpp.ErrInvalidPayload("proof credential must include a source")
+	}
+	chainID, err := resolveChallengeChainID(ctx, rpc, request)
+	if err != nil {
+		return nil, err
+	}
+	if source.chainID != chainID {
+		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
+	}
+	proofHash, err := tempo.ProofTypedDataHash(chainID, credential.Challenge.ID)
+	if err != nil {
+		return nil, mpp.ErrVerificationFailed("failed to construct proof payload")
+	}
+	proofSigner, err := recoverProofSigner(proofHash, signature, common.HexToAddress(source.address))
+	if err != nil {
+		return nil, mpp.ErrInvalidPayload("proof signature is invalid")
+	}
+	if !strings.EqualFold(proofSigner.Hex(), source.address) {
+		active, err := isActiveAccessKey(ctx, rpc, common.HexToAddress(source.address), proofSigner)
+		if err != nil || !active {
+			return nil, mpp.ErrInvalidPayload("proof signature does not match source")
+		}
+	}
+	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(credential.Challenge.ID), credential.Challenge.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !accepted {
+		return nil, mpp.ErrVerificationFailed("proof credential already used")
+	}
+	return mpp.Success(
+		credential.Challenge.ID,
+		mpp.WithReceiptMethod(tempo.MethodName),
+		mpp.WithExternalID(request.ExternalID),
+	), nil
 }
 
 func (i *ChargeIntent) verifyTransaction(
@@ -223,7 +290,7 @@ func (i *ChargeIntent) verifyTransaction(
 	if err != nil {
 		return nil, err
 	}
-	if !receiptMatches(receiptMap, credential, request, source) {
+	if !receiptMatches(receiptMap, credential, request, sender.Hex()) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(txHash), txHash)
@@ -233,7 +300,11 @@ func (i *ChargeIntent) verifyTransaction(
 	if !accepted {
 		return nil, mpp.ErrVerificationFailed("transaction hash already used")
 	}
-	return mpp.Success(txHash, mpp.WithReceiptMethod(tempo.MethodName)), nil
+	return mpp.Success(
+		txHash,
+		mpp.WithReceiptMethod(tempo.MethodName),
+		mpp.WithExternalID(request.ExternalID),
+	), nil
 }
 
 func (i *ChargeIntent) resolveRPC(request tempo.ChargeRequest) tempo.RPCClient {
@@ -250,25 +321,29 @@ func (i *ChargeIntent) resolveRPC(request tempo.ChargeRequest) tempo.RPCClient {
 }
 
 func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, challengeID string) bool {
-	if len(tx.Calls) != 1 || len(tx.AccessList) != 0 || tx.KeyAuthorization != nil {
+	expected := expectedTransfers(request)
+	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 || tx.KeyAuthorization != nil {
 		return false
 	}
+	actual := make([]decodedTransfer, 0, len(tx.Calls))
 	for _, call := range tx.Calls {
 		if call.To == nil || !strings.EqualFold(call.To.Hex(), request.Currency) {
-			continue
+			return false
 		}
 		if call.Value != nil && call.Value.Sign() != 0 {
-			continue
+			return false
 		}
-		if tempo.MatchTransferCalldata(common.Bytes2Hex(call.Data), request, realm, challengeID) {
-			return true
+		decoded, ok := decodeCallTransfer(call.Data)
+		if !ok {
+			return false
 		}
+		actual = append(actual, decoded)
 	}
-	return false
+	return matchTransfers(actual, expected, realm, challengeID)
 }
 
-// TODO(tempo-go): replace this polling loop with a shared wait-for-receipt helper
-// once tempo-go exposes RPC convenience APIs for receipt fetch/retry behavior.
+// fetchReceipt polls until a Tempo receipt appears because tempo-go does not
+// yet expose a shared wait-for-receipt helper.
 func fetchReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[string]any, error) {
 	for attempt := 0; attempt < receiptRetryAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -303,11 +378,13 @@ func fetchReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[st
 	return nil, mpp.ErrVerificationFailed("transaction receipt not found")
 }
 
-func receiptMatches(receipt map[string]any, credential *mpp.Credential, request tempo.ChargeRequest, source *sourceDID) bool {
+func receiptMatches(receipt map[string]any, credential *mpp.Credential, request tempo.ChargeRequest, sourceAddress string) bool {
 	logs, ok := receipt["logs"].([]any)
 	if !ok {
 		return false
 	}
+	expected := expectedTransfers(request)
+	actual := make([]decodedTransfer, 0, len(logs))
 	for _, rawLog := range logs {
 		entry, ok := rawLog.(map[string]any)
 		if !ok || !strings.EqualFold(asString(entry["address"]), request.Currency) {
@@ -319,43 +396,259 @@ func receiptMatches(receipt map[string]any, credential *mpp.Credential, request 
 		}
 		fromAddress := tempo.ParseTopicAddress(asString(topics[1]))
 		toAddress := tempo.ParseTopicAddress(asString(topics[2]))
-		if !strings.EqualFold(toAddress, request.Recipient) {
-			continue
-		}
-		if source != nil && !strings.EqualFold(fromAddress, source.address) {
-			continue
-		}
-		if matchLog(topics, entry, request, credential.Challenge.Realm, credential.Challenge.ID) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchLog(topics []any, entry map[string]any, request tempo.ChargeRequest, realm, challengeID string) bool {
-	amount, err := tempo.ParseHexBigInt(asString(entry["data"]))
-	if err != nil {
-		return false
-	}
-	expectedAmount := request.Amount
-	if amount.String() != expectedAmount {
-		return false
-	}
-	topic0 := asString(topics[0])
-	if request.MethodDetails.Memo != "" {
-		if !strings.EqualFold(topic0, tempo.TransferWithMemoTopic.Hex()) || len(topics) < 4 {
+		if sourceAddress != "" && !strings.EqualFold(fromAddress, sourceAddress) {
 			return false
 		}
-		return strings.EqualFold(asString(topics[3]), request.MethodDetails.Memo)
+		decoded, ok := decodeLogTransfer(topics, entry)
+		if !ok {
+			continue
+		}
+		decoded.recipient = toAddress
+		actual = append(actual, decoded)
 	}
-	if strings.EqualFold(topic0, tempo.TransferTopic.Hex()) {
+	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
+}
+
+type expectedTransfer struct {
+	amount             string
+	allowAnyMemo       bool
+	memo               string
+	recipient          string
+	requireAttribution bool
+}
+
+type decodedTransfer struct {
+	amount    string
+	hasMemo   bool
+	memo      string
+	recipient string
+}
+
+func expectedTransfers(request tempo.ChargeRequest) []expectedTransfer {
+	transfers := make([]expectedTransfer, 0, len(request.MethodDetails.Splits)+1)
+	primaryAmount, _ := new(big.Int).SetString(request.Amount, 10)
+	if request.MethodDetails.Memo != "" {
+		// memo assigned after split subtraction below
+	} else {
+		// attribution assigned after split subtraction below
+	}
+	for _, split := range request.MethodDetails.Splits {
+		splitAmount, ok := new(big.Int).SetString(split.Amount, 10)
+		if ok {
+			primaryAmount.Sub(primaryAmount, splitAmount)
+		}
+		splitTransfer := expectedTransfer{
+			amount:       split.Amount,
+			recipient:    split.Recipient,
+			allowAnyMemo: split.Memo == "",
+			memo:         split.Memo,
+		}
+		transfers = append(transfers, splitTransfer)
+	}
+	primary := expectedTransfer{amount: primaryAmount.String(), recipient: request.Recipient}
+	if request.MethodDetails.Memo != "" {
+		primary.memo = request.MethodDetails.Memo
+	} else {
+		primary.requireAttribution = true
+	}
+	return append([]expectedTransfer{primary}, transfers...)
+}
+
+func decodeCallTransfer(data []byte) (decodedTransfer, bool) {
+	dataHex := strings.TrimPrefix(strings.ToLower(common.Bytes2Hex(data)), "0x")
+	if len(dataHex) < 8+64+64 {
+		return decodedTransfer{}, false
+	}
+	decoded := decodedTransfer{
+		recipient: common.HexToAddress("0x" + dataHex[8+24:8+64]).Hex(),
+		amount:    new(big.Int).SetBytes(common.FromHex("0x" + dataHex[72:136])).String(),
+	}
+	switch dataHex[:8] {
+	case tempo.TransferSelector:
+		return decoded, true
+	case tempo.TransferWithMemoSelector:
+		if len(dataHex) < 8+64+64+64 {
+			return decodedTransfer{}, false
+		}
+		decoded.hasMemo = true
+		decoded.memo = "0x" + dataHex[136:200]
+		return decoded, true
+	default:
+		return decodedTransfer{}, false
+	}
+}
+
+func decodeLogTransfer(topics []any, entry map[string]any) (decodedTransfer, bool) {
+	amount, err := tempo.ParseHexBigInt(asString(entry["data"]))
+	if err != nil {
+		return decodedTransfer{}, false
+	}
+	decoded := decodedTransfer{amount: amount.String()}
+	switch topic0 := asString(topics[0]); {
+	case strings.EqualFold(topic0, tempo.TransferTopic.Hex()):
+		return decoded, true
+	case strings.EqualFold(topic0, tempo.TransferWithMemoTopic.Hex()) && len(topics) >= 4:
+		decoded.hasMemo = true
+		decoded.memo = asString(topics[3])
+		return decoded, true
+	default:
+		return decodedTransfer{}, false
+	}
+}
+
+func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm, challengeID string) bool {
+	if len(actual) != len(expected) {
 		return false
 	}
-	if strings.EqualFold(topic0, tempo.TransferWithMemoTopic.Hex()) && len(topics) >= 4 {
-		memo := asString(topics[3])
-		return tempo.VerifyAttributionServer(memo, realm) && tempo.VerifyAttributionChallenge(memo, challengeID)
+	used := make([]bool, len(actual))
+	ordered := append([]expectedTransfer(nil), expected...)
+	sortExpectedTransfers(ordered)
+	for _, want := range ordered {
+		matched := false
+		for index, got := range actual {
+			if used[index] {
+				continue
+			}
+			if !strings.EqualFold(got.recipient, want.recipient) || got.amount != want.amount {
+				continue
+			}
+			if want.memo != "" {
+				if got.hasMemo && strings.EqualFold(got.memo, want.memo) {
+					used[index] = true
+					matched = true
+					break
+				}
+				continue
+			}
+			if want.requireAttribution {
+				if got.hasMemo && tempo.VerifyAttributionServer(got.memo, realm) && tempo.VerifyAttributionChallenge(got.memo, challengeID) {
+					used[index] = true
+					matched = true
+					break
+				}
+				continue
+			}
+			if want.allowAnyMemo || !got.hasMemo {
+				used[index] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
-	return false
+	return true
+}
+
+func sortExpectedTransfers(transfers []expectedTransfer) {
+	for i := 0; i < len(transfers)-1; i++ {
+		for j := i + 1; j < len(transfers); j++ {
+			if transferPriority(transfers[j]) < transferPriority(transfers[i]) {
+				transfers[i], transfers[j] = transfers[j], transfers[i]
+			}
+		}
+	}
+}
+
+func transferPriority(transfer expectedTransfer) int {
+	if transfer.memo != "" || transfer.requireAttribution {
+		return 0
+	}
+	if transfer.allowAnyMemo {
+		return 1
+	}
+	return 2
+}
+
+func resolveChallengeChainID(ctx context.Context, rpc tempo.RPCClient, request tempo.ChargeRequest) (int64, error) {
+	if request.MethodDetails.ChainID != nil {
+		return *request.MethodDetails.ChainID, nil
+	}
+	chainID, err := rpc.GetChainID(ctx)
+	if err != nil {
+		return 0, mpp.ErrVerificationFailed("failed to resolve proof chain id")
+	}
+	return int64(chainID), nil
+}
+
+func recoverProofSigner(proofHash common.Hash, encoded string, source common.Address) (common.Address, error) {
+	raw, err := hexutil.Decode(encoded)
+	if err != nil {
+		return common.Address{}, err
+	}
+	if keychain.IsKeychainSignature(raw) {
+		_, rootAccount, innerSignature, err := keychain.ParseKeychainSignature(raw)
+		if err != nil {
+			return common.Address{}, err
+		}
+		if rootAccount != source {
+			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
+		}
+		payload := make([]byte, 0, 1+len(proofHash.Bytes())+len(rootAccount.Bytes()))
+		payload = append(payload, keychain.KeychainSignatureType)
+		payload = append(payload, proofHash.Bytes()...)
+		payload = append(payload, rootAccount.Bytes()...)
+		return temposigner.RecoverAddress(crypto.Keccak256Hash(payload), innerSignature)
+	}
+	if len(raw) != 65 {
+		return common.Address{}, fmt.Errorf("unexpected proof signature length %d", len(raw))
+	}
+	v := raw[64]
+	if v >= 27 {
+		v -= 27
+	}
+	if v > 1 {
+		return common.Address{}, fmt.Errorf("invalid recovery id")
+	}
+	return temposigner.RecoverAddress(proofHash, temposigner.NewSignature(
+		new(big.Int).SetBytes(raw[:32]),
+		new(big.Int).SetBytes(raw[32:64]),
+		v,
+	))
+}
+
+func isActiveAccessKey(ctx context.Context, rpc tempo.RPCClient, account, accessKey common.Address) (bool, error) {
+	callData := keychain.GetKeySelector + addressToWord(account) + addressToWord(accessKey)
+	response, err := rpc.SendRequest(ctx, "eth_call", map[string]any{
+		"to":   keychain.GetKeychainAddress().Hex(),
+		"data": callData,
+	}, "latest")
+	if err != nil {
+		return false, err
+	}
+	if err := response.CheckError(); err != nil {
+		return false, err
+	}
+	result, ok := response.Result.(string)
+	if !ok {
+		return false, fmt.Errorf("unexpected getKey result %T", response.Result)
+	}
+	resultBytes, err := hex.DecodeString(strings.TrimPrefix(result, "0x"))
+	if err != nil {
+		return false, err
+	}
+	if len(resultBytes) < 160 {
+		return false, fmt.Errorf("getKey result too short")
+	}
+	keyID := common.BytesToAddress(resultBytes[44:64])
+	if keyID != accessKey {
+		return false, nil
+	}
+	expiry := new(big.Int).SetBytes(resultBytes[64:96])
+	if expiry.Sign() == 0 || expiry.Cmp(big.NewInt(time.Now().Unix())) <= 0 {
+		return false, nil
+	}
+	for _, value := range resultBytes[128:160] {
+		if value != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func addressToWord(address common.Address) string {
+	return strings.Repeat("0", 24) + strings.TrimPrefix(strings.ToLower(address.Hex()), "0x")
 }
 
 func signWithRemoteFeePayer(ctx context.Context, feePayerURL, raw string) (string, error) {
