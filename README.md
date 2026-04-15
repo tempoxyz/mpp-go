@@ -1,12 +1,29 @@
+<br>
+<br>
+
+<p align="center">
+  <a href="https://mpp.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tempoxyz/mpp/refs/heads/main/public/lockup-light.svg">
+      <img alt="Machine Payments Protocol" src="https://raw.githubusercontent.com/tempoxyz/mpp/refs/heads/main/public/lockup-dark.svg" width="auto" height="120">
+    </picture>
+  </a>
+</p>
+
+<br>
+<br>
+
 # mpp-go
 
-Go SDK for the [Machine Payments Protocol](https://mpp.dev).
+Go SDK for the [**Machine Payments Protocol**](https://mpp.dev)
 
-This SDK focuses on the Tempo `charge` flow for HTTP 402 payments, including transaction, hash, proof, split-payment, and fee-payer support.
+[![Website](https://img.shields.io/badge/website-mpp.dev-black)](https://mpp.dev)
+[![Docs](https://img.shields.io/badge/docs-mpp.dev-blue)](https://mpp.dev/sdk/go)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 
-## Documentation
+[MPP](https://mpp.dev) lets any client — agents, apps, or humans — pay for any service in the same HTTP request. It standardizes [HTTP 402](https://mpp.dev/protocol/http-402) with an open [IETF specification](https://paymentauth.org), so servers can charge and clients can pay without API keys, billing accounts, or checkout flows.
 
-Full documentation, API reference, and guides are available at **[mpp.dev/sdk/go](https://mpp.dev/sdk/go)**.
+You can get started today by reading the [Go SDK docs](https://mpp.dev/sdk/go), exploring the [protocol overview](https://mpp.dev/protocol/), or jumping straight to the [quickstart](https://mpp.dev/quickstart/).
 
 ## Install
 
@@ -99,8 +116,6 @@ func main() {
 }
 ```
 
-The server issues the `WWW-Authenticate: Payment ...` challenge automatically, and the generic client retries automatically with a Tempo credential.
-
 ## Examples
 
 | Example | Description |
@@ -109,22 +124,26 @@ The server issues the `WWW-Authenticate: Payment ...` challenge automatically, a
 | [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential |
 | [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer |
 
-The examples run against the local Tempo devnet in [`docker-compose.yml`](./docker-compose.yml).
-
-```bash
-docker compose up -d
-
-go run ./examples/charge-basic
-go run ./examples/charge-hash
-go run ./examples/charge-fee-payer
-```
-
-Set `TEMPO_RPC_URL` if you want the examples to target a different Tempo RPC.
-
 ## Protocol
 
-Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/). See [mpp-specs](https://tempoxyz.github.io/mpp-specs/) for the full specification.
+Built on the ["Payment" HTTP Authentication Scheme](https://paymentauth.org), an open specification proposed to the IETF. See [mpp.dev/protocol](https://mpp.dev/protocol/) for the full protocol overview, or the [IETF specification](https://paymentauth.org) for the wire format.
+
+## Contributing
+
+```
+git clone https://github.com/tempoxyz/mpp-go
+cd mpp-go
+go test ./...
+```
+
+## Security
+
+See [`SECURITY.md`](./SECURITY.md) for reporting vulnerabilities.
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of [Apache License, Version 2.0](./LICENSE-APACHE) or [MIT License](./LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
