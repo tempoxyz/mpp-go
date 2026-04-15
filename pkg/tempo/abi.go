@@ -16,8 +16,9 @@ var (
 	TransferWithMemoTopic = crypto.Keccak256Hash([]byte("TransferWithMemo(address,address,uint256,bytes32)"))
 )
 
-// TODO: Move shared TIP-20 transfer encoding and calldata/log matching helpers into tempo-go.
-// Both mpp-go and pympp now carry nearly identical Tempo-specific logic here.
+// TODO(tempo-go): move shared TIP-20 transfer encoding and calldata/log matching
+// helpers into tempo-go. Both mpp-go and pympp now carry nearly identical
+// Tempo-specific logic here.
 
 // EncodeTransfer builds TIP-20 transfer calldata for the supplied recipient and amount.
 func EncodeTransfer(recipient string, amount *big.Int) string {

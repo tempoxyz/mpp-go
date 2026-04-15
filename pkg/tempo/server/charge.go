@@ -338,6 +338,10 @@ func (i *ChargeIntent) resolveRPC(request tempo.ChargeRequest) tempo.RPCClient {
 	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0))
 }
 
+// TODO(tempo-go): extract the Tempo transaction/receipt matching and fee-payer
+// verification helpers below once tempo-go exposes a shared verifier surface for
+// TIP-20 charge flows.
+
 func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, challengeID string) bool {
 	expected := expectedTransfers(request)
 	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 || tx.KeyAuthorization != nil {

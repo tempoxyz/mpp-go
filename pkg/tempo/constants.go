@@ -2,6 +2,9 @@ package tempo
 
 import "time"
 
+// TODO(tempo-go): move Tempo chain metadata and TIP-20 selectors into tempo-go;
+// these constants are chain-specific primitives rather than MPP-specific state.
+
 const (
 	// MethodName is the Tempo payment method token.
 	MethodName = "tempo"

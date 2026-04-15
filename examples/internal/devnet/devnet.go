@@ -25,6 +25,9 @@ const (
 	receiptWaitPollPeriod  = 500 * time.Millisecond
 )
 
+// TODO(tempo-go): move these local-devnet readiness and faucet helpers into a
+// shared tempo-go test support package once multiple Go SDKs depend on them.
+
 func RPCURL() string {
 	if rpcURL := os.Getenv("TEMPO_RPC_URL"); rpcURL != "" {
 		return rpcURL

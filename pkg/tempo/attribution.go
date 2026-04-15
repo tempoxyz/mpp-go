@@ -25,6 +25,9 @@ var attributionTag = crypto.Keccak256([]byte("mpp"))[:4]
 
 const attributionVersion = byte(0x01)
 
+// TODO(tempo-go): move attribution memo encoding and verification into
+// tempo-go so Go, Python, and TypeScript SDKs share the same Tempo memo codec.
+
 // Attribution memos match the Tempo charge reference implementations in mppx
 // and pympp so challenge binding stays consistent across SDKs.
 

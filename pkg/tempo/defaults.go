@@ -5,6 +5,9 @@ import (
 	"math/big"
 )
 
+// TODO(tempo-go): promote the expiring nonce key and chain default lookup
+// helpers below into tempo-go so SDKs share one source of Tempo defaults.
+
 // ExpiringNonceKey is the reserved nonce key used for fee-payer transactions.
 var ExpiringNonceKey = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 

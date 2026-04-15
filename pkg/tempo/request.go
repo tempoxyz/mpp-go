@@ -9,6 +9,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// TODO(tempo-go): move the canonical Tempo charge request/credential schema and
+// normalization helpers in this file into tempo-go so Go SDKs share one wire
+// format implementation.
+
 // ChargeMode declares which Tempo credential flow a challenge accepts.
 type ChargeMode string
 

@@ -18,8 +18,9 @@ type RPCClient interface {
 	SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error)
 }
 
-// TODO: Promote higher-level tx-param, gas-estimation, and receipt-polling helpers into
-// tempo-go/client; mpp-go and pympp currently duplicate this Tempo RPC glue.
+// TODO(tempo-go): promote higher-level tx-param, gas-estimation, and
+// receipt-polling helpers into tempo-go/client; mpp-go and pympp currently
+// duplicate this Tempo RPC glue.
 
 // NewRPCClient constructs a Tempo JSON-RPC client.
 func NewRPCClient(rpcURL string) RPCClient {
