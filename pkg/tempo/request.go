@@ -243,6 +243,9 @@ func parseUnitsString(value string, decimals int) (string, error) {
 	if value == "" {
 		return "", fmt.Errorf("tempo: amount is required")
 	}
+	if decimals < 0 {
+		return "", fmt.Errorf("tempo: decimals must be non-negative")
+	}
 	if strings.HasPrefix(value, "-") {
 		return "", fmt.Errorf("tempo: amount must be non-negative")
 	}

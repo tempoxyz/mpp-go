@@ -75,6 +75,20 @@ func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {
 	}
 }
 
+func TestNormalizeChargeRequest_RejectsNegativeDecimals(t *testing.T) {
+	t.Parallel()
+
+	_, err := NormalizeChargeRequest(ChargeRequestParams{
+		Amount:    "1.25",
+		Currency:  "0x20c0000000000000000000000000000000000001",
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Decimals:  -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "decimals must be non-negative") {
+		t.Fatalf("NormalizeChargeRequest() error = %v, want negative decimals error", err)
+	}
+}
+
 func TestEncodeAttribution_VerifiesServerFingerprint(t *testing.T) {
 	t.Parallel()
 
