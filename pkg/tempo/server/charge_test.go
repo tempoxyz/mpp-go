@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -240,6 +241,65 @@ func TestChargeFlow_HashCredentialReplayProtected(t *testing.T) {
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil {
 		t.Fatal("expected replay-protection error on second verification")
+	}
+}
+
+func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	credential.Source = "not-a-did"
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "credential source is invalid") {
+		t.Fatalf("Verify() error = %v, want invalid credential source", err)
+	}
+}
+
+func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	rpc.estimateGas = fmt.Sprintf("0x%x", feePayerMaxGas)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	if err != nil {
+		t.Fatalf("NewChargeIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "sponsor policy") {
+		t.Fatalf("Verify() error = %v, want sponsor policy rejection", err)
+	}
+}
+
+func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
+	rpc := &mockRPC{receipts: map[string]map[string]any{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	_, err := fetchReceipt(ctx, rpc, testReceiptHash)
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("fetchReceipt() error = %v, want context cancellation", err)
+	}
+	if elapsed := time.Since(started); elapsed >= receiptRetryDelay/2 {
+		t.Fatalf("fetchReceipt() took %s, want early cancellation before retry delay %s", elapsed, receiptRetryDelay)
 	}
 }
 

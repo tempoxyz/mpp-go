@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,21 @@ import (
 
 const receiptRetryDelay = 500 * time.Millisecond
 const receiptRetryAttempts = 20
+
+var feePayerMaxGas = uint64(2_000_000)
+
+var feePayerMaxFeePerGas = big.NewInt(100_000_000_000)
+
+var feePayerMaxPriorityFeePerGas = big.NewInt(100_000_000_000)
+
+var feePayerMaxTotalFee = big.NewInt(50_000_000_000_000_000)
+
+const feePayerMaxValidityWindow = 15 * time.Minute
+
+type sourceDID struct {
+	chainID int64
+	address string
+}
 
 type ChargeIntentConfig struct {
 	RPC                tempo.RPCClient
@@ -69,6 +86,13 @@ func (i *ChargeIntent) Verify(
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload(err.Error())
 	}
+	source, err := parseSourceDID(credential.Source)
+	if err != nil {
+		return nil, mpp.ErrInvalidPayload("credential source is invalid")
+	}
+	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
+		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
+	}
 	if request.MethodDetails.FeePayer && payload.Type != tempo.CredentialTypeTransaction {
 		return nil, mpp.ErrInvalidPayload("fee payer challenges require a transaction credential")
 	}
@@ -80,9 +104,9 @@ func (i *ChargeIntent) Verify(
 
 	switch payload.Type {
 	case tempo.CredentialTypeHash:
-		return i.verifyHash(ctx, rpc, credential, request, payload.Hash)
+		return i.verifyHash(ctx, rpc, credential, request, payload.Hash, source)
 	case tempo.CredentialTypeTransaction:
-		return i.verifyTransaction(ctx, rpc, credential, request, payload.Signature)
+		return i.verifyTransaction(ctx, rpc, credential, request, payload.Signature, source)
 	default:
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("unsupported credential type %q", payload.Type))
 	}
@@ -94,12 +118,13 @@ func (i *ChargeIntent) verifyHash(
 	credential *mpp.Credential,
 	request tempo.ChargeRequest,
 	hash string,
+	source *sourceDID,
 ) (*mpp.Receipt, error) {
 	receiptMap, err := fetchReceipt(ctx, rpc, hash)
 	if err != nil {
 		return nil, err
 	}
-	if !receiptMatches(receiptMap, credential, request) {
+	if !receiptMatches(receiptMap, credential, request, source) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
@@ -118,6 +143,7 @@ func (i *ChargeIntent) verifyTransaction(
 	credential *mpp.Credential,
 	request tempo.ChargeRequest,
 	raw string,
+	source *sourceDID,
 ) (*mpp.Receipt, error) {
 	tx, err := tempotx.Deserialize(raw)
 	if err != nil {
@@ -131,13 +157,16 @@ func (i *ChargeIntent) verifyTransaction(
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
 	}
-	if sourceAddress := parseSourceAddress(credential.Source); sourceAddress != "" && !strings.EqualFold(sourceAddress, sender.Hex()) {
+	if source != nil && !strings.EqualFold(source.address, sender.Hex()) {
 		return nil, mpp.ErrInvalidPayload("credential source does not match transaction signer")
 	}
 
 	if request.MethodDetails.FeePayer {
 		// TODO: Upstream a higher-level sponsored transaction validation + co-sign helper into tempo-go.
 		// The low-level signing primitives live there already, but SDKs still duplicate these invariants.
+		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires); err != nil {
+			return nil, err
+		}
 		if !tx.AwaitingFeePayer {
 			return nil, mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
@@ -187,7 +216,7 @@ func (i *ChargeIntent) verifyTransaction(
 	if err != nil {
 		return nil, err
 	}
-	if !receiptMatches(receiptMap, credential, request) {
+	if !receiptMatches(receiptMap, credential, request, source) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(txHash), txHash)
@@ -235,6 +264,9 @@ func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, chal
 // once tempo-go exposes RPC convenience APIs for receipt fetch/retry behavior.
 func fetchReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[string]any, error) {
 	for attempt := 0; attempt < receiptRetryAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, mpp.ErrVerificationFailed(err.Error())
+		}
 		response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash)
 		if err != nil {
 			return nil, mpp.ErrVerificationFailed("failed to fetch transaction receipt")
@@ -250,18 +282,25 @@ func fetchReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[st
 			return receipt, nil
 		}
 		if attempt < receiptRetryAttempts-1 {
-			time.Sleep(receiptRetryDelay)
+			timer := time.NewTimer(receiptRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil, mpp.ErrVerificationFailed(ctx.Err().Error())
+			case <-timer.C:
+			}
 		}
 	}
 	return nil, mpp.ErrVerificationFailed("transaction receipt not found")
 }
 
-func receiptMatches(receipt map[string]any, credential *mpp.Credential, request tempo.ChargeRequest) bool {
+func receiptMatches(receipt map[string]any, credential *mpp.Credential, request tempo.ChargeRequest, source *sourceDID) bool {
 	logs, ok := receipt["logs"].([]any)
 	if !ok {
 		return false
 	}
-	expectedSender := parseSourceAddress(credential.Source)
 	for _, rawLog := range logs {
 		entry, ok := rawLog.(map[string]any)
 		if !ok || !strings.EqualFold(asString(entry["address"]), request.Currency) {
@@ -276,7 +315,7 @@ func receiptMatches(receipt map[string]any, credential *mpp.Credential, request 
 		if !strings.EqualFold(toAddress, request.Recipient) {
 			continue
 		}
-		if expectedSender != "" && !strings.EqualFold(fromAddress, expectedSender) {
+		if source != nil && !strings.EqualFold(fromAddress, source.address) {
 			continue
 		}
 		if matchLog(topics, entry, request, credential.Challenge.Realm, credential.Challenge.ID) {
@@ -327,15 +366,77 @@ func signWithRemoteFeePayer(ctx context.Context, feePayerURL, raw string) (strin
 	return serialized, nil
 }
 
-func parseSourceAddress(source string) string {
+func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string) error {
+	if tx.Gas == 0 {
+		return mpp.ErrInvalidPayload("fee payer transaction must declare gas")
+	}
+	if tx.Gas > feePayerMaxGas {
+		return mpp.ErrInvalidPayload("fee payer transaction gas exceeds sponsor policy")
+	}
+	if tx.MaxFeePerGas == nil || tx.MaxFeePerGas.Sign() <= 0 {
+		return mpp.ErrInvalidPayload("fee payer transaction must declare max fee per gas")
+	}
+	if tx.MaxFeePerGas.Cmp(feePayerMaxFeePerGas) > 0 {
+		return mpp.ErrInvalidPayload("fee payer transaction max fee per gas exceeds sponsor policy")
+	}
+	if tx.MaxPriorityFeePerGas != nil {
+		if tx.MaxPriorityFeePerGas.Cmp(tx.MaxFeePerGas) > 0 {
+			return mpp.ErrInvalidPayload("fee payer transaction max priority fee exceeds max fee")
+		}
+		if tx.MaxPriorityFeePerGas.Cmp(feePayerMaxPriorityFeePerGas) > 0 {
+			return mpp.ErrInvalidPayload("fee payer transaction max priority fee exceeds sponsor policy")
+		}
+	}
+	maxTotalFee := new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas), tx.MaxFeePerGas)
+	if maxTotalFee.Cmp(feePayerMaxTotalFee) > 0 {
+		return mpp.ErrInvalidPayload("fee payer transaction total fee budget exceeds sponsor policy")
+	}
+	if tx.ValidBefore != 0 {
+		maxValidBefore := time.Now().Add(feePayerMaxValidityWindow).Unix()
+		if challengeExpires != "" {
+			if expiry, err := parseExpires(challengeExpires); err == nil {
+				challengeMax := expiry.Add(time.Minute).Unix()
+				if challengeMax < maxValidBefore {
+					maxValidBefore = challengeMax
+				}
+			}
+		}
+		if int64(tx.ValidBefore) > maxValidBefore {
+			return mpp.ErrInvalidPayload("fee payer transaction validity window exceeds sponsor policy")
+		}
+	}
+	return nil
+}
+
+func parseSourceDID(source string) (*sourceDID, error) {
 	if source == "" {
-		return ""
+		return nil, nil
 	}
 	parts := strings.Split(source, ":")
-	if len(parts) < 5 {
-		return ""
+	if len(parts) != 5 || parts[0] != "did" || parts[1] != "pkh" || parts[2] != "eip155" {
+		return nil, fmt.Errorf("invalid source format")
 	}
-	return parts[len(parts)-1]
+	if parts[3] == "" || (len(parts[3]) > 1 && parts[3][0] == '0') {
+		return nil, fmt.Errorf("invalid source chain id")
+	}
+	chainID, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	if chainID < 0 {
+		return nil, fmt.Errorf("invalid source chain id")
+	}
+	if !common.IsHexAddress(parts[4]) {
+		return nil, fmt.Errorf("invalid source address")
+	}
+	return &sourceDID{chainID: chainID, address: common.HexToAddress(parts[4]).Hex()}, nil
+}
+
+func parseExpires(value string) (time.Time, error) {
+	if expires, err := time.Parse(time.RFC3339, value); err == nil {
+		return expires, nil
+	}
+	return time.Parse("2006-01-02T15:04:05.000Z", value)
 }
 
 func asString(value any) string {
