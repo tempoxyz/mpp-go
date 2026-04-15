@@ -68,7 +68,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
-	if len(params.Meta) > 0 {
+	if params.Meta != nil {
 		opts = append(opts, mpp.WithMeta(params.Meta))
 	}
 
@@ -192,7 +192,7 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 	if cred.Challenge.Digest != "" {
 		opts = append(opts, mpp.WithDigest(cred.Challenge.Digest))
 	}
-	if len(cred.Challenge.Opaque) > 0 {
+	if cred.Challenge.Opaque != nil {
 		opts = append(opts, mpp.WithMeta(cred.Challenge.Opaque))
 	}
 	return opts
