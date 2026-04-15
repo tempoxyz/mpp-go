@@ -2,5 +2,5 @@
 // payment methods.
 //
 // When paired with Tempo charge helpers, examples typically import this package
-// as mppclient to distinguish it from role-based aliases such as chargeclient.
+// as mppclient to distinguish it from the Tempo charge package alias `charge`.
 package client

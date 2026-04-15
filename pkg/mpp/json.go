@@ -19,11 +19,6 @@ func JSONEqual(left, right any) bool {
 	return bytes.Equal(leftJSON, rightJSON)
 }
 
-// Deprecated: use JSONEqual.
-func CanonicalEqual(left, right any) bool {
-	return JSONEqual(left, right)
-}
-
 // ExtractAuthorizationScheme returns the first authorization value that matches
 // the requested scheme from a possibly merged Authorization header.
 func ExtractAuthorizationScheme(header, scheme string) string {
@@ -40,14 +35,4 @@ func ExtractAuthorizationScheme(header, scheme string) string {
 // header. It tolerates comma-separated schemes and ignores non-Payment values.
 func FindPaymentAuthorization(header string) string {
 	return ExtractAuthorizationScheme(header, "Payment")
-}
-
-// Deprecated: use FindPaymentAuthorization.
-func ExtractPaymentAuthorization(header string) string {
-	return FindPaymentAuthorization(header)
-}
-
-// Deprecated: use FindPaymentAuthorization.
-func ExtractPaymentScheme(header string) string {
-	return FindPaymentAuthorization(header)
 }

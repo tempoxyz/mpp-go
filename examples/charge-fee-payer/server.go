@@ -5,47 +5,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/tempoxyz/mpp-go/examples/internal/temposim"
+	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
+	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 type exampleServer struct {
 	url    string
-	rpc    *temposim.RPC
 	server *httptest.Server
 }
 
-func startServer() (*exampleServer, error) {
-	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
-		Amount:    "0.50",
-		ChainID:   temposim.ChainID,
-		Currency:  temposim.Currency,
-		Decimals:  tempo.DefaultDecimals,
-		FeePayer:  true,
-		Recipient: temposim.Recipient,
+func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
+	intent, err := charge.NewChargeIntent(charge.ChargeIntentConfig{
+		FeePayerPrivateKey: devnet.FeePayerPrivateKey,
+		RPCURL:             rpcURL,
 	})
 	if err != nil {
 		return nil, err
 	}
-	rpc := temposim.NewRPC(request)
-
-	intent, err := chargeserver.NewChargeIntent(chargeserver.ChargeIntentConfig{
-		FeePayerPrivateKey: temposim.FeePayerPrivateKey,
-		RPC:                rpc,
-	})
-	if err != nil {
-		return nil, err
-	}
-	method := chargeserver.NewMethod(chargeserver.MethodConfig{
+	method := charge.NewMethod(charge.MethodConfig{
 		Intent:    intent,
-		ChainID:   temposim.ChainID,
-		Currency:  temposim.Currency,
+		ChainID:   chainID,
+		Currency:  devnet.Currency,
 		FeePayer:  true,
-		Recipient: temposim.Recipient,
+		Recipient: devnet.Recipient,
 	})
-	payment := mppserver.New(method, temposim.Realm, "example-secret")
+	payment := mppserver.New(method, devnet.Realm, "example-secret")
 
 	handler := mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
 		Amount:      "0.50",
@@ -58,7 +43,7 @@ func startServer() (*exampleServer, error) {
 	}))
 
 	server := httptest.NewServer(handler)
-	return &exampleServer{url: server.URL, rpc: rpc, server: server}, nil
+	return &exampleServer{url: server.URL, server: server}, nil
 }
 
 func (s *exampleServer) Close() {

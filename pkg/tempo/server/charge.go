@@ -32,6 +32,8 @@ var feePayerMaxPriorityFeePerGas = big.NewInt(100_000_000_000)
 
 var feePayerMaxTotalFee = big.NewInt(50_000_000_000_000_000)
 
+var feeControllerAddress = common.HexToAddress("0xfeec000000000000000000000000000000000000")
+
 const feePayerMaxValidityWindow = 15 * time.Minute
 
 type sourceDID struct {
@@ -272,8 +274,24 @@ func (i *ChargeIntent) verifyTransaction(
 		} else {
 			return nil, mpp.ErrVerificationFailed("fee payer challenge requires a configured fee payer signer or fee payer URL")
 		}
-		if _, _, err := tempotx.VerifyDualSignatures(tx); err != nil {
+		if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
+			return nil, mpp.ErrVerificationFailed("co-signed transaction does not contain a matching Tempo transfer")
+		}
+		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires); err != nil {
+			return nil, err
+		}
+		if tx.AwaitingFeePayer {
+			return nil, mpp.ErrVerificationFailed("co-signed transaction must clear the awaiting fee payer marker")
+		}
+		if tx.FeeToken != common.HexToAddress(request.Currency) {
+			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the charge request")
+		}
+		coSignedSender, _, err := tempotx.VerifyDualSignatures(tx)
+		if err != nil {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+		}
+		if coSignedSender != sender {
+			return nil, mpp.ErrVerificationFailed("co-signed transaction sender does not match the credential signer")
 		}
 	}
 
@@ -397,16 +415,69 @@ func receiptMatches(receipt map[string]any, credential *mpp.Credential, request 
 		fromAddress := tempo.ParseTopicAddress(asString(topics[1]))
 		toAddress := tempo.ParseTopicAddress(asString(topics[2]))
 		if sourceAddress != "" && !strings.EqualFold(fromAddress, sourceAddress) {
-			return false
+			continue
 		}
 		decoded, ok := decodeLogTransfer(topics, entry)
 		if !ok {
 			continue
 		}
 		decoded.recipient = toAddress
+		if isFeeControllerTransfer(fromAddress, decoded.recipient, decoded.amount, expected) {
+			continue
+		}
 		actual = append(actual, decoded)
 	}
+	actual = canonicalReceiptTransfers(actual)
 	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
+}
+
+func isFeeControllerTransfer(fromAddress, recipient, amount string, expected []expectedTransfer) bool {
+	if !strings.EqualFold(fromAddress, feeControllerAddress.Hex()) && !strings.EqualFold(recipient, feeControllerAddress.Hex()) {
+		return false
+	}
+	for _, transfer := range expected {
+		if strings.EqualFold(transfer.recipient, recipient) && transfer.amount == amount {
+			return false
+		}
+	}
+	return true
+}
+
+// Tempo TIP-20 emits a standard Transfer alongside TransferWithMemo for the same
+// logical payment. Collapse those paired logs so receipt matching counts the
+// payment once while still rejecting unrelated extra transfers.
+func canonicalReceiptTransfers(transfers []decodedTransfer) []decodedTransfer {
+	canonical := append([]decodedTransfer(nil), transfers...)
+	skipped := make([]bool, len(canonical))
+	for index, transfer := range canonical {
+		if !transfer.hasMemo {
+			continue
+		}
+		if paired := pairedTransferIndex(canonical, index); paired >= 0 {
+			skipped[paired] = true
+		}
+	}
+	result := make([]decodedTransfer, 0, len(canonical))
+	for index, transfer := range canonical {
+		if skipped[index] {
+			continue
+		}
+		result = append(result, transfer)
+	}
+	return result
+}
+
+func pairedTransferIndex(transfers []decodedTransfer, memoIndex int) int {
+	withMemo := transfers[memoIndex]
+	for index, transfer := range transfers {
+		if index == memoIndex || transfer.hasMemo {
+			continue
+		}
+		if transfer.amount == withMemo.amount && strings.EqualFold(transfer.recipient, withMemo.recipient) {
+			return index
+		}
+	}
+	return -1
 }
 
 type expectedTransfer struct {
@@ -636,7 +707,7 @@ func isActiveAccessKey(ctx context.Context, rpc tempo.RPCClient, account, access
 		return false, nil
 	}
 	expiry := new(big.Int).SetBytes(resultBytes[64:96])
-	if expiry.Sign() == 0 || expiry.Cmp(big.NewInt(time.Now().Unix())) <= 0 {
+	if expiry.Sign() > 0 && expiry.Cmp(big.NewInt(time.Now().Unix())) <= 0 {
 		return false, nil
 	}
 	for _, value := range resultBytes[128:160] {

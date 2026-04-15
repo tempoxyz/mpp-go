@@ -24,7 +24,11 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 
 		start := i
-		for i < len(s) && isTokenChar(s[i]) {
+		for i < len(s) {
+			ch := s[i]
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '_' && ch != '-' {
+				break
+			}
 			i++
 		}
 		key := s[start:i]
@@ -90,16 +94,6 @@ func SplitAuthenticate(header string) []string {
 		parts = append(parts, tail)
 	}
 	return parts
-}
-
-// Deprecated: use SplitAuthenticate.
-func SplitChallenges(header string) []string {
-	return SplitAuthenticate(header)
-}
-
-// Deprecated: use SplitAuthenticate.
-func SplitWWWAuthenticate(header string) []string {
-	return SplitAuthenticate(header)
 }
 
 func nextChallengeStart(header string, start int) int {
@@ -229,14 +223,6 @@ func ParseChallenge(header string) (*Challenge, error) {
 		Description: description,
 		Opaque:      opaque,
 	}, nil
-}
-
-// ParseWWWAuthenticate parses a WWW-Authenticate header value with scheme
-// "Payment" into a Challenge.
-//
-// Deprecated: use ParseChallenge.
-func ParseWWWAuthenticate(header string) (*Challenge, error) {
-	return ParseChallenge(header)
 }
 
 // FormatWWWAuthenticate formats a Challenge as a WWW-Authenticate header value.
@@ -374,14 +360,6 @@ func ParseCredential(header string) (*Credential, error) {
 		Payload:   payload,
 		Source:    source,
 	}, nil
-}
-
-// ParseAuthorization parses an Authorization header value with scheme "Payment"
-// into a Credential.
-//
-// Deprecated: use ParseCredential.
-func ParseAuthorization(header string) (*Credential, error) {
-	return ParseCredential(header)
 }
 
 // FormatAuthorization formats a Credential as an Authorization header value.

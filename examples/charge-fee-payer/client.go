@@ -4,11 +4,10 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/tempoxyz/mpp-go/examples/internal/temposim"
+	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
+	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 
 type clientResult struct {
@@ -16,11 +15,11 @@ type clientResult struct {
 	Tx      string
 }
 
-func runClient(ctx context.Context, url string, rpc tempo.RPCClient) (*clientResult, error) {
-	method, err := chargeclient.New(chargeclient.Config{
-		ChainID:    temposim.ChainID,
-		PrivateKey: temposim.PayerPrivateKey,
-		RPC:        rpc,
+func runClient(ctx context.Context, url, rpcURL string, chainID int64) (*clientResult, error) {
+	method, err := charge.New(charge.Config{
+		ChainID:    chainID,
+		PrivateKey: devnet.PayerPrivateKey,
+		RPCURL:     rpcURL,
 	})
 	if err != nil {
 		return nil, err

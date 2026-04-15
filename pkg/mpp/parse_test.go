@@ -41,6 +41,35 @@ func TestSplitAuthenticate(t *testing.T) {
 			header: `Digest realm="alpha\"beta,beta", nonce="123", ` + payment,
 			want:   []string{`Digest realm="alpha\"beta,beta", nonce="123"`, payment},
 		},
+		{
+			name: "multiple payment challenges stay separate",
+			header: payment + `, ` + NewChallenge(
+				"secret",
+				"realm",
+				"stripe",
+				"charge",
+				map[string]any{"amount": "200"},
+			).ToWWWAuthenticate("realm"),
+			want: []string{
+				payment,
+				NewChallenge("secret", "realm", "stripe", "charge", map[string]any{"amount": "200"}).ToWWWAuthenticate("realm"),
+			},
+		},
+		{
+			name:   "auth params that look like schemes do not split",
+			header: `Digest Bearer="alpha", realm="example", ` + payment,
+			want:   []string{`Digest Bearer="alpha", realm="example"`, payment},
+		},
+		{
+			name:   "payment challenge before quoted comma scheme",
+			header: payment + `, Digest realm="alpha,beta", nonce="123"`,
+			want:   []string{payment, `Digest realm="alpha,beta", nonce="123"`},
+		},
+		{
+			name:   "whitespace around merged header is ignored",
+			header: `  ` + payment + `  ,   Bearer token   `,
+			want:   []string{payment, `Bearer token`},
+		},
 	}
 
 	for _, tt := range tests {
@@ -48,18 +77,9 @@ func TestSplitAuthenticate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			for _, split := range []struct {
-				name string
-				fn   func(string) []string
-			}{
-				{name: "SplitAuthenticate", fn: SplitAuthenticate},
-				{name: "SplitChallenges", fn: SplitChallenges},
-				{name: "SplitWWWAuthenticate", fn: SplitWWWAuthenticate},
-			} {
-				got := split.fn(tt.header)
-				if !reflect.DeepEqual(got, tt.want) {
-					t.Fatalf("%s() = %#v, want %#v", split.name, got, tt.want)
-				}
+			got := SplitAuthenticate(tt.header)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("SplitAuthenticate() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
@@ -105,18 +125,9 @@ func TestFindPaymentAuthorization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			for _, extract := range []struct {
-				name string
-				fn   func(string) string
-			}{
-				{name: "FindPaymentAuthorization", fn: FindPaymentAuthorization},
-				{name: "ExtractPaymentAuthorization", fn: ExtractPaymentAuthorization},
-				{name: "ExtractPaymentScheme", fn: ExtractPaymentScheme},
-			} {
-				got := extract.fn(tt.header)
-				if got != tt.want {
-					t.Fatalf("%s() = %q, want %q", extract.name, got, tt.want)
-				}
+			got := FindPaymentAuthorization(tt.header)
+			if got != tt.want {
+				t.Fatalf("FindPaymentAuthorization() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -187,7 +198,6 @@ func TestParseChallenge(t *testing.T) {
 				fn   func(string) (*Challenge, error)
 			}{
 				{name: "ParseChallenge", fn: ParseChallenge},
-				{name: "ParseWWWAuthenticate", fn: ParseWWWAuthenticate},
 				{name: "FromWWWAuthenticate", fn: FromWWWAuthenticate},
 			} {
 				got, err := parse.fn(tt.header)
@@ -283,7 +293,6 @@ func TestParseCredential(t *testing.T) {
 				fn   func(string) (*Credential, error)
 			}{
 				{name: "ParseCredential", fn: ParseCredential},
-				{name: "ParseAuthorization", fn: ParseAuthorization},
 				{name: "FromAuthorization", fn: FromAuthorization},
 			} {
 				got, err := parse.fn(tt.header)
