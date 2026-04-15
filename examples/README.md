@@ -1,6 +1,11 @@
 # Examples
 
-Each example directory is a runnable end-to-end demo with the same layout:
+The repo has two kinds of examples:
+
+- `charge-*` directories are one-command end-to-end demos that start an in-process server and immediately call it with the client
+- `basic/server`, `basic/client`, and each `charge-*/server` / `charge-*/client` pair are separate-process examples you can run in different terminals, similar to the `mpp-rs` sample layout
+
+Each `charge-*` example directory is a runnable end-to-end demo with the same layout:
 
 - `server.go` starts a paid HTTP handler using the generic `pkg/server` helpers
 - `client.go` configures the generic `pkg/client` retry flow with the Tempo method
@@ -22,6 +27,14 @@ Run any example directly from the repo root:
 go run ./examples/charge-basic
 go run ./examples/charge-hash
 go run ./examples/charge-fee-payer
+go run ./examples/basic/server
+go run ./examples/basic/client
+go run ./examples/charge-basic/server
+go run ./examples/charge-basic/client
+go run ./examples/charge-hash/server
+go run ./examples/charge-hash/client
+go run ./examples/charge-fee-payer/server
+go run ./examples/charge-fee-payer/client
 ```
 
 Set `TEMPO_RPC_URL` to point at a different node if you are not using the

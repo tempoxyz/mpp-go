@@ -258,7 +258,7 @@ func FormatWWWAuthenticate(c *Challenge, realm string) string {
 	add("expires", c.Expires)
 	add("description", c.Description)
 
-	if len(c.Opaque) > 0 {
+	if c.Opaque != nil {
 		add("opaque", b64EncodeSortedStringMap(c.Opaque))
 	}
 
@@ -387,7 +387,7 @@ func FormatAuthorization(c *Credential) string {
 	if c.Challenge.Digest != "" {
 		challengeDict["digest"] = c.Challenge.Digest
 	}
-	if len(c.Challenge.Opaque) > 0 {
+	if c.Challenge.Opaque != nil {
 		if raw, ok := c.Challenge.Opaque["_raw"]; ok {
 			challengeDict["opaque"] = raw
 		} else {

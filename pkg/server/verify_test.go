@@ -62,3 +62,58 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 		t.Fatalf("expected successful receipt, got %#v", result)
 	}
 }
+
+func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
+	request := map[string]any{
+		"amount":    "100",
+		"currency":  "0xabc",
+		"recipient": "0xdef",
+	}
+	challenge := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+		mpp.WithMeta(map[string]string{}),
+		mpp.WithExpires(mpp.Expires.Minutes(5)),
+	)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	issued, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: "",
+		Intent:        verifyTestIntent{},
+		Request:       request,
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+		Meta:          map[string]string{},
+		Expires:       challenge.Expires,
+	})
+	if err != nil {
+		t.Fatalf("VerifyOrChallenge(issue) error = %v", err)
+	}
+	if issued.Challenge == nil || issued.Challenge.Opaque == nil {
+		t.Fatalf("issued challenge opaque = %#v, want empty map", issued.Challenge)
+	}
+
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request:       request,
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+		Meta:          map[string]string{},
+		Expires:       challenge.Expires,
+	})
+	if err != nil {
+		t.Fatalf("VerifyOrChallenge(verify) error = %v", err)
+	}
+	if result.Receipt == nil || result.Receipt.Reference != "0xreceipt" {
+		t.Fatalf("expected successful receipt, got %#v", result)
+	}
+}
