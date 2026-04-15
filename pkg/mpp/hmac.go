@@ -29,10 +29,7 @@ type GenerateChallengeIDInput struct {
 //
 // The result is base64url-encoded without padding.
 func GenerateChallengeID(opts GenerateChallengeIDInput) string {
-	requestB64 := ""
-	if len(opts.Request) > 0 {
-		requestB64 = b64EncodeAny(opts.Request)
-	}
+	requestB64 := b64EncodeRequest(opts.Request)
 
 	opaqueB64 := ""
 	if len(opts.Opaque) > 0 {

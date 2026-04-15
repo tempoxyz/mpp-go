@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // Method is the interface that payment methods must implement for client-side use.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // Transport is an http.RoundTripper that handles 402 Payment Required responses.
@@ -121,16 +121,19 @@ func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []erro
 	var challenges []mpp.Challenge
 	var errs []error
 	for _, h := range header.Values("WWW-Authenticate") {
-		h = strings.TrimSpace(h)
-		if !strings.HasPrefix(h, "Payment ") && !strings.HasPrefix(h, "payment ") {
-			continue
+		for _, part := range mpp.SplitAuthenticate(h) {
+			part = strings.TrimSpace(part)
+			scheme, _, ok := strings.Cut(part, " ")
+			if !ok || !strings.EqualFold(scheme, "Payment") {
+				continue
+			}
+			ch, err := mpp.ParseChallenge(part)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			challenges = append(challenges, *ch)
 		}
-		ch, err := mpp.ParseWWWAuthenticate(h)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		challenges = append(challenges, *ch)
 	}
 	return challenges, errs
 }

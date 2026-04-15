@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 type contextKey int
@@ -41,15 +41,51 @@ func WithIntent(name string) MiddlewareOption {
 	}
 }
 
+// ChargeMiddleware creates an http.Handler middleware for the charge intent.
+//
+// It calls Mpp.Charge with the provided ChargeParams, injects the incoming
+// Authorization header automatically, returns a 402 challenge when payment is
+// required, and stores the verified Credential and Receipt in the request
+// context on success.
+func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			chargeParams := params
+			chargeParams.Authorization = r.Header.Get("Authorization")
+
+			result, err := m.Charge(r.Context(), chargeParams)
+			if err != nil {
+				writePaymentError(w, err)
+				return
+			}
+
+			if result.Challenge != nil {
+				writeChallenge(w, result.Challenge, m.realm)
+				return
+			}
+
+			serveVerified(next, w, r, result.Credential, result.Receipt)
+		})
+	}
+}
+
 // PaymentMiddleware creates an http.Handler middleware that requires payment.
 // It intercepts requests, handles the 402 challenge flow, and injects
 // Credential and Receipt into the request context on success.
+//
+// Deprecated: use ChargeMiddleware for the charge-only Tempo flow.
+//
+// For the common charge intent, prefer ChargeMiddleware so you can pass the
+// full ChargeParams instead of only an amount.
 func PaymentMiddleware(m *Mpp, amount string, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	cfg := &middlewareConfig{
 		intentName: "charge",
 	}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if cfg.intentName == "charge" {
+		return ChargeMiddleware(m, ChargeParams{Amount: amount})
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -80,15 +116,19 @@ func PaymentMiddleware(m *Mpp, amount string, opts ...MiddlewareOption) func(htt
 				return
 			}
 
-			ctx := r.Context()
-			ctx = context.WithValue(ctx, credentialKey, result.Credential)
-			ctx = context.WithValue(ctx, receiptKey, result.Receipt)
-
-			w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
-
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveVerified(next, w, r, result.Credential, result.Receipt)
 		})
 	}
+}
+
+func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {
+	ctx := r.Context()
+	ctx = context.WithValue(ctx, credentialKey, credential)
+	ctx = context.WithValue(ctx, receiptKey, receipt)
+
+	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
+
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func writeChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {

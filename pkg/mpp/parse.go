@@ -13,59 +13,167 @@ const maxHeaderPayload = 16 * 1024
 
 // parseAuthParams parses a comma-separated list of key=value or key="value"
 // pairs from an auth-param list (RFC 9110 §11.2).
-func parseAuthParams(s string) map[string]string {
+func parseAuthParams(s string) (map[string]string, error) {
 	params := make(map[string]string)
-	s = strings.TrimSpace(s)
-	for s != "" {
-		// Find key.
-		eq := strings.IndexByte(s, '=')
-		if eq < 0 {
+	for i := 0; i < len(s); {
+		for i < len(s) && (s[i] == ',' || s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i >= len(s) {
 			break
 		}
-		key := strings.TrimSpace(s[:eq])
-		s = strings.TrimSpace(s[eq+1:])
 
-		var val string
-		if len(s) > 0 && s[0] == '"' {
-			// Quoted value.
-			end := 1
-			for end < len(s) {
-				if s[end] == '\\' && end+1 < len(s) {
-					end += 2
-					continue
-				}
-				if s[end] == '"' {
-					break
-				}
-				end++
-			}
-			val = s[1:end]
-			if end < len(s) {
-				end++ // skip closing quote
-			}
-			s = s[end:]
-		} else {
-			// Token value — ends at comma or end of string.
-			end := strings.IndexByte(s, ',')
-			if end < 0 {
-				val = strings.TrimSpace(s)
-				s = ""
-			} else {
-				val = strings.TrimSpace(s[:end])
-				s = s[end:]
-			}
+		start := i
+		for i < len(s) && isAuthParamKeyChar(s[i]) {
+			i++
+		}
+		key := s[start:i]
+		if key == "" {
+			return nil, fmt.Errorf("mpp: malformed auth-param")
 		}
 
-		// Trim leading comma/whitespace for next iteration.
-		s = strings.TrimLeft(s, ", \t")
-		params[key] = val
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i >= len(s) || s[i] != '=' {
+			break
+		}
+		i++
+
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+
+		value, next, err := readAuthParamValue(s, i)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := params[key]; exists {
+			return nil, fmt.Errorf("mpp: duplicate auth-param %q", key)
+		}
+		params[key] = value
+		i = next
 	}
-	return params
+	return params, nil
 }
 
-// ParseWWWAuthenticate parses a WWW-Authenticate header value with scheme
-// "Payment" into a Challenge.
-func ParseWWWAuthenticate(header string) (*Challenge, error) {
+// SplitAuthenticate splits a potentially merged authentication header value into
+// individual scheme values while preserving commas inside quoted auth-param values.
+func SplitAuthenticate(header string) []string {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return nil
+	}
+	var parts []string
+	inQuote := false
+	escaped := false
+	start := 0
+	for i := 0; i < len(header); i++ {
+		switch ch := header[i]; {
+		case escaped:
+			escaped = false
+		case inQuote && ch == '\\':
+			escaped = true
+		case ch == '"':
+			inQuote = !inQuote
+		case ch == ',' && !inQuote:
+			if next := nextChallengeStart(header, i+1); next >= 0 {
+				part := strings.TrimSpace(header[start:i])
+				if part != "" {
+					parts = append(parts, part)
+				}
+				start = next
+			}
+		}
+	}
+	if tail := strings.TrimSpace(header[start:]); tail != "" {
+		parts = append(parts, tail)
+	}
+	return parts
+}
+
+func nextChallengeStart(header string, start int) int {
+	for start < len(header) && (header[start] == ' ' || header[start] == '\t') {
+		start++
+	}
+	end := start
+	for end < len(header) && isTokenChar(header[end]) {
+		end++
+	}
+	if end == start || end >= len(header) {
+		return -1
+	}
+	if header[end] == '=' {
+		return -1
+	}
+	if header[end] == ' ' || header[end] == '\t' {
+		return start
+	}
+	return -1
+}
+
+func isAuthParamKeyChar(ch byte) bool {
+	switch {
+	case ch >= 'a' && ch <= 'z':
+		return true
+	case ch >= 'A' && ch <= 'Z':
+		return true
+	case ch >= '0' && ch <= '9':
+		return true
+	}
+	return ch == '_' || ch == '-'
+}
+
+func isTokenChar(ch byte) bool {
+	switch {
+	case ch >= 'a' && ch <= 'z':
+		return true
+	case ch >= 'A' && ch <= 'Z':
+		return true
+	case ch >= '0' && ch <= '9':
+		return true
+	}
+	switch ch {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
+}
+
+func readAuthParamValue(input string, start int) (string, int, error) {
+	if start < len(input) && input[start] == '"' {
+		return readQuotedAuthParamValue(input, start+1)
+	}
+	end := start
+	for end < len(input) && input[end] != ',' {
+		end++
+	}
+	return strings.TrimSpace(input[start:end]), end, nil
+}
+
+func readQuotedAuthParamValue(input string, start int) (string, int, error) {
+	var builder strings.Builder
+	escaped := false
+	for i := start; i < len(input); i++ {
+		switch ch := input[i]; {
+		case escaped:
+			builder.WriteByte(ch)
+			escaped = false
+		case ch == '\\':
+			escaped = true
+		case ch == '"':
+			return builder.String(), i + 1, nil
+		default:
+			builder.WriteByte(ch)
+		}
+	}
+	return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+}
+
+// ParseChallenge parses a Payment challenge from a WWW-Authenticate header value.
+func ParseChallenge(header string) (*Challenge, error) {
+	header = strings.TrimSpace(header)
 	if len(header) > maxHeaderPayload {
 		return nil, fmt.Errorf("mpp: WWW-Authenticate header exceeds maximum size")
 	}
@@ -75,27 +183,26 @@ func ParseWWWAuthenticate(header string) (*Challenge, error) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
 	}
 
-	params := parseAuthParams(rest)
+	params, err := parseAuthParams(rest)
+	if err != nil {
+		return nil, err
+	}
 
 	id := params["id"]
+	realm := params["realm"]
 	method := params["method"]
 	intent := params["intent"]
 	requestB64 := params["request"]
 
-	if id == "" || method == "" || intent == "" {
-		return nil, fmt.Errorf("mpp: missing required challenge fields (id, method, intent)")
+	if id == "" || realm == "" || method == "" || intent == "" || requestB64 == "" {
+		return nil, fmt.Errorf("mpp: missing required challenge fields (id, realm, method, intent, request)")
 	}
 
-	var request map[string]any
-	if requestB64 != "" {
-		var err error
-		request, err = B64Decode(requestB64)
-		if err != nil {
-			return nil, fmt.Errorf("mpp: invalid request field: %w", err)
-		}
+	request, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: invalid request field: %w", err)
 	}
 
-	realm := params["realm"]
 	expires := params["expires"]
 	digest := params["digest"]
 	description := params["description"]
@@ -103,11 +210,12 @@ func ParseWWWAuthenticate(header string) (*Challenge, error) {
 	var opaque map[string]string
 	if opaqueB64, ok := params["opaque"]; ok && opaqueB64 != "" {
 		opaqueMap, err := B64Decode(opaqueB64)
-		if err == nil {
-			opaque = make(map[string]string, len(opaqueMap))
-			for k, v := range opaqueMap {
-				opaque[k] = anyStr(v)
-			}
+		if err != nil {
+			return nil, fmt.Errorf("mpp: invalid opaque field: %w", err)
+		}
+		opaque = make(map[string]string, len(opaqueMap))
+		for k, v := range opaqueMap {
+			opaque[k] = anyStr(v)
 		}
 	}
 
@@ -132,7 +240,7 @@ func FormatWWWAuthenticate(c *Challenge, realm string) string {
 	var parts []string
 	add := func(k, v string) {
 		if v != "" {
-			parts = append(parts, fmt.Sprintf(`%s="%s"`, k, v))
+			parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
 		}
 	}
 
@@ -142,8 +250,8 @@ func FormatWWWAuthenticate(c *Challenge, realm string) string {
 	add("intent", c.Intent)
 
 	reqB64 := c.RequestB64
-	if reqB64 == "" && len(c.Request) > 0 {
-		reqB64 = b64EncodeAny(c.Request)
+	if reqB64 == "" {
+		reqB64 = b64EncodeRequest(c.Request)
 	}
 	add("request", reqB64)
 	add("digest", c.Digest)
@@ -157,14 +265,30 @@ func FormatWWWAuthenticate(c *Challenge, realm string) string {
 	return "Payment " + strings.Join(parts, ", ")
 }
 
-// ParseAuthorization parses an Authorization header value with scheme "Payment"
-// into a Credential.
+func b64EncodeRequest(request map[string]any) string {
+	if request == nil {
+		request = map[string]any{}
+	}
+	return b64EncodeAny(request)
+}
+
+func escapeQuoted(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
+}
+
+// ParseCredential parses a Payment credential from an Authorization header value.
 //
 // Expected format: Payment <base64url-json>
 // The JSON payload contains: challenge (echo), payload, and optional source.
-func ParseAuthorization(header string) (*Credential, error) {
+func ParseCredential(header string) (*Credential, error) {
+	header = strings.TrimSpace(header)
 	if len(header) > maxHeaderPayload {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
+	}
+
+	header = FindPaymentAuthorization(header)
+	if header == "" {
+		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
 	scheme, rest, ok := strings.Cut(header, " ")
@@ -205,10 +329,35 @@ func ParseAuthorization(header string) (*Credential, error) {
 		Expires: anyStr(challengeMap["expires"]),
 		Digest:  anyStr(challengeMap["digest"]),
 	}
+	if echo.ID == "" {
+		return nil, fmt.Errorf("mpp: credential challenge missing required field: id")
+	}
+	if echo.Method == "" {
+		return nil, fmt.Errorf("mpp: credential challenge missing required field: method")
+	}
+	if echo.Intent == "" {
+		return nil, fmt.Errorf("mpp: credential challenge missing required field: intent")
+	}
+	if echo.Request == "" {
+		return nil, fmt.Errorf("mpp: credential challenge missing required field: request")
+	}
 
 	if opaqueRaw, ok := challengeMap["opaque"]; ok {
-		if opaqueStr, ok := opaqueRaw.(string); ok {
-			echo.Opaque = map[string]string{"_raw": opaqueStr}
+		switch opaque := opaqueRaw.(type) {
+		case string:
+			decoded, err := B64Decode(opaque)
+			if err != nil {
+				return nil, fmt.Errorf("mpp: invalid credential opaque field: %w", err)
+			}
+			echo.Opaque = make(map[string]string, len(decoded))
+			for key, value := range decoded {
+				echo.Opaque[key] = anyStr(value)
+			}
+		case map[string]any:
+			echo.Opaque = make(map[string]string, len(opaque))
+			for key, value := range opaque {
+				echo.Opaque[key] = anyStr(value)
+			}
 		}
 	}
 

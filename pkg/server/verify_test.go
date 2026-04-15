@@ -1,0 +1,64 @@
+package server
+
+import (
+	"context"
+	"testing"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+)
+
+type verifyTestIntent struct{}
+
+func (verifyTestIntent) Name() string { return "charge" }
+
+func (verifyTestIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
+	return mpp.Success("0xreceipt", mpp.WithReceiptMethod("tempo")), nil
+}
+
+func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
+	request := map[string]any{
+		"amount":    "100",
+		"currency":  "0xabc",
+		"recipient": "0xdef",
+		"methodDetails": map[string]any{
+			"chainId":        42431,
+			"supportedModes": []string{"pull", "push"},
+		},
+	}
+	challenge := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+		mpp.WithExpires(mpp.Expires.Minutes(5)),
+	)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request: map[string]any{
+			"amount":    "100",
+			"currency":  "0xabc",
+			"recipient": "0xdef",
+			"methodDetails": map[string]any{
+				"chainId":        float64(42431),
+				"supportedModes": []any{"pull", "push"},
+			},
+		},
+		Realm:     "api.example.com",
+		SecretKey: "secret-key",
+		Method:    "tempo",
+		Expires:   challenge.Expires,
+	})
+	if err != nil {
+		t.Fatalf("VerifyOrChallenge() error = %v", err)
+	}
+	if result.Receipt == nil || result.Receipt.Reference != "0xreceipt" {
+		t.Fatalf("expected successful receipt, got %#v", result)
+	}
+}

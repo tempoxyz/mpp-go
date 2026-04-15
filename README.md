@@ -2,6 +2,12 @@
 
 Go SDK for the [Machine Payments Protocol](https://mpp.dev).
 
+This SDK focuses on the Tempo `charge` flow for HTTP 402 payments, including transaction, hash, proof, split-payment, and fee-payer support.
+
+## Documentation
+
+Full documentation, API reference, and guides are available at **[mpp.dev/sdk/go](https://mpp.dev/sdk/go)**.
+
 ## Install
 
 ```bash
@@ -19,42 +25,36 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/tempoxyz/mpp-go/mpp"
-	"github.com/tempoxyz/mpp-go/server"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
-	m := server.New(myMethod, "api.example.com", "my-secret-key")
-
-	http.HandleFunc("/resource", func(w http.ResponseWriter, r *http.Request) {
-		result, err := m.Charge(r.Context(), server.ChargeParams{
-			Authorization: r.Header.Get("Authorization"),
-			Amount:        "500000",
-			Currency:      "0x20c0000000000000000000000000000000000000",
-			Recipient:     "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToWWWAuthenticate("api.example.com"))
-			w.Header().Set("Content-Type", "application/problem+json")
-			w.WriteHeader(http.StatusPaymentRequired)
-			pe := mpp.ErrPaymentRequired("api.example.com", "")
-			json.NewEncoder(w).Encode(pe.ProblemDetails(result.Challenge.ID))
-			return
-		}
-
-		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
-		json.NewEncoder(w).Encode(map[string]any{
-			"data":  "paid content",
-			"payer": result.Credential.Source,
-		})
+	intent, _ := charge.NewChargeIntent(charge.ChargeIntentConfig{
+		RPCURL: "https://rpc.moderato.tempo.xyz",
 	})
 
-	http.ListenAndServe(":8080", nil)
+	method := charge.NewMethod(charge.MethodConfig{
+		Intent:    intent,
+		ChainID:   42431,
+		Currency:  tempo.DefaultCurrencyForChain(42431),
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+	})
+
+	payment := mppserver.New(method, "api.example.com", "replace-me")
+
+	handler := mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+		Amount:      "0.50",
+		Description: "Paid content",
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":  "paid content",
+			"payer": mppserver.CredentialFromContext(r.Context()).Source,
+		})
+	}))
+
+	_ = http.ListenAndServe(":8080", handler)
 }
 ```
 
@@ -65,69 +65,65 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 
-	"github.com/tempoxyz/mpp-go/client"
+	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 
 func main() {
-	c := client.New([]client.Method{myTempoMethod})
-	resp, err := c.Get(context.Background(), "https://api.example.com/resource")
+	method, _ := charge.New(charge.Config{
+		PrivateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+		ChainID:    42431,
+		RPCURL:     "https://rpc.moderato.tempo.xyz",
+	})
+
+	client := mppclient.New([]mppclient.Method{method})
+	response, err := client.Get(context.Background(), "https://api.example.com/paid")
 	if err != nil {
 		panic(err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	fmt.Println(string(body))
+	defer response.Body.Close()
+
+	receipt, _ := mpp.ParsePaymentReceipt(response.Header.Get("Payment-Receipt"))
+
+	var body struct {
+		Data  string `json:"data"`
+		Payer string `json:"payer"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&body)
+
+	fmt.Printf("paid request for %q from %s with receipt %s\n", body.Data, body.Payer, receipt.Reference)
 }
 ```
 
-### Middleware
+The server issues the `WWW-Authenticate: Payment ...` challenge automatically, and the generic client retries automatically with a Tempo credential.
 
-```go
-mux := http.NewServeMux()
+## Examples
 
-protected := server.PaymentMiddleware(m, "500000")
-
-mux.Handle("/paid", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	cred := server.CredentialFromContext(r.Context())
-	receipt := server.ReceiptFromContext(r.Context())
-	json.NewEncoder(w).Encode(map[string]any{
-		"data":    "paid content",
-		"payer":   cred.Source,
-		"receipt": receipt.Reference,
-	})
-})))
-```
-
-## Packages
-
-| Package | Description |
+| Example | Description |
 |---------|-------------|
-| `mpp` | Core types — Challenge, Credential, Receipt, errors, header parsing |
-| `client` | HTTP client with automatic 402 payment handling |
-| `server` | Server-side verification, middleware, challenge generation |
+| [charge-basic](./examples/charge-basic/) | Generic Tempo charge flow using the high-level MPP client and server helpers |
+| [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential |
+| [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer |
 
-## Core Types
+The examples run against the local Tempo devnet in [`docker-compose.yml`](./docker-compose.yml).
 
-```go
-// Challenge — server-issued payment challenge (WWW-Authenticate)
-challenge := mpp.NewChallenge(secretKey, realm, "tempo", "charge", request,
-	mpp.WithExpires(mpp.Expires.Minutes(5)),
-	mpp.WithDescription("API access"),
-)
+```bash
+docker compose up -d
 
-// Credential — client payment proof (Authorization)
-cred, err := mpp.FromAuthorization(header)
-
-// Receipt — server payment confirmation (Payment-Receipt)
-receipt := mpp.Success("0x...", mpp.WithReceiptMethod("tempo"))
+go run ./examples/charge-basic
+go run ./examples/charge-hash
+go run ./examples/charge-fee-payer
 ```
+
+Set `TEMPO_RPC_URL` if you want the examples to target a different Tempo RPC.
 
 ## Protocol
 
-Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/). See [mpp-specs](https://tempoxyz.github.io/mpp-specs/) for the full spec.
+Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/). See [mpp-specs](https://tempoxyz.github.io/mpp-specs/) for the full specification.
 
 ## License
 
