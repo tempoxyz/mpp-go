@@ -2,6 +2,14 @@
 
 Go SDK for the [Machine Payments Protocol](https://mpp.dev).
 
+This repository is organized in a `tempo-go`-style `pkg/*` layout and focuses on the practical charge-only HTTP 402 flow:
+
+- Generic protocol primitives in `pkg/mpp`
+- Generic HTTP 402 client/server flow in `pkg/client` and `pkg/server`
+- Tempo charge request types, attribution helpers, and replay stores in `pkg/tempo`
+- Tempo charge credential creation in `pkg/tempo/client`
+- Tempo charge verification, fee-payer co-signing, and receipt validation in `pkg/tempo/server`
+
 ## Install
 
 ```bash
@@ -19,19 +27,28 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/tempoxyz/mpp-go/mpp"
-	"github.com/tempoxyz/mpp-go/server"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	genericserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	temposerver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
-	m := server.New(myMethod, "api.example.com", "my-secret-key")
+	intent, _ := temposerver.NewChargeIntent(temposerver.ChargeIntentConfig{
+		RPCURL: "https://rpc.moderato.tempo.xyz",
+	})
+	method := temposerver.NewMethod(temposerver.MethodConfig{
+		Intent:    intent,
+		ChainID:   42431,
+		Currency:  tempo.DefaultCurrencyForChain(42431),
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+	})
+	payment := genericserver.New(method, "api.example.com", "replace-me")
 
-	http.HandleFunc("/resource", func(w http.ResponseWriter, r *http.Request) {
-		result, err := m.Charge(r.Context(), server.ChargeParams{
+	http.HandleFunc("/paid", func(w http.ResponseWriter, r *http.Request) {
+		result, err := payment.Charge(r.Context(), genericserver.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
-			Amount:        "500000",
-			Currency:      "0x20c0000000000000000000000000000000000000",
-			Recipient:     "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+			Amount:        "0.50",
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -40,10 +57,8 @@ func main() {
 
 		if result.IsChallenge() {
 			w.Header().Set("WWW-Authenticate", result.Challenge.ToWWWAuthenticate("api.example.com"))
-			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusPaymentRequired)
-			pe := mpp.ErrPaymentRequired("api.example.com", "")
-			json.NewEncoder(w).Encode(pe.ProblemDetails(result.Challenge.ID))
+			json.NewEncoder(w).Encode(mpp.ErrPaymentRequired("api.example.com", "").ProblemDetails(result.Challenge.ID))
 			return
 		}
 
@@ -54,7 +69,7 @@ func main() {
 		})
 	})
 
-	http.ListenAndServe(":8080", nil)
+	_ = http.ListenAndServe(":8080", nil)
 }
 ```
 
@@ -68,66 +83,89 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/tempoxyz/mpp-go/client"
+	genericclient "github.com/tempoxyz/mpp-go/pkg/client"
+	tempoclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 
 func main() {
-	c := client.New([]client.Method{myTempoMethod})
-	resp, err := c.Get(context.Background(), "https://api.example.com/resource")
+	method, _ := tempoclient.New(tempoclient.Config{
+		PrivateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+		ChainID:    42431,
+		RPCURL:     "https://rpc.moderato.tempo.xyz",
+	})
+
+	client := genericclient.New([]genericclient.Method{method})
+	resp, err := client.Get(context.Background(), "https://api.example.com/paid")
 	if err != nil {
 		panic(err)
 	}
 	defer resp.Body.Close()
+
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }
 ```
 
-### Middleware
+## Tempo Charge Surface
 
-```go
-mux := http.NewServeMux()
+The Tempo implementation in this repo covers the same first-pass feature set we aligned on across the SDKs:
 
-protected := server.PaymentMiddleware(m, "500000")
+- HTTP 402 challenge and retry flow
+- Tempo `charge` intent only
+- Transaction credential payloads
+- Hash credential payloads
+- Fee-payer co-signing on the server
+- Client-side attribution memo generation
+- Server-side transfer/log validation
+- Replay protection via `tempo.Store`
 
-mux.Handle("/paid", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	cred := server.CredentialFromContext(r.Context())
-	receipt := server.ReceiptFromContext(r.Context())
-	json.NewEncoder(w).Encode(map[string]any{
-		"data":    "paid content",
-		"payer":   cred.Source,
-		"receipt": receipt.Reference,
-	})
-})))
-```
+This pass intentionally does not include sessions, MCP, proxies, multi-method negotiation, discovery, or non-Tempo payment methods.
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| `mpp` | Core types — Challenge, Credential, Receipt, errors, header parsing |
-| `client` | HTTP client with automatic 402 payment handling |
-| `server` | Server-side verification, middleware, challenge generation |
+| `github.com/tempoxyz/mpp-go/pkg/mpp` | Challenge, Credential, Receipt, HMAC binding, expiry helpers, header parsing |
+| `github.com/tempoxyz/mpp-go/pkg/client` | Generic HTTP 402-aware transport and client |
+| `github.com/tempoxyz/mpp-go/pkg/server` | Generic verify-or-challenge flow and middleware helpers |
+| `github.com/tempoxyz/mpp-go/pkg/tempo` | Shared Tempo charge types, defaults, attribution helpers, replay store |
+| `github.com/tempoxyz/mpp-go/pkg/tempo/client` | Tempo charge credential creation for transaction and hash flows |
+| `github.com/tempoxyz/mpp-go/pkg/tempo/server` | Tempo charge verification, replay checks, fee-payer co-signing |
 
-## Core Types
+## Examples
 
-```go
-// Challenge — server-issued payment challenge (WWW-Authenticate)
-challenge := mpp.NewChallenge(secretKey, realm, "tempo", "charge", request,
-	mpp.WithExpires(mpp.Expires.Minutes(5)),
-	mpp.WithDescription("API access"),
-)
+| Example | Description |
+|---------|-------------|
+| [`examples/charge-basic`](./examples/charge-basic) | Basic Tempo charge challenge + client retry flow |
+| [`examples/charge-hash`](./examples/charge-hash) | Hash credential flow (`push` mode) |
+| [`examples/charge-fee-payer`](./examples/charge-fee-payer) | Sponsored transaction flow with a fee payer |
 
-// Credential — client payment proof (Authorization)
-cred, err := mpp.FromAuthorization(header)
+## Testing
 
-// Receipt — server payment confirmation (Payment-Receipt)
-receipt := mpp.Success("0x...", mpp.WithReceiptMethod("tempo"))
+```bash
+go test ./...
 ```
+
+For a true end-to-end Tempo charge test against a local node, this repo includes the
+same Docker-based devnet pattern used in `tempo-go`.
+
+```bash
+# Start local Tempo node
+docker compose up -d
+
+# Run local-node integration tests
+make integration
+
+# Stop node
+docker compose down
+```
+
+The integration suite exercises the full HTTP 402 retry flow against a live Tempo RPC,
+including transaction credentials, fee-payer co-signing, hash credentials, and replay protection.
 
 ## Protocol
 
-Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/). See [mpp-specs](https://tempoxyz.github.io/mpp-specs/) for the full spec.
+Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/). See [mpp-specs](https://tempoxyz.github.io/mpp-specs/) for the full specification.
 
 ## License
 

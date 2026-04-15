@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 type contextKey int

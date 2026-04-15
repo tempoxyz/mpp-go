@@ -10,7 +10,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // Intent is the interface for payment intents (server-side verification).
@@ -23,6 +23,13 @@ type Intent interface {
 type Method interface {
 	Name() string
 	Intents() map[string]Intent
+}
+
+// ChargeRequestBuilder lets a method provide a canonical request shape for the
+// generic charge helper. Tempo uses this to normalize human amounts and nest
+// method-specific fields under methodDetails.
+type ChargeRequestBuilder interface {
+	BuildChargeRequest(params ChargeParams) (map[string]any, error)
 }
 
 // Mpp is the server-side payment handler.
@@ -47,12 +54,16 @@ type ChargeParams struct {
 	Amount        string
 	Currency      string
 	Recipient     string
+	ExternalID    string
 	Expires       string
 	Description   string
 	Memo          string
 	FeePayer      bool
+	FeePayerURL   string
 	ChainID       int
-	Extra         map[string]string
+	Meta          map[string]string
+	// Extra is a deprecated alias for Meta.
+	Extra map[string]string
 }
 
 // ChargeResult is either a Challenge or a verified (Credential, Receipt) pair.
@@ -74,24 +85,38 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		return nil, fmt.Errorf("method %q does not support charge intent", m.method.Name())
 	}
 
-	request := map[string]any{
-		"amount":   params.Amount,
-		"currency": params.Currency,
+	request := map[string]any{}
+	if builder, ok := m.method.(ChargeRequestBuilder); ok {
+		var err error
+		request, err = builder.BuildChargeRequest(params)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		request = map[string]any{
+			"amount":   params.Amount,
+			"currency": params.Currency,
+		}
+		if params.Recipient != "" {
+			request["recipient"] = params.Recipient
+		}
+		if params.ExternalID != "" {
+			request["externalId"] = params.ExternalID
+		}
+		if params.FeePayer {
+			request["feePayer"] = true
+		}
+		if params.ChainID != 0 {
+			request["chainId"] = params.ChainID
+		}
+		if params.Memo != "" {
+			request["memo"] = params.Memo
+		}
 	}
-	if params.Recipient != "" {
-		request["recipient"] = params.Recipient
-	}
-	if params.FeePayer {
-		request["feePayer"] = true
-	}
-	if params.ChainID != 0 {
-		request["chainId"] = params.ChainID
-	}
-	if params.Memo != "" {
-		request["memo"] = params.Memo
-	}
-	for k, v := range params.Extra {
-		request[k] = v
+
+	meta := params.Meta
+	if meta == nil {
+		meta = params.Extra
 	}
 
 	result, err := VerifyOrChallenge(ctx, VerifyParams{
@@ -102,7 +127,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		SecretKey:     m.secretKey,
 		Method:        m.method.Name(),
 		Description:   params.Description,
-		Meta:          params.Extra,
+		Meta:          meta,
 		Expires:       params.Expires,
 	})
 	if err != nil {

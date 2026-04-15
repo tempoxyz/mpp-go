@@ -3,10 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // defaultExpiry is 5 minutes from now.
@@ -79,8 +78,8 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 
 	// 2. Extract "Payment" scheme.
-	authHeader := params.Authorization
-	if !hasPaymentScheme(authHeader) {
+	authHeader := mpp.ExtractPaymentScheme(params.Authorization)
+	if authHeader == "" {
 		return &VerifyResult{Challenge: challenge}, nil
 	}
 
@@ -125,16 +124,11 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return nil, mpp.ErrInvalidChallenge(echoed.ID, "intent mismatch")
 	}
 
-	// Verify request fields match (amount, currency, recipient).
-	for _, field := range []string{"amount", "currency", "recipient"} {
-		routeVal, routeOK := params.Request[field]
-		echoedVal, echoedOK := echoedRequest[field]
-		if routeOK && echoedOK && fmt.Sprint(routeVal) != fmt.Sprint(echoedVal) {
-			return nil, mpp.ErrInvalidChallenge(
-				echoed.ID,
-				fmt.Sprintf("credential %s does not match this route's requirements", field),
-			)
-		}
+	if !mpp.CanonicalEqual(echoedRequest, params.Request) {
+		return nil, mpp.ErrInvalidChallenge(
+			echoed.ID,
+			"credential request does not match this route's requirements",
+		)
 	}
 
 	// 7. Check expiry.
@@ -155,6 +149,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	// 8. Call intent.Verify.
 	receipt, err := params.Intent.Verify(ctx, credential, params.Request)
 	if err != nil {
+		if pe, ok := err.(*mpp.PaymentError); ok {
+			return nil, pe
+		}
 		return nil, mpp.ErrVerificationFailed(err.Error())
 	}
 
@@ -163,12 +160,6 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		Credential: credential,
 		Receipt:    receipt,
 	}, nil
-}
-
-// hasPaymentScheme checks if an Authorization header contains a Payment scheme.
-func hasPaymentScheme(header string) bool {
-	lower := strings.ToLower(strings.TrimSpace(header))
-	return strings.HasPrefix(lower, "payment ")
 }
 
 // echoedRequestMap decodes the echoed request from a credential's challenge echo.

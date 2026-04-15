@@ -65,10 +65,7 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 		o(cfg)
 	}
 
-	requestB64 := ""
-	if len(request) > 0 {
-		requestB64 = b64EncodeAny(request)
-	}
+	requestB64 := b64EncodeRequest(request)
 
 	id := GenerateChallengeID(GenerateChallengeIDInput{
 		SecretKey: secretKey,
@@ -125,8 +122,8 @@ func (c *Challenge) Verify(secretKey, realm string) bool {
 // in a Credential.
 func (c *Challenge) ToEcho() ChallengeEcho {
 	reqB64 := c.RequestB64
-	if reqB64 == "" && len(c.Request) > 0 {
-		reqB64 = b64EncodeAny(c.Request)
+	if reqB64 == "" {
+		reqB64 = b64EncodeRequest(c.Request)
 	}
 	return ChallengeEcho{
 		ID:      c.ID,

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tempoxyz/mpp-go/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // mockMethod implements Method for testing.
@@ -193,13 +193,40 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 }
 
 func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
-	stripeChallenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", nil)
-	tempoChallenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil)
+	stripeChallenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", map[string]any{"amount": "100"})
+	tempoChallenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", map[string]any{"amount": "100"})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			w.Header().Add("WWW-Authenticate", stripeChallenge.ToWWWAuthenticate("realm"))
 			w.Header().Add("WWW-Authenticate", tempoChallenge.ToWWWAuthenticate("realm"))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cred := newTestCredential("tempo")
+	method := &mockMethod{name: "tempo", cred: cred}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
+	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", map[string]any{"amount": "100"})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+challenge.ToWWWAuthenticate("realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
