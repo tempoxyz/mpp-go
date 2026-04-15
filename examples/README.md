@@ -12,7 +12,7 @@ Start the local Tempo devnet before running them:
 docker compose up -d
 ```
 
-The examples use `mppclient` and `mppserver` for the generic HTTP 402 packages.
+The examples import `pkg/client` and `pkg/server` by their bare package names.
 Each file aliases the Tempo charge package to `charge`, since it only uses one
 side of the Tempo flow at a time.
 

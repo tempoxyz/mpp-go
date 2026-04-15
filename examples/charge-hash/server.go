@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
@@ -28,20 +28,20 @@ func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
 		Recipient:      devnet.Recipient,
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
-	payment := mppserver.New(method, devnet.Realm, "example-secret")
+	payment := server.New(method, devnet.Realm, "example-secret")
 
-	handler := mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+	handler := server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:         "0.50",
 		Description:    "Hash credential Tempo charge example",
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tx": mppserver.ReceiptFromContext(r.Context()).Reference,
+			"tx": server.ReceiptFromContext(r.Context()).Reference,
 		})
 	}))
 
-	server := httptest.NewServer(handler)
-	return &exampleServer{url: server.URL, server: server}, nil
+	srv := httptest.NewServer(handler)
+	return &exampleServer{url: srv.URL, server: srv}, nil
 }
 
 func (s *exampleServer) Close() {
