@@ -24,11 +24,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 
 		start := i
-		for i < len(s) {
-			ch := s[i]
-			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '_' && ch != '-' {
-				break
-			}
+		for i < len(s) && isAuthParamKeyChar(s[i]) {
 			i++
 		}
 		key := s[start:i]
@@ -114,6 +110,18 @@ func nextChallengeStart(header string, start int) int {
 		return start
 	}
 	return -1
+}
+
+func isAuthParamKeyChar(ch byte) bool {
+	switch {
+	case ch >= 'a' && ch <= 'z':
+		return true
+	case ch >= 'A' && ch <= 'Z':
+		return true
+	case ch >= '0' && ch <= '9':
+		return true
+	}
+	return ch == '_' || ch == '-'
 }
 
 func isTokenChar(ch byte) bool {

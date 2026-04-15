@@ -70,6 +70,11 @@ func TestSplitAuthenticate(t *testing.T) {
 			header: `  ` + payment + `  ,   Bearer token   `,
 			want:   []string{payment, `Bearer token`},
 		},
+		{
+			name:   "auth param assignment does not start a new scheme",
+			header: `Digest realm="example", token68=abc123, ` + payment,
+			want:   []string{`Digest realm="example", token68=abc123`, payment},
+		},
 	}
 
 	for _, tt := range tests {
@@ -182,9 +187,24 @@ func TestParseChallenge(t *testing.T) {
 			wantErr: `duplicate auth-param`,
 		},
 		{
+			name:    "unterminated quoted auth param",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", opaque="unterminated`,
+			wantErr: `unterminated quoted auth-param`,
+		},
+		{
+			name:    "malformed auth param key",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", =="bad"`,
+			wantErr: `malformed auth-param`,
+		},
+		{
 			name:    "invalid request encoding",
 			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="not-base64"`,
 			wantErr: `invalid request field`,
+		},
+		{
+			name:    "header too large",
+			header:  "Payment " + strings.Repeat("a", maxHeaderPayload),
+			wantErr: `WWW-Authenticate header exceeds maximum size`,
 		},
 	}
 
@@ -280,6 +300,11 @@ func TestParseCredential(t *testing.T) {
 			name:    "invalid opaque encoding",
 			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo", "intent": "charge", "request": "e30", "opaque": "not-base64"}, "payload": map[string]any{}}),
 			wantErr: `invalid credential opaque field`,
+		},
+		{
+			name:    "authorization header too large",
+			header:  "Payment " + strings.Repeat("a", maxHeaderPayload),
+			wantErr: `Authorization header exceeds maximum size`,
 		},
 	}
 
