@@ -49,6 +49,11 @@ func New(method Method, realm, secretKey string) *Mpp {
 	}
 }
 
+// Realm returns the WWW-Authenticate realm used by this payment handler.
+func (m *Mpp) Realm() string {
+	return m.realm
+}
+
 // ChargeParams contains the parameters for a charge operation.
 type ChargeParams struct {
 	// Authorization is the incoming Authorization header value.
