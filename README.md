@@ -19,12 +19,13 @@ Go SDK for the [**Machine Payments Protocol**](https://mpp.dev)
 
 [![Website](https://img.shields.io/badge/website-mpp.dev-black)](https://mpp.dev)
 [![Docs](https://img.shields.io/badge/docs-mpp.dev-blue)](https://mpp.dev/sdk/go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tempoxyz/mpp-go.svg)](https://pkg.go.dev/github.com/tempoxyz/mpp-go)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 
 [MPP](https://mpp.dev) lets any client — agents, apps, or humans — pay for any service in the same HTTP request. It standardizes [HTTP 402](https://mpp.dev/protocol/http-402) with an open [IETF specification](https://paymentauth.org), so servers can charge and clients can pay without API keys, billing accounts, or checkout flows.
 ## Documentation
 
-You can get started today by reading the [Go SDK docs](https://mpp.dev/sdk/go), exploring the [protocol overview](https://mpp.dev/protocol/), or jumping straight to the [quickstart](https://mpp.dev/quickstart/).
+You can get started today by reading the [Go SDK docs](https://mpp.dev/sdk/go), the module-level [Go doc reference](https://pkg.go.dev/github.com/tempoxyz/mpp-go), exploring the [protocol overview](https://mpp.dev/protocol/), or jumping straight to the [quickstart](https://mpp.dev/quickstart/).
 
 Package docs:
 
