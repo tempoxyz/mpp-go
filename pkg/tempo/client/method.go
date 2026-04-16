@@ -130,6 +130,9 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	if credentialType == tempo.CredentialTypeProof {
 		return nil, fmt.Errorf("tempo client: proof credentials are only valid for zero-amount challenges")
 	}
+	if credentialType == tempo.CredentialTypeHash && request.MethodDetails.Memo != "" {
+		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with explicit memo challenges")
+	}
 	if credentialType == tempo.CredentialTypeHash && request.MethodDetails.FeePayer {
 		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
 	}

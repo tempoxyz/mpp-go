@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -137,6 +138,21 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return nil, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential request does not match this route's requirements",
+		)
+	}
+	if echoed.Expires == "" {
+		return nil, mpp.ErrInvalidChallenge(echoed.ID, "missing required expires")
+	}
+	if params.Expires != "" && echoed.Expires != params.Expires {
+		return nil, mpp.ErrInvalidChallenge(
+			echoed.ID,
+			"credential expires does not match this route's requirements",
+		)
+	}
+	if !reflect.DeepEqual(echoed.Opaque, challenge.Opaque) {
+		return nil, mpp.ErrInvalidChallenge(
+			echoed.ID,
+			"credential opaque metadata does not match this route's requirements",
 		)
 	}
 

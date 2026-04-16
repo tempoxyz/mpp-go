@@ -125,7 +125,7 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		FeePayerURL:    feePayerURL,
 		Memo:           memo,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
-		SupportedModes: resolvedModes(params.SupportedModes, m.supportedModes),
+		SupportedModes: resolvedModes(memo, params.SupportedModes, m.supportedModes),
 	})
 	if err != nil {
 		return nil, err
@@ -133,9 +133,24 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	return request.Map(), nil
 }
 
-func resolvedModes(requestModes, defaultModes []tempo.ChargeMode) []tempo.ChargeMode {
+func resolvedModes(memo string, requestModes, defaultModes []tempo.ChargeMode) []tempo.ChargeMode {
+	var modes []tempo.ChargeMode
 	if len(requestModes) > 0 {
-		return append([]tempo.ChargeMode(nil), requestModes...)
+		modes = append([]tempo.ChargeMode(nil), requestModes...)
+	} else {
+		modes = append([]tempo.ChargeMode(nil), defaultModes...)
 	}
-	return append([]tempo.ChargeMode(nil), defaultModes...)
+	if memo == "" {
+		return modes
+	}
+	filtered := make([]tempo.ChargeMode, 0, len(modes))
+	for _, mode := range modes {
+		if mode != tempo.ChargeModePush {
+			filtered = append(filtered, mode)
+		}
+	}
+	if len(filtered) == 0 {
+		return []tempo.ChargeMode{tempo.ChargeModePull}
+	}
+	return filtered
 }

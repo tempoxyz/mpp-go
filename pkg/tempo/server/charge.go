@@ -140,6 +140,9 @@ func (i *Intent) verifyHash(
 	hash string,
 	source *sourceDID,
 ) (*mpp.Receipt, error) {
+	if request.MethodDetails.Memo != "" {
+		return nil, mpp.ErrInvalidPayload("hash credentials are not supported when the primary transfer uses an explicit memo")
+	}
 	if source == nil {
 		return nil, mpp.ErrInvalidPayload("hash credential must include a source")
 	}

@@ -425,6 +425,43 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 	}
 }
 
+func TestChargeFlow_HashCredentialRejectsExplicitPrimaryMemo(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:         "0.50",
+		Currency:       testCurrency,
+		Recipient:      testRecipient,
+		Decimals:       6,
+		ChainID:        42431,
+		Memo:           "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	if err != nil {
+		t.Fatalf("NewSigner() error = %v", err)
+	}
+	challenge := buildChallenge(t, request)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload: tempo.ChargeCredentialPayload{
+			Type: tempo.CredentialTypeHash,
+			Hash: testReceiptHash,
+		}.Map(),
+		Source: tempo.ProofSource(42431, signer.Address()),
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: newMockRPC(request)})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "explicit memo") {
+		t.Fatalf("Verify() error = %v, want explicit memo rejection", err)
+	}
+}
+
 func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
