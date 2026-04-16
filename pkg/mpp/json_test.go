@@ -39,6 +39,46 @@ func TestChallengeJSONMarshalUsesDecodedRequest(t *testing.T) {
 	}
 }
 
+func TestChallengeJSONOpaqueRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	rawOpaque := b64EncodeAny(map[string]any{"trace": "123"})
+	challenge := Challenge{
+		ID:         "challenge-id",
+		Realm:      "api.example.com",
+		Method:     "tempo",
+		Intent:     "charge",
+		RequestB64: b64EncodeAny(map[string]any{"amount": "100"}),
+		Opaque:     map[string]string{"_raw": rawOpaque},
+	}
+
+	encoded, err := json.Marshal(challenge)
+	if err != nil {
+		t.Fatalf("json.Marshal(challenge) error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
+	}
+
+	opaque, ok := decoded["opaque"].(map[string]any)
+	if !ok {
+		t.Fatalf("challenge JSON opaque = %#v, want object", decoded["opaque"])
+	}
+	if opaque["trace"] != "123" {
+		t.Fatalf("challenge JSON opaque[trace] = %#v, want %q", opaque["trace"], "123")
+	}
+
+	var roundTripped Challenge
+	if err := json.Unmarshal([]byte(`{"id":"challenge-id","realm":"api.example.com","method":"tempo","intent":"charge","request":{"amount":"100"},"opaque":"`+rawOpaque+`"}`), &roundTripped); err != nil {
+		t.Fatalf("json.Unmarshal(challenge) error = %v", err)
+	}
+	if roundTripped.Opaque["trace"] != "123" {
+		t.Fatalf("challenge.Opaque[trace] = %q, want %q", roundTripped.Opaque["trace"], "123")
+	}
+}
+
 func TestChallengeJSONUnmarshalNormalizesRequest(t *testing.T) {
 	t.Parallel()
 
@@ -136,6 +176,12 @@ func TestCredentialJSONMarshalUsesDecodedChallengeRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("credential JSON challenge = %#v, want object", decoded["challenge"])
 	}
+	if _, ok := challenge["requestB64"]; ok {
+		t.Fatal("credential JSON challenge unexpectedly included requestB64")
+	}
+	if _, ok := challenge["description"]; ok {
+		t.Fatal("credential JSON challenge unexpectedly included description")
+	}
 	request, ok := challenge["request"].(map[string]any)
 	if !ok {
 		t.Fatalf("credential JSON challenge.request = %#v, want object", challenge["request"])
@@ -145,6 +191,22 @@ func TestCredentialJSONMarshalUsesDecodedChallengeRequest(t *testing.T) {
 	}
 	if decoded["source"] != credential.Source {
 		t.Fatalf("credential JSON source = %#v, want %q", decoded["source"], credential.Source)
+	}
+}
+
+func TestCredentialJSONUnmarshalNormalizesChallengeOpaque(t *testing.T) {
+	t.Parallel()
+
+	rawOpaque := b64EncodeAny(map[string]any{"trace": "123"})
+	input := `{"challenge":{"id":"challenge-id","realm":"api.example.com","method":"tempo","intent":"charge","request":{"amount":"100"},"opaque":"` + rawOpaque + `"},"payload":{"type":"hash","hash":"0xabc123"}}`
+
+	var credential Credential
+	if err := json.Unmarshal([]byte(input), &credential); err != nil {
+		t.Fatalf("json.Unmarshal(credential) error = %v", err)
+	}
+
+	if credential.Challenge.Opaque["trace"] != "123" {
+		t.Fatalf("credential.Challenge.Opaque[trace] = %q, want %q", credential.Challenge.Opaque["trace"], "123")
 	}
 }
 

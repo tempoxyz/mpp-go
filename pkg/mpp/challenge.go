@@ -106,15 +106,15 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(struct {
-		ID          string            `json:"id"`
-		Method      string            `json:"method"`
-		Intent      string            `json:"intent"`
-		Request     map[string]any    `json:"request"`
-		Realm       string            `json:"realm,omitempty"`
-		Digest      string            `json:"digest,omitempty"`
-		Expires     string            `json:"expires,omitempty"`
-		Description string            `json:"description,omitempty"`
-		Opaque      map[string]string `json:"opaque,omitempty"`
+		ID          string         `json:"id"`
+		Method      string         `json:"method"`
+		Intent      string         `json:"intent"`
+		Request     map[string]any `json:"request"`
+		Realm       string         `json:"realm,omitempty"`
+		Digest      string         `json:"digest,omitempty"`
+		Expires     string         `json:"expires,omitempty"`
+		Description string         `json:"description,omitempty"`
+		Opaque      any            `json:"opaque,omitempty"`
 	}{
 		ID:          c.ID,
 		Method:      c.Method,
@@ -124,7 +124,7 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 		Digest:      c.Digest,
 		Expires:     c.Expires,
 		Description: c.Description,
-		Opaque:      c.Opaque,
+		Opaque:      opaqueForJSON(c.Opaque),
 	})
 }
 
@@ -132,22 +132,26 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 // cached RequestB64 field used by header serialization.
 func (c *Challenge) UnmarshalJSON(data []byte) error {
 	var decoded struct {
-		ID          string            `json:"id"`
-		Method      string            `json:"method"`
-		Intent      string            `json:"intent"`
-		Request     json.RawMessage   `json:"request"`
-		Realm       string            `json:"realm,omitempty"`
-		RequestB64  string            `json:"requestB64,omitempty"`
-		Digest      string            `json:"digest,omitempty"`
-		Expires     string            `json:"expires,omitempty"`
-		Description string            `json:"description,omitempty"`
-		Opaque      map[string]string `json:"opaque,omitempty"`
+		ID          string          `json:"id"`
+		Method      string          `json:"method"`
+		Intent      string          `json:"intent"`
+		Request     json.RawMessage `json:"request"`
+		Realm       string          `json:"realm,omitempty"`
+		RequestB64  string          `json:"requestB64,omitempty"`
+		Digest      string          `json:"digest,omitempty"`
+		Expires     string          `json:"expires,omitempty"`
+		Description string          `json:"description,omitempty"`
+		Opaque      json.RawMessage `json:"opaque,omitempty"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 
 	request, requestB64, err := decodeJSONRequest(decoded.Request, decoded.RequestB64)
+	if err != nil {
+		return err
+	}
+	opaque, err := decodeJSONOpaque(decoded.Opaque)
 	if err != nil {
 		return err
 	}
@@ -162,7 +166,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		Digest:      decoded.Digest,
 		Expires:     decoded.Expires,
 		Description: decoded.Description,
-		Opaque:      decoded.Opaque,
+		Opaque:      opaque,
 	}
 	return nil
 }
@@ -222,6 +226,19 @@ func (c *Challenge) ToEcho() ChallengeEcho {
 	}
 }
 
+func (e ChallengeEcho) toChallenge() Challenge {
+	return Challenge{
+		ID:         e.ID,
+		Method:     e.Method,
+		Intent:     e.Intent,
+		Realm:      e.Realm,
+		RequestB64: e.Request,
+		Digest:     e.Digest,
+		Expires:    e.Expires,
+		Opaque:     e.Opaque,
+	}
+}
+
 func requestForJSON(request map[string]any, requestB64 string) (map[string]any, error) {
 	if request != nil {
 		return request, nil
@@ -269,19 +286,6 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 	return decoded, requestB64, nil
 }
 
-func requestB64FromJSON(request json.RawMessage) (string, error) {
-	trimmed := bytes.TrimSpace(request)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return b64EncodeRequest(nil), nil
-	}
-
-	_, requestB64, err := parseJSONRequestValue(trimmed)
-	if err != nil {
-		return "", err
-	}
-	return requestB64, nil
-}
-
 func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, error) {
 	if len(trimmed) > 0 && trimmed[0] == '"' {
 		var requestB64 string
@@ -303,4 +307,63 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 		request = map[string]any{}
 	}
 	return request, b64EncodeRequest(request), nil
+}
+
+func decodeJSONOpaque(raw json.RawMessage) (map[string]string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+
+	if trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(trimmed, &encoded); err != nil {
+			return nil, err
+		}
+		if encoded == "" {
+			return map[string]string{}, nil
+		}
+		decoded, err := B64Decode(encoded)
+		if err != nil {
+			return map[string]string{"_raw": encoded}, nil
+		}
+		opaque := make(map[string]string, len(decoded))
+		for key, value := range decoded {
+			opaque[key] = anyStr(value)
+		}
+		return opaque, nil
+	}
+
+	var opaque map[string]string
+	if err := json.Unmarshal(trimmed, &opaque); err == nil {
+		return opaque, nil
+	}
+
+	var opaqueAny map[string]any
+	if err := json.Unmarshal(trimmed, &opaqueAny); err != nil {
+		return nil, fmt.Errorf("mpp: opaque must be an object or base64url string: %w", err)
+	}
+	opaque = make(map[string]string, len(opaqueAny))
+	for key, value := range opaqueAny {
+		opaque[key] = anyStr(value)
+	}
+	return opaque, nil
+}
+
+func opaqueForJSON(opaque map[string]string) any {
+	if opaque == nil {
+		return nil
+	}
+	if raw, ok := opaque["_raw"]; ok && len(opaque) == 1 {
+		decoded, err := B64Decode(raw)
+		if err != nil {
+			return raw
+		}
+		result := make(map[string]string, len(decoded))
+		for key, value := range decoded {
+			result[key] = anyStr(value)
+		}
+		return result
+	}
+	return opaque
 }
