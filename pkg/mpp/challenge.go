@@ -176,19 +176,9 @@ func FromAuthenticate(header string) (*Challenge, error) {
 	return ParseChallenge(header)
 }
 
-// FromWWWAuthenticate parses a WWW-Authenticate header value into a Challenge.
-func FromWWWAuthenticate(header string) (*Challenge, error) {
-	return FromAuthenticate(header)
-}
-
 // ToAuthenticate formats this Challenge as an authentication header value.
 func (c *Challenge) ToAuthenticate(realm string) string {
 	return FormatAuthenticate(c, realm)
-}
-
-// ToWWWAuthenticate formats this Challenge as a WWW-Authenticate header value.
-func (c *Challenge) ToWWWAuthenticate(realm string) string {
-	return c.ToAuthenticate(realm)
 }
 
 // Verify checks whether the challenge ID matches the expected HMAC for the
