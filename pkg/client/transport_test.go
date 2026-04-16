@@ -63,7 +63,7 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate("test-realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("test-realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			w.Write([]byte("pay me"))
 			return
@@ -103,7 +103,7 @@ func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
 	challenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate("realm"))
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
 		w.WriteHeader(http.StatusPaymentRequired)
 		w.Write([]byte("pay me"))
 	}))
@@ -128,7 +128,7 @@ func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 		mpp.WithExpires("2020-01-01T00:00:00.000Z"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate("realm"))
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
 		w.WriteHeader(http.StatusPaymentRequired)
 		w.Write([]byte("expired"))
 	}))
@@ -159,7 +159,7 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 			if string(body) != "request-body" {
 				t.Errorf("first request body = %q, want %q", string(body), "request-body")
 			}
-			w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -198,8 +198,8 @@ func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Add("WWW-Authenticate", stripeChallenge.ToWWWAuthenticate("realm"))
-			w.Header().Add("WWW-Authenticate", tempoChallenge.ToWWWAuthenticate("realm"))
+			w.Header().Add("WWW-Authenticate", stripeChallenge.ToAuthenticate("realm"))
+			w.Header().Add("WWW-Authenticate", tempoChallenge.ToAuthenticate("realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -226,7 +226,7 @@ func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+challenge.ToWWWAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+challenge.ToAuthenticate("realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -275,7 +275,7 @@ func TestClient_Get(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -308,7 +308,7 @@ func TestClient_Post(t *testing.T) {
 			t.Errorf("content-type = %q, want application/json", r.Header.Get("Content-Type"))
 		}
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToWWWAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}

@@ -41,8 +41,8 @@ type sourceDID struct {
 	address string
 }
 
-// ChargeIntentConfig configures Tempo charge verification.
-type ChargeIntentConfig struct {
+// IntentConfig configures Tempo charge verification.
+type IntentConfig struct {
 	// RPC overrides the Tempo JSON-RPC client used for verification.
 	RPC tempo.RPCClient
 	// RPCURL is used to build an RPC client when RPC is nil.
@@ -55,16 +55,16 @@ type ChargeIntentConfig struct {
 	Store tempo.Store
 }
 
-// ChargeIntent verifies Tempo charge Credentials and returns Receipts.
-type ChargeIntent struct {
+// Intent verifies Tempo charge Credentials and returns Receipts.
+type Intent struct {
 	rpc            tempo.RPCClient
 	rpcURL         string
 	feePayerSigner *temposigner.Signer
 	store          tempo.Store
 }
 
-// NewChargeIntent constructs a Tempo charge verifier.
-func NewChargeIntent(config ChargeIntentConfig) (*ChargeIntent, error) {
+// NewIntent constructs a Tempo charge verifier.
+func NewIntent(config IntentConfig) (*Intent, error) {
 	feePayerSigner := config.FeePayerSigner
 	if feePayerSigner == nil && config.FeePayerPrivateKey != "" {
 		resolved, err := temposigner.NewSigner(config.FeePayerPrivateKey)
@@ -77,7 +77,7 @@ func NewChargeIntent(config ChargeIntentConfig) (*ChargeIntent, error) {
 	if store == nil {
 		store = tempo.NewMemoryStore()
 	}
-	return &ChargeIntent{
+	return &Intent{
 		rpc:            config.RPC,
 		rpcURL:         config.RPCURL,
 		feePayerSigner: feePayerSigner,
@@ -86,12 +86,12 @@ func NewChargeIntent(config ChargeIntentConfig) (*ChargeIntent, error) {
 }
 
 // Name returns the intent token handled by this verifier.
-func (i *ChargeIntent) Name() string {
+func (i *Intent) Name() string {
 	return tempo.IntentCharge
 }
 
 // Verify validates a Tempo charge Credential against the supplied request.
-func (i *ChargeIntent) Verify(
+func (i *Intent) Verify(
 	ctx context.Context,
 	credential *mpp.Credential,
 	requestMap map[string]any,
@@ -132,7 +132,7 @@ func (i *ChargeIntent) Verify(
 	}
 }
 
-func (i *ChargeIntent) verifyHash(
+func (i *Intent) verifyHash(
 	ctx context.Context,
 	rpc tempo.RPCClient,
 	credential *mpp.Credential,
@@ -164,7 +164,7 @@ func (i *ChargeIntent) verifyHash(
 	), nil
 }
 
-func (i *ChargeIntent) verifyProof(
+func (i *Intent) verifyProof(
 	ctx context.Context,
 	rpc tempo.RPCClient,
 	credential *mpp.Credential,
@@ -213,7 +213,7 @@ func (i *ChargeIntent) verifyProof(
 	), nil
 }
 
-func (i *ChargeIntent) verifyTransaction(
+func (i *Intent) verifyTransaction(
 	ctx context.Context,
 	rpc tempo.RPCClient,
 	credential *mpp.Credential,
@@ -325,7 +325,7 @@ func (i *ChargeIntent) verifyTransaction(
 	), nil
 }
 
-func (i *ChargeIntent) resolveRPC(request tempo.ChargeRequest) tempo.RPCClient {
+func (i *Intent) resolveRPC(request tempo.ChargeRequest) tempo.RPCClient {
 	if i.rpc != nil {
 		return i.rpc
 	}

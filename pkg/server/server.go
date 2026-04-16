@@ -79,9 +79,6 @@ type ChargeParams struct {
 	ChainID int
 	// Meta stores opaque Challenge metadata.
 	Meta map[string]string
-	// Deprecated: use Meta.
-	// Extra is a deprecated alias for Meta.
-	Extra map[string]string
 }
 
 // ChargeResult is either a Challenge or a verified (Credential, Receipt) pair.
@@ -135,11 +132,6 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		}
 	}
 
-	meta := params.Meta
-	if meta == nil {
-		meta = params.Extra
-	}
-
 	result, err := VerifyOrChallenge(ctx, VerifyParams{
 		Authorization: params.Authorization,
 		Intent:        intent,
@@ -148,7 +140,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		SecretKey:     m.secretKey,
 		Method:        m.method.Name(),
 		Description:   params.Description,
-		Meta:          meta,
+		Meta:          params.Meta,
 		Expires:       params.Expires,
 	})
 	if err != nil {

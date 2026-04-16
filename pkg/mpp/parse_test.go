@@ -9,7 +9,7 @@ import (
 func TestSplitAuthenticate(t *testing.T) {
 	t.Parallel()
 
-	payment := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).ToWWWAuthenticate("realm")
+	payment := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).ToAuthenticate("realm")
 
 	tests := []struct {
 		name   string
@@ -49,10 +49,10 @@ func TestSplitAuthenticate(t *testing.T) {
 				"stripe",
 				"charge",
 				map[string]any{"amount": "200"},
-			).ToWWWAuthenticate("realm"),
+			).ToAuthenticate("realm"),
 			want: []string{
 				payment,
-				NewChallenge("secret", "realm", "stripe", "charge", map[string]any{"amount": "200"}).ToWWWAuthenticate("realm"),
+				NewChallenge("secret", "realm", "stripe", "charge", map[string]any{"amount": "200"}).ToAuthenticate("realm"),
 			},
 		},
 		{
@@ -163,12 +163,12 @@ func TestParseChallenge(t *testing.T) {
 	}{
 		{
 			name:   "roundtrip with empty request",
-			header: minimal.ToWWWAuthenticate("api.example.com"),
+			header: minimal.ToAuthenticate("api.example.com"),
 			want:   minimal,
 		},
 		{
 			name:   "roundtrip with optional fields",
-			header: optional.ToWWWAuthenticate("api.example.com"),
+			header: optional.ToAuthenticate("api.example.com"),
 			want:   optional,
 		},
 		{
@@ -218,7 +218,7 @@ func TestParseChallenge(t *testing.T) {
 				fn   func(string) (*Challenge, error)
 			}{
 				{name: "ParseChallenge", fn: ParseChallenge},
-				{name: "FromWWWAuthenticate", fn: FromWWWAuthenticate},
+				{name: "FromAuthenticate", fn: FromAuthenticate},
 			} {
 				got, err := parse.fn(tt.header)
 				if tt.wantErr != "" {

@@ -491,12 +491,12 @@ func newSigner(t *testing.T) *temposigner.Signer {
 func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *temposigner.Signer) *httptest.Server {
 	t.Helper()
 
-	intent, err := chargeserver.NewChargeIntent(chargeserver.ChargeIntentConfig{
+	intent, err := chargeserver.NewIntent(chargeserver.IntentConfig{
 		RPCURL:         rpcURL,
 		FeePayerSigner: feePayerSigner,
 	})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 
 	basicMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
@@ -545,7 +545,7 @@ func paidHandler(t *testing.T, payment *mppserver.Mpp, feePayer bool) http.Handl
 		}
 
 		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToWWWAuthenticate(integrationRealm))
+			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}

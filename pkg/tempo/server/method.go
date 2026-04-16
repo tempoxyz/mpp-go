@@ -12,7 +12,7 @@ import (
 // MethodConfig configures a Tempo payment method for server-side charging.
 type MethodConfig struct {
 	// Intent verifies Tempo charge credentials for this method.
-	Intent *ChargeIntent
+	Intent *Intent
 	// Currency is the default token contract address for issued challenges.
 	Currency string
 	// Recipient is the default payee address for issued challenges.
@@ -33,7 +33,7 @@ type MethodConfig struct {
 
 // Method adapts Tempo charge configuration to the generic server interfaces.
 type Method struct {
-	intent         *ChargeIntent
+	intent         *Intent
 	currency       string
 	recipient      string
 	decimals       int
@@ -60,7 +60,7 @@ func NewMethod(config MethodConfig) *Method {
 	}
 	intent := config.Intent
 	if intent == nil {
-		intent, _ = NewChargeIntent(ChargeIntentConfig{})
+		intent, _ = NewIntent(IntentConfig{})
 	}
 	return &Method{
 		intent:         intent,

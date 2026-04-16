@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// Store is the minimal replay-protection contract used by ChargeIntent.
+// Store is the minimal replay-protection contract used by the Tempo charge verifier.
 //
 // Unlike the verifier-specific helpers elsewhere in this package, Store stays
 // close to common key-value backends so in-memory, Redis, and SQL-backed

@@ -92,14 +92,14 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 	}
 }
 
-// FromWWWAuthenticate parses a WWW-Authenticate header value into a Challenge.
-func FromWWWAuthenticate(header string) (*Challenge, error) {
+// FromAuthenticate parses an authentication header value into a Challenge.
+func FromAuthenticate(header string) (*Challenge, error) {
 	return ParseChallenge(header)
 }
 
-// ToWWWAuthenticate formats this Challenge as a WWW-Authenticate header value.
-func (c *Challenge) ToWWWAuthenticate(realm string) string {
-	return FormatWWWAuthenticate(c, realm)
+// ToAuthenticate formats this Challenge as an authentication header value.
+func (c *Challenge) ToAuthenticate(realm string) string {
+	return FormatAuthenticate(c, realm)
 }
 
 // Verify checks whether the challenge ID matches the expected HMAC for the

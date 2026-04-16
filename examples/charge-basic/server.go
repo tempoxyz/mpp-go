@@ -16,7 +16,7 @@ type exampleServer struct {
 }
 
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
-	intent, err := charge.NewChargeIntent(charge.ChargeIntentConfig{RPCURL: rpcURL})
+	intent, err := charge.NewIntent(charge.IntentConfig{RPCURL: rpcURL})
 	if err != nil {
 		return nil, err
 	}

@@ -22,8 +22,17 @@ Go SDK for the [**Machine Payments Protocol**](https://mpp.dev)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 
 [MPP](https://mpp.dev) lets any client — agents, apps, or humans — pay for any service in the same HTTP request. It standardizes [HTTP 402](https://mpp.dev/protocol/http-402) with an open [IETF specification](https://paymentauth.org), so servers can charge and clients can pay without API keys, billing accounts, or checkout flows.
+## Documentation
 
 You can get started today by reading the [Go SDK docs](https://mpp.dev/sdk/go), exploring the [protocol overview](https://mpp.dev/protocol/), or jumping straight to the [quickstart](https://mpp.dev/quickstart/).
+
+Package docs:
+
+- [`pkg/client`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/client)
+- [`pkg/server`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/server)
+- [`pkg/tempo`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/tempo)
+- [`pkg/tempo/client`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/tempo/client)
+- [`pkg/tempo/server`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/tempo/server)
 
 ## Install
 
@@ -42,13 +51,13 @@ import (
 	"encoding/json"
 	"net/http"
 
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
-	intent, _ := charge.NewChargeIntent(charge.ChargeIntentConfig{
+	intent, _ := charge.NewIntent(charge.IntentConfig{
 		RPCURL: "https://rpc.moderato.tempo.xyz",
 	})
 
@@ -59,15 +68,15 @@ func main() {
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
 
-	payment := mppserver.New(method, "api.example.com", "replace-me")
+	payment := server.New(method, "api.example.com", "replace-me")
 
-	handler := mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+	handler := server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:      "0.50",
 		Description: "Paid content",
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data":  "paid content",
-			"payer": mppserver.CredentialFromContext(r.Context()).Source,
+			"payer": server.CredentialFromContext(r.Context()).Source,
 		})
 	}))
 
@@ -85,7 +94,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
@@ -97,8 +106,8 @@ func main() {
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
 
-	client := mppclient.New([]mppclient.Method{method})
-	response, err := client.Get(context.Background(), "https://api.example.com/paid")
+	paymentClient := client.New([]client.Method{method})
+	response, err := paymentClient.Get(context.Background(), "https://api.example.com/paid")
 	if err != nil {
 		panic(err)
 	}
