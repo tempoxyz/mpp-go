@@ -10,7 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
@@ -47,7 +47,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	intent, err := charge.NewChargeIntent(charge.ChargeIntentConfig{RPCURL: rpcURL})
+	intent, err := charge.NewIntent(charge.IntentConfig{RPCURL: rpcURL})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -64,25 +64,25 @@ func main() {
 		secretKey = envSecret
 	}
 
-	payment := mppserver.New(method, devnet.Realm, secretKey)
+	payment := server.New(method, devnet.Realm, secretKey)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 	})
 
-	mux.Handle("/api/ping", mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+	mux.Handle("/api/ping", server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:      "0.01",
 		Description: "Ping the API",
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"pong": true})
 	})))
 
-	mux.Handle("/api/fortune", mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+	mux.Handle("/api/fortune", server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:      "1.00",
 		Description: "Get a fortune",
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		credential := mppserver.CredentialFromContext(r.Context())
+		credential := server.CredentialFromContext(r.Context())
 		fortune := fortunes[rand.IntN(len(fortunes))]
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"fortune": fortune,

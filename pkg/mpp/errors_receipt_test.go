@@ -14,77 +14,77 @@ func TestPaymentErrorConstructors(t *testing.T) {
 	tests := []struct {
 		name   string
 		err    *PaymentError
-		want   string
+		want   ErrorType
 		status int
 		detail string
 	}{
 		{
 			name:   "payment required default detail",
 			err:    ErrPaymentRequired("api.example.com", ""),
-			want:   "https://mpp.dev/errors/payment-required",
+			want:   ErrorTypePaymentRequired,
 			status: http.StatusPaymentRequired,
 			detail: "Payment is required to access this resource",
 		},
 		{
 			name:   "payment required custom detail",
 			err:    ErrPaymentRequired("api.example.com", "custom detail"),
-			want:   "https://mpp.dev/errors/payment-required",
+			want:   ErrorTypePaymentRequired,
 			status: http.StatusPaymentRequired,
 			detail: "custom detail",
 		},
 		{
 			name:   "malformed credential",
 			err:    ErrMalformedCredential("bad credential"),
-			want:   "https://mpp.dev/errors/malformed-credential",
+			want:   ErrorTypeMalformedCredential,
 			status: http.StatusBadRequest,
 			detail: "bad credential",
 		},
 		{
 			name:   "invalid challenge",
 			err:    ErrInvalidChallenge("challenge-1", "tampered"),
-			want:   "https://mpp.dev/errors/invalid-challenge",
+			want:   ErrorTypeInvalidChallenge,
 			status: http.StatusBadRequest,
 			detail: "challenge challenge-1: tampered",
 		},
 		{
 			name:   "verification failed",
 			err:    ErrVerificationFailed("signature mismatch"),
-			want:   "https://mpp.dev/errors/verification-failed",
+			want:   ErrorTypeVerificationFailed,
 			status: http.StatusPaymentRequired,
 			detail: "signature mismatch",
 		},
 		{
 			name:   "payment expired",
 			err:    ErrPaymentExpired("2026-01-01T00:00:00Z"),
-			want:   "https://mpp.dev/errors/payment-expired",
+			want:   ErrorTypePaymentExpired,
 			status: http.StatusPaymentRequired,
 			detail: "payment expired at 2026-01-01T00:00:00Z",
 		},
 		{
 			name:   "invalid payload",
 			err:    ErrInvalidPayload("invalid payload"),
-			want:   "https://mpp.dev/errors/invalid-payload",
+			want:   ErrorTypeInvalidPayload,
 			status: http.StatusBadRequest,
 			detail: "invalid payload",
 		},
 		{
 			name:   "bad request",
 			err:    ErrBadRequest("bad request"),
-			want:   "https://mpp.dev/errors/bad-request",
+			want:   ErrorTypeBadRequest,
 			status: http.StatusBadRequest,
 			detail: "bad request",
 		},
 		{
 			name:   "payment insufficient",
 			err:    ErrPaymentInsufficient("not enough"),
-			want:   "https://mpp.dev/errors/payment-insufficient",
+			want:   ErrorTypePaymentInsufficient,
 			status: http.StatusPaymentRequired,
 			detail: "not enough",
 		},
 		{
 			name:   "method unsupported",
 			err:    ErrMethodUnsupported("stripe"),
-			want:   "https://mpp.dev/errors/method-unsupported",
+			want:   ErrorTypeMethodUnsupported,
 			status: http.StatusBadRequest,
 			detail: `payment method "stripe" is not supported`,
 		},
