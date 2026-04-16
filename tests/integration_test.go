@@ -283,6 +283,302 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	}
 }
 
+func TestIntegrationChargeFlow_HashCredentialRequiresSource(t *testing.T) {
+	rpcURL := integrationRPCURL(t)
+	rpc := tempo.NewRPCClient(rpcURL)
+	ctx := context.Background()
+	chainID := waitForRPC(t, ctx, rpc)
+	payerSigner := newSigner(t)
+	fundAddress(t, ctx, rpc, payerSigner.Address())
+
+	server := newPaidServer(t, rpcURL, chainID, nil)
+	defer server.Close()
+
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		Signer:         payerSigner,
+		RPCURL:         rpcURL,
+		ChainID:        int64(chainID),
+		CredentialType: tempo.CredentialTypeHash,
+	})
+	if err != nil {
+		t.Fatalf("tempo/client.New() error = %v", err)
+	}
+
+	transport := &captureTransport{inner: http.DefaultTransport}
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	response, err := client.Get(ctx, server.URL+"/paid-hash")
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	authorization := transport.Authorization()
+	credential, err := mpp.ParseCredential(authorization)
+	if err != nil {
+		t.Fatalf("ParseCredential() error = %v", err)
+	}
+
+	credential.Source = ""
+	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/paid-hash", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	replayRequest.Header.Set("Authorization", credential.ToAuthorization())
+	replayResponse, err := http.DefaultClient.Do(replayRequest)
+	if err != nil {
+		t.Fatalf("sourceless request error = %v", err)
+	}
+	defer replayResponse.Body.Close()
+
+	if replayResponse.StatusCode == http.StatusOK {
+		t.Fatal("expected hash credential without source to be rejected")
+	}
+	body, err := io.ReadAll(replayResponse.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(replayResponse.Body) error = %v", err)
+	}
+	if !strings.Contains(string(body), "source") {
+		t.Fatalf("response body = %q, want source-related error", string(body))
+	}
+}
+
+func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
+	rpcURL := integrationRPCURL(t)
+	rpc := tempo.NewRPCClient(rpcURL)
+	ctx := context.Background()
+	chainID := waitForRPC(t, ctx, rpc)
+	payerSigner := newSigner(t)
+
+	server := newPaidServer(t, rpcURL, chainID, nil)
+	defer server.Close()
+
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		Signer:  payerSigner,
+		RPCURL:  rpcURL,
+		ChainID: int64(chainID),
+	})
+	if err != nil {
+		t.Fatalf("tempo/client.New() error = %v", err)
+	}
+
+	transport := &captureTransport{inner: http.DefaultTransport}
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	response, err := client.Get(ctx, server.URL+"/paid-proof")
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want %d, body = %s", response.StatusCode, http.StatusOK, body)
+	}
+	receiptHeader := response.Header.Get("Payment-Receipt")
+	if receiptHeader == "" {
+		t.Fatal("Payment-Receipt header missing")
+	}
+	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	if err != nil {
+		t.Fatalf("ParsePaymentReceipt() error = %v", err)
+	}
+	if receipt.Status != "success" {
+		t.Fatalf("receipt.Status = %q, want success", receipt.Status)
+	}
+
+	authorization := transport.Authorization()
+	credential, err := mpp.ParseCredential(authorization)
+	if err != nil {
+		t.Fatalf("ParseCredential() error = %v", err)
+	}
+	if credential.Payload["type"] != string(tempo.CredentialTypeProof) {
+		t.Fatalf("credential payload type = %#v, want proof", credential.Payload["type"])
+	}
+}
+
+func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
+	rpcURL := integrationRPCURL(t)
+	rpc := tempo.NewRPCClient(rpcURL)
+	ctx := context.Background()
+	chainID := waitForRPC(t, ctx, rpc)
+	payerSigner := newSigner(t)
+
+	server := newPaidServer(t, rpcURL, chainID, nil)
+	defer server.Close()
+
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		Signer:  payerSigner,
+		RPCURL:  rpcURL,
+		ChainID: int64(chainID),
+	})
+	if err != nil {
+		t.Fatalf("tempo/client.New() error = %v", err)
+	}
+
+	transport := &captureTransport{inner: http.DefaultTransport}
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	response, err := client.Get(ctx, server.URL+"/paid-proof")
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	authorization := transport.Authorization()
+	if authorization == "" {
+		t.Fatal("retry authorization header missing")
+	}
+
+	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/paid-proof", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	replayRequest.Header.Set("Authorization", authorization)
+	replayResponse, err := http.DefaultClient.Do(replayRequest)
+	if err != nil {
+		t.Fatalf("replay request error = %v", err)
+	}
+	defer replayResponse.Body.Close()
+
+	if replayResponse.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("replay status = %d, want %d", replayResponse.StatusCode, http.StatusPaymentRequired)
+	}
+	body, err := io.ReadAll(replayResponse.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(replayResponse.Body) error = %v", err)
+	}
+	if !strings.Contains(string(body), "already used") {
+		t.Fatalf("replay response body = %q, want replay protection error", string(body))
+	}
+}
+
+func TestIntegrationChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
+	rpcURL := integrationRPCURL(t)
+	rpc := tempo.NewRPCClient(rpcURL)
+	ctx := context.Background()
+	chainID := waitForRPC(t, ctx, rpc)
+	payerSigner := newSigner(t)
+	fundAddress(t, ctx, rpc, payerSigner.Address())
+
+	server := newPaidServer(t, rpcURL, chainID, nil)
+	defer server.Close()
+
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		Signer:  payerSigner,
+		RPCURL:  rpcURL,
+		ChainID: int64(chainID),
+	})
+	if err != nil {
+		t.Fatalf("tempo/client.New() error = %v", err)
+	}
+
+	transport := &captureTransport{inner: http.DefaultTransport}
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	response, err := client.Get(ctx, server.URL+"/paid-splits")
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want %d, body = %s", response.StatusCode, http.StatusOK, body)
+	}
+	receiptHeader := response.Header.Get("Payment-Receipt")
+	if receiptHeader == "" {
+		t.Fatal("Payment-Receipt header missing")
+	}
+	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	if err != nil {
+		t.Fatalf("ParsePaymentReceipt() error = %v", err)
+	}
+	if receipt.Status != "success" {
+		t.Fatalf("receipt.Status = %q, want success", receipt.Status)
+	}
+	if receipt.Reference == "" {
+		t.Fatal("receipt.Reference is empty")
+	}
+
+	var body struct {
+		ExternalID string `json:"externalId"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode(response.Body) error = %v", err)
+	}
+	if body.ExternalID != "ext-splits-123" {
+		t.Fatalf("externalId = %q, want ext-splits-123", body.ExternalID)
+	}
+}
+
+func TestIntegrationChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
+	rpcURL := integrationRPCURL(t)
+	rpc := tempo.NewRPCClient(rpcURL)
+	ctx := context.Background()
+	chainID := waitForRPC(t, ctx, rpc)
+	payerSigner := newSigner(t)
+	fundAddress(t, ctx, rpc, payerSigner.Address())
+
+	server := newPaidServer(t, rpcURL, chainID, nil)
+	defer server.Close()
+
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		Signer:  payerSigner,
+		RPCURL:  rpcURL,
+		ChainID: int64(chainID),
+	})
+	if err != nil {
+		t.Fatalf("tempo/client.New() error = %v", err)
+	}
+
+	transport := &captureTransport{inner: http.DefaultTransport}
+	client := mppclient.New(
+		[]mppclient.Method{clientMethod},
+		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	response, err := client.Get(ctx, server.URL+"/paid-external-id")
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want %d, body = %s", response.StatusCode, http.StatusOK, body)
+	}
+	receiptHeader := response.Header.Get("Payment-Receipt")
+	if receiptHeader == "" {
+		t.Fatal("Payment-Receipt header missing")
+	}
+	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	if err != nil {
+		t.Fatalf("ParsePaymentReceipt() error = %v", err)
+	}
+	if receipt.ExternalID != "ext-integration-123" {
+		t.Fatalf("receipt.ExternalID = %q, want ext-integration-123", receipt.ExternalID)
+	}
+	if receipt.Reference == "" {
+		t.Fatal("receipt.Reference is empty")
+	}
+}
+
 func integrationRPCURL(t *testing.T) string {
 	t.Helper()
 	rpcURL := os.Getenv("TEMPO_RPC_URL")
@@ -523,10 +819,28 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 	feePayer := mppserver.New(feePayerMethod, integrationRealm, integrationSecretKey)
 	hash := mppserver.New(hashMethod, integrationRealm, integrationSecretKey)
 
+	proofMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
+		Intent:    intent,
+		Currency:  integrationCurrency,
+		Recipient: integrationRecipient,
+		ChainID:   int64(chainID),
+	})
+	splitsMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
+		Intent:    intent,
+		Currency:  integrationCurrency,
+		Recipient: integrationRecipient,
+		ChainID:   int64(chainID),
+	})
+	proof := mppserver.New(proofMethod, integrationRealm, integrationSecretKey)
+	splits := mppserver.New(splitsMethod, integrationRealm, integrationSecretKey)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/paid", paidHandler(t, basic, false))
 	mux.HandleFunc("/paid-fee-payer", paidHandler(t, feePayer, true))
 	mux.HandleFunc("/paid-hash", paidHandler(t, hash, false))
+	mux.HandleFunc("/paid-proof", paidHandlerWithAmount(t, proof, "0"))
+	mux.HandleFunc("/paid-splits", paidHandlerWithSplitsAndExternalID(t, splits))
+	mux.HandleFunc("/paid-external-id", paidHandlerWithExternalID(t, basic, "1.00", "ext-integration-123"))
 	return httptest.NewServer(mux)
 }
 
@@ -554,6 +868,100 @@ func paidHandler(t *testing.T, payment *mppserver.Mpp, feePayer bool) http.Handl
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"payer": result.Credential.Source,
 			"tx":    result.Receipt.Reference,
+		}); err != nil {
+			http.Error(w, fmt.Sprintf("encode response: %v", err), http.StatusInternalServerError)
+		}
+	}
+}
+
+func paidHandlerWithAmount(t *testing.T, payment *mppserver.Mpp, amount string) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+			Authorization: r.Header.Get("Authorization"),
+			Amount:        amount,
+		})
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+
+		if result.IsChallenge() {
+			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+
+		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"payer": result.Credential.Source,
+			"tx":    result.Receipt.Reference,
+		}); err != nil {
+			http.Error(w, fmt.Sprintf("encode response: %v", err), http.StatusInternalServerError)
+		}
+	}
+}
+
+func paidHandlerWithSplitsAndExternalID(t *testing.T, payment *mppserver.Mpp) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+			Authorization: r.Header.Get("Authorization"),
+			Amount:        "1.00",
+			ExternalID:    "ext-splits-123",
+			Splits: []tempo.SplitParams{
+				{Amount: "0.10", Recipient: integrationRecipient},
+			},
+		})
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+
+		if result.IsChallenge() {
+			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+
+		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"payer":      result.Credential.Source,
+			"tx":         result.Receipt.Reference,
+			"externalId": result.Receipt.ExternalID,
+		}); err != nil {
+			http.Error(w, fmt.Sprintf("encode response: %v", err), http.StatusInternalServerError)
+		}
+	}
+}
+
+func paidHandlerWithExternalID(t *testing.T, payment *mppserver.Mpp, amount, externalID string) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+			Authorization: r.Header.Get("Authorization"),
+			Amount:        amount,
+			ExternalID:    externalID,
+		})
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+
+		if result.IsChallenge() {
+			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+
+		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"payer":      result.Credential.Source,
+			"tx":         result.Receipt.Reference,
+			"externalId": result.Receipt.ExternalID,
 		}); err != nil {
 			http.Error(w, fmt.Sprintf("encode response: %v", err), http.StatusInternalServerError)
 		}

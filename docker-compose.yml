@@ -22,4 +22,4 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8545"]
       interval: 2s
       timeout: 5s
-      retries: 10
+      retries: 15
