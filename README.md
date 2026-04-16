@@ -107,14 +107,14 @@ func main() {
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
 
-	paymentClient := client.New([]client.Method{method})
-	response, err := paymentClient.Get(context.Background(), "https://api.example.com/paid")
+	c := client.New([]client.Method{method})
+	response, err := c.Get(context.Background(), "https://api.example.com/paid")
 	if err != nil {
 		panic(err)
 	}
 	defer response.Body.Close()
 
-	receipt, _ := mpp.ParsePaymentReceipt(response.Header.Get("Payment-Receipt"))
+	receipt, _ := mpp.ParseReceipt(response.Header.Get("Payment-Receipt"))
 
 	var body struct {
 		Data  string `json:"data"`

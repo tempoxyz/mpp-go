@@ -1,5 +1,11 @@
 package mpp
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
 // Challenge represents a server-issued payment challenge sent via the
 // WWW-Authenticate header.
 type Challenge struct {
@@ -92,14 +98,93 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 	}
 }
 
+// MarshalJSON emits the standard JSON challenge shape with a decoded request
+// object, while keeping RequestB64 as an internal cache for header formatting.
+func (c Challenge) MarshalJSON() ([]byte, error) {
+	request, err := requestForJSON(c.Request, c.RequestB64)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		ID          string            `json:"id"`
+		Method      string            `json:"method"`
+		Intent      string            `json:"intent"`
+		Request     map[string]any    `json:"request"`
+		Realm       string            `json:"realm,omitempty"`
+		Digest      string            `json:"digest,omitempty"`
+		Expires     string            `json:"expires,omitempty"`
+		Description string            `json:"description,omitempty"`
+		Opaque      map[string]string `json:"opaque,omitempty"`
+	}{
+		ID:          c.ID,
+		Method:      c.Method,
+		Intent:      c.Intent,
+		Request:     request,
+		Realm:       c.Realm,
+		Digest:      c.Digest,
+		Expires:     c.Expires,
+		Description: c.Description,
+		Opaque:      c.Opaque,
+	})
+}
+
+// UnmarshalJSON accepts the standard JSON challenge shape and computes the
+// cached RequestB64 field used by header serialization.
+func (c *Challenge) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		ID          string            `json:"id"`
+		Method      string            `json:"method"`
+		Intent      string            `json:"intent"`
+		Request     json.RawMessage   `json:"request"`
+		Realm       string            `json:"realm,omitempty"`
+		RequestB64  string            `json:"requestB64,omitempty"`
+		Digest      string            `json:"digest,omitempty"`
+		Expires     string            `json:"expires,omitempty"`
+		Description string            `json:"description,omitempty"`
+		Opaque      map[string]string `json:"opaque,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	request, requestB64, err := decodeJSONRequest(decoded.Request, decoded.RequestB64)
+	if err != nil {
+		return err
+	}
+
+	*c = Challenge{
+		ID:          decoded.ID,
+		Method:      decoded.Method,
+		Intent:      decoded.Intent,
+		Request:     request,
+		Realm:       decoded.Realm,
+		RequestB64:  requestB64,
+		Digest:      decoded.Digest,
+		Expires:     decoded.Expires,
+		Description: decoded.Description,
+		Opaque:      decoded.Opaque,
+	}
+	return nil
+}
+
 // FromAuthenticate parses an authentication header value into a Challenge.
 func FromAuthenticate(header string) (*Challenge, error) {
 	return ParseChallenge(header)
 }
 
+// FromWWWAuthenticate parses a WWW-Authenticate header value into a Challenge.
+func FromWWWAuthenticate(header string) (*Challenge, error) {
+	return FromAuthenticate(header)
+}
+
 // ToAuthenticate formats this Challenge as an authentication header value.
 func (c *Challenge) ToAuthenticate(realm string) string {
 	return FormatAuthenticate(c, realm)
+}
+
+// ToWWWAuthenticate formats this Challenge as a WWW-Authenticate header value.
+func (c *Challenge) ToWWWAuthenticate(realm string) string {
+	return c.ToAuthenticate(realm)
 }
 
 // Verify checks whether the challenge ID matches the expected HMAC for the
@@ -135,4 +220,87 @@ func (c *Challenge) ToEcho() ChallengeEcho {
 		Digest:  c.Digest,
 		Opaque:  c.Opaque,
 	}
+}
+
+func requestForJSON(request map[string]any, requestB64 string) (map[string]any, error) {
+	if request != nil {
+		return request, nil
+	}
+	if requestB64 == "" {
+		return map[string]any{}, nil
+	}
+	decoded, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	return decoded, nil
+}
+
+func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]any, string, error) {
+	trimmed := bytes.TrimSpace(request)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		if requestB64 == "" {
+			requestB64 = b64EncodeRequest(nil)
+		}
+		decoded, err := B64Decode(requestB64)
+		if err != nil {
+			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+		}
+		return decoded, requestB64, nil
+	}
+
+	decoded, requestFromJSON, err := parseJSONRequestValue(trimmed)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if requestB64 == "" {
+		requestB64 = requestFromJSON
+		return decoded, requestB64, nil
+	}
+
+	decodedB64, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	if !JSONEqual(decoded, decodedB64) {
+		return nil, "", fmt.Errorf("mpp: challenge request and requestB64 do not match")
+	}
+	return decoded, requestB64, nil
+}
+
+func requestB64FromJSON(request json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(request)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return b64EncodeRequest(nil), nil
+	}
+
+	_, requestB64, err := parseJSONRequestValue(trimmed)
+	if err != nil {
+		return "", err
+	}
+	return requestB64, nil
+}
+
+func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, error) {
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var requestB64 string
+		if err := json.Unmarshal(trimmed, &requestB64); err != nil {
+			return nil, "", err
+		}
+		decoded, err := B64Decode(requestB64)
+		if err != nil {
+			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+		}
+		return decoded, requestB64, nil
+	}
+
+	var request map[string]any
+	if err := json.Unmarshal(trimmed, &request); err != nil {
+		return nil, "", fmt.Errorf("mpp: request must be an object or base64url string: %w", err)
+	}
+	if request == nil {
+		request = map[string]any{}
+	}
+	return request, b64EncodeRequest(request), nil
 }

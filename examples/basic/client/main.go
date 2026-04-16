@@ -63,7 +63,7 @@ func main() {
 	}
 	defer resp.Body.Close()
 
-	receipt, err := mpp.ParsePaymentReceipt(resp.Header.Get("Payment-Receipt"))
+	receipt, err := mpp.ParseReceipt(resp.Header.Get("Payment-Receipt"))
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -265,6 +265,11 @@ func FormatAuthenticate(c *Challenge, realm string) string {
 	return "Payment " + strings.Join(parts, ", ")
 }
 
+// FormatWWWAuthenticate formats a Challenge as a WWW-Authenticate header value.
+func FormatWWWAuthenticate(c *Challenge, realm string) string {
+	return FormatAuthenticate(c, realm)
+}
+
 func b64EncodeRequest(request map[string]any) string {
 	if request == nil {
 		request = map[string]any{}

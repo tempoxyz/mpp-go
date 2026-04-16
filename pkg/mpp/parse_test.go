@@ -219,6 +219,7 @@ func TestParseChallenge(t *testing.T) {
 			}{
 				{name: "ParseChallenge", fn: ParseChallenge},
 				{name: "FromAuthenticate", fn: FromAuthenticate},
+				{name: "FromWWWAuthenticate", fn: FromWWWAuthenticate},
 			} {
 				got, err := parse.fn(tt.header)
 				if tt.wantErr != "" {
