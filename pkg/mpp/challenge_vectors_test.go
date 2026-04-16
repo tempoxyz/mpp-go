@@ -286,7 +286,7 @@ func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 		WithMeta(map[string]string{}),
 	)
 
-	header := challenge.ToWWWAuthenticate("api.example.com")
+	header := challenge.ToAuthenticate("api.example.com")
 	if !strings.Contains(header, `opaque="`) {
 		t.Fatalf("challenge header = %q, want opaque field", header)
 	}

@@ -14,7 +14,7 @@ func (m chargeTestMethod) Name() string { return "tempo" }
 
 func (m chargeTestMethod) Intents() map[string]Intent { return m.intents }
 
-func TestMppCharge_UsesExtraAsChallengeMeta(t *testing.T) {
+func TestMppCharge_UsesMetaAsChallengeMeta(t *testing.T) {
 	t.Parallel()
 
 	mppServer := New(chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}}, "api.example.com", "secret-key")
@@ -26,7 +26,7 @@ func TestMppCharge_UsesExtraAsChallengeMeta(t *testing.T) {
 		FeePayer:   true,
 		ChainID:    42431,
 		Memo:       "0x" + strings.Repeat("ab", 32),
-		Extra:      map[string]string{"trace": "abc123"},
+		Meta:       map[string]string{"trace": "abc123"},
 	})
 	if err != nil {
 		t.Fatalf("Charge() error = %v", err)

@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
@@ -30,7 +30,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	intent, err := charge.NewChargeIntent(charge.ChargeIntentConfig{FeePayerPrivateKey: devnet.FeePayerPrivateKey, RPCURL: rpcURL})
+	intent, err := charge.NewIntent(charge.IntentConfig{FeePayerPrivateKey: devnet.FeePayerPrivateKey, RPCURL: rpcURL})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -41,15 +41,15 @@ func main() {
 		FeePayer:  true,
 		Recipient: devnet.Recipient,
 	})
-	payment := mppserver.New(method, devnet.Realm, "example-secret")
+	payment := server.New(method, devnet.Realm, "example-secret")
 
 	mux := http.NewServeMux()
-	mux.Handle("/paid", mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{
+	mux.Handle("/paid", server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:      "0.50",
 		Description: "Fee-payer Tempo charge example",
 		FeePayer:    true,
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"tx": mppserver.ReceiptFromContext(r.Context()).Reference})
+		_ = json.NewEncoder(w).Encode(map[string]any{"tx": server.ReceiptFromContext(r.Context()).Reference})
 	})))
 
 	log.Printf("charge-fee-payer server listening on http://localhost:3000")

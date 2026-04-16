@@ -233,10 +233,10 @@ func ParseChallenge(header string) (*Challenge, error) {
 	}, nil
 }
 
-// FormatWWWAuthenticate formats a Challenge as a WWW-Authenticate header value.
+// FormatAuthenticate formats a Challenge as an authentication header value.
 //
 // Output format: Payment id="...", realm="...", method="...", intent="...", request="..."
-func FormatWWWAuthenticate(c *Challenge, realm string) string {
+func FormatAuthenticate(c *Challenge, realm string) string {
 	var parts []string
 	add := func(k, v string) {
 		if v != "" {

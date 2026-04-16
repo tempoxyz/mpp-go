@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	"github.com/tempoxyz/mpp-go/pkg/client"
@@ -25,13 +24,9 @@ func runClient(ctx context.Context, url, rpcURL string, chainID int64) (*clientR
 	if err != nil {
 		return nil, err
 	}
-	cl := client.New([]client.Method{method})
+	c := client.New([]client.Method{method})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/paid", nil)
-	if err != nil {
-		return nil, err
-	}
-	response, err := cl.Do(req)
+	response, err := c.Get(ctx, url+"/paid")
 	if err != nil {
 		return nil, err
 	}

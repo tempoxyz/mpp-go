@@ -96,9 +96,9 @@ func TestChargeFlow_TransactionCredential(t *testing.T) {
 		t.Fatalf("CreateCredential() error = %v", err)
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -128,9 +128,9 @@ func TestChargeFlow_FeePayerTransaction(t *testing.T) {
 		t.Fatalf("expected sponsored client transaction marker, got %q", signature)
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -202,9 +202,9 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSigner(t *testing.T) {
 	defer feePayerServer.Close()
 	request.MethodDetails.FeePayerURL = feePayerServer.URL
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -262,9 +262,9 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSignerRejectsTamperedFeeToken(t 
 	defer feePayerServer.Close()
 	request.MethodDetails.FeePayerURL = feePayerServer.URL
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "fee token") {
 		t.Fatalf("Verify() error = %v, want fee token rejection", err)
@@ -293,9 +293,9 @@ func TestChargeFlow_HashCredentialReplayProtected(t *testing.T) {
 		t.Fatalf("expected client broadcast, got %d", len(rpc.sentRawTxs))
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
 		t.Fatalf("Verify() error = %v", err)
@@ -318,9 +318,9 @@ func TestChargeFlow_HashCredentialRequiresSource(t *testing.T) {
 	}
 	credential.Source = ""
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "must include a source") {
 		t.Fatalf("Verify() error = %v, want missing source rejection", err)
@@ -351,9 +351,9 @@ func TestChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 		t.Fatalf("credential.Payload[type] = %#v, want proof", credential.Payload["type"])
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -413,9 +413,9 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 		Source: tempo.ProofSource(42431, rootSigner.Address()),
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -472,9 +472,9 @@ func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
 		Source: tempo.ProofSource(42431, rootSigner.Address()),
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -552,9 +552,9 @@ func TestChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
 				t.Fatalf("CreateCredential() error = %v", err)
 			}
 
-			intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+			intent, err := NewIntent(IntentConfig{RPC: rpc})
 			if err != nil {
-				t.Fatalf("NewChargeIntent() error = %v", err)
+				t.Fatalf("NewIntent() error = %v", err)
 			}
 			receipt, err := intent.Verify(ctx, credential, request.Map())
 			if err != nil {
@@ -599,9 +599,9 @@ func TestChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
 		t.Fatalf("CreateCredential() error = %v", err)
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	if err != nil {
@@ -653,9 +653,9 @@ func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
 		t.Fatalf("CreateCredential() error = %v", err)
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "does not satisfy") {
 		t.Fatalf("Verify() error = %v, want receipt mismatch", err)
@@ -699,9 +699,9 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 		t.Fatalf("CreateCredential() error = %v", err)
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
 		t.Fatalf("Verify() error = %v", err)
@@ -721,9 +721,9 @@ func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
 	}
 	credential.Source = "not-a-did"
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "credential source is invalid") {
 		t.Fatalf("Verify() error = %v, want invalid credential source", err)
@@ -743,9 +743,9 @@ func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T)
 		t.Fatalf("CreateCredential() error = %v", err)
 	}
 
-	intent, err := NewChargeIntent(ChargeIntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
 	if err != nil {
-		t.Fatalf("NewChargeIntent() error = %v", err)
+		t.Fatalf("NewIntent() error = %v", err)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "sponsor policy") {
 		t.Fatalf("Verify() error = %v, want sponsor policy rejection", err)

@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
-	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
@@ -40,13 +40,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	client := mppclient.New([]mppclient.Method{method})
+	c := client.New([]client.Method{method})
 
 	baseURL := os.Getenv("BASE_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:3000"
 	}
-	response, err := client.Get(ctx, baseURL+"/paid")
+	response, err := c.Get(ctx, baseURL+"/paid")
 	if err != nil {
 		log.Fatal(err)
 	}

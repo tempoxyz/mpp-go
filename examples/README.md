@@ -18,7 +18,7 @@ docker compose up -d
 ```
 
 The examples import `pkg/client` and `pkg/server` by their bare package names.
-Each file aliases the Tempo charge package to `charge`, since it only uses one
+Each file aliases the Tempo package it uses to `charge`, since it only uses one
 side of the Tempo flow at a time.
 
 Run any example directly from the repo root:
