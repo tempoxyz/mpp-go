@@ -152,10 +152,10 @@ func TestReceiptRoundTrip(t *testing.T) {
 		t.Fatalf("receipt.Timestamp.Location() = %v, want UTC", receipt.Timestamp.Location())
 	}
 
-	header := receipt.ToPaymentReceipt()
-	parsed, err := FromPaymentReceipt(header)
+	header := FormatReceipt(receipt)
+	parsed, err := ParseReceipt(header)
 	if err != nil {
-		t.Fatalf("FromPaymentReceipt() error = %v", err)
+		t.Fatalf("ParseReceipt() error = %v", err)
 	}
 	if parsed.Reference != receipt.Reference {
 		t.Fatalf("parsed.Reference = %q, want %q", parsed.Reference, receipt.Reference)
@@ -177,20 +177,20 @@ func TestReceiptRoundTrip(t *testing.T) {
 func TestParsePaymentReceiptValidation(t *testing.T) {
 	t.Parallel()
 
-	_, err := ParsePaymentReceipt(b64EncodeAny(map[string]any{
+	_, err := ParseReceipt(b64EncodeAny(map[string]any{
 		"status":    "pending",
 		"timestamp": "2026-01-01T00:00:00Z",
 		"reference": "ref-123",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "invalid receipt status") {
-		t.Fatalf("ParsePaymentReceipt() error = %v, want invalid status error", err)
+		t.Fatalf("ParseReceipt() error = %v, want invalid status error", err)
 	}
 
-	_, err = ParsePaymentReceipt(b64EncodeAny(map[string]any{
+	_, err = ParseReceipt(b64EncodeAny(map[string]any{
 		"status": "success",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "receipt missing reference") {
-		t.Fatalf("ParsePaymentReceipt() error = %v, want missing reference error", err)
+		t.Fatalf("ParseReceipt() error = %v, want missing reference error", err)
 	}
 }
 
@@ -225,5 +225,35 @@ func TestChallengeVerifyAndToEcho(t *testing.T) {
 	}
 	if echo.Expires != challenge.Expires {
 		t.Fatalf("echo.Expires = %q, want %q", echo.Expires, challenge.Expires)
+	}
+}
+
+func TestChallengeNewCredential(t *testing.T) {
+	t.Parallel()
+
+	challenge := NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "100"},
+	)
+
+	credential := challenge.NewCredential(
+		map[string]any{"type": "hash", "hash": "0xabc123"},
+		WithCredentialSource("did:pkh:eip155:42431:0x1234"),
+	)
+
+	if credential.Challenge.ID != challenge.ID {
+		t.Fatalf("credential.Challenge.ID = %q, want %q", credential.Challenge.ID, challenge.ID)
+	}
+	if credential.Challenge.Request != challenge.ToEcho().Request {
+		t.Fatalf("credential.Challenge.Request = %q, want %q", credential.Challenge.Request, challenge.ToEcho().Request)
+	}
+	if credential.Source != "did:pkh:eip155:42431:0x1234" {
+		t.Fatalf("credential.Source = %q, want source", credential.Source)
+	}
+	if credential.Payload["hash"] != "0xabc123" {
+		t.Fatalf("credential.Payload[hash] = %#v, want %q", credential.Payload["hash"], "0xabc123")
 	}
 }

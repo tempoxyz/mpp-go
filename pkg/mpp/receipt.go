@@ -44,12 +44,22 @@ func Success(reference string, opts ...ReceiptOption) *Receipt {
 	return r
 }
 
+// ParseReceipt parses a receipt header value into a Receipt.
+func ParseReceipt(header string) (*Receipt, error) {
+	return ParsePaymentReceipt(header)
+}
+
+// FormatReceipt formats a Receipt as a receipt header value.
+func FormatReceipt(r *Receipt) string {
+	return FormatPaymentReceipt(r)
+}
+
 // FromPaymentReceipt parses a Payment-Receipt header value into a Receipt.
 func FromPaymentReceipt(header string) (*Receipt, error) {
-	return ParsePaymentReceipt(header)
+	return ParseReceipt(header)
 }
 
 // ToPaymentReceipt formats this Receipt as a Payment-Receipt header value.
 func (r *Receipt) ToPaymentReceipt() string {
-	return FormatPaymentReceipt(r)
+	return FormatReceipt(r)
 }

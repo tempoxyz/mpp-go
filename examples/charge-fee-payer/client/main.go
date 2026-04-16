@@ -52,7 +52,7 @@ func main() {
 	}
 	defer response.Body.Close()
 
-	receipt, err := mpp.ParsePaymentReceipt(response.Header.Get("Payment-Receipt"))
+	receipt, err := mpp.ParseReceipt(response.Header.Get("Payment-Receipt"))
 	if err != nil {
 		log.Fatal(err)
 	}

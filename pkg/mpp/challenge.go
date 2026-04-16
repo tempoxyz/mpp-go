@@ -1,5 +1,11 @@
 package mpp
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
 // Challenge represents a server-issued payment challenge sent via the
 // WWW-Authenticate header.
 type Challenge struct {
@@ -92,6 +98,79 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 	}
 }
 
+// MarshalJSON emits the standard JSON challenge shape with a decoded request
+// object, while keeping RequestB64 as an internal cache for header formatting.
+func (c Challenge) MarshalJSON() ([]byte, error) {
+	request, err := requestForJSON(c.Request, c.RequestB64)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		ID          string         `json:"id"`
+		Method      string         `json:"method"`
+		Intent      string         `json:"intent"`
+		Request     map[string]any `json:"request"`
+		Realm       string         `json:"realm,omitempty"`
+		Digest      string         `json:"digest,omitempty"`
+		Expires     string         `json:"expires,omitempty"`
+		Description string         `json:"description,omitempty"`
+		Opaque      any            `json:"opaque,omitempty"`
+	}{
+		ID:          c.ID,
+		Method:      c.Method,
+		Intent:      c.Intent,
+		Request:     request,
+		Realm:       c.Realm,
+		Digest:      c.Digest,
+		Expires:     c.Expires,
+		Description: c.Description,
+		Opaque:      opaqueForJSON(c.Opaque),
+	})
+}
+
+// UnmarshalJSON accepts the standard JSON challenge shape and computes the
+// cached RequestB64 field used by header serialization.
+func (c *Challenge) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		ID          string          `json:"id"`
+		Method      string          `json:"method"`
+		Intent      string          `json:"intent"`
+		Request     json.RawMessage `json:"request"`
+		Realm       string          `json:"realm,omitempty"`
+		RequestB64  string          `json:"requestB64,omitempty"`
+		Digest      string          `json:"digest,omitempty"`
+		Expires     string          `json:"expires,omitempty"`
+		Description string          `json:"description,omitempty"`
+		Opaque      json.RawMessage `json:"opaque,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	request, requestB64, err := decodeJSONRequest(decoded.Request, decoded.RequestB64)
+	if err != nil {
+		return err
+	}
+	opaque, err := decodeJSONOpaque(decoded.Opaque)
+	if err != nil {
+		return err
+	}
+
+	*c = Challenge{
+		ID:          decoded.ID,
+		Method:      decoded.Method,
+		Intent:      decoded.Intent,
+		Request:     request,
+		Realm:       decoded.Realm,
+		RequestB64:  requestB64,
+		Digest:      decoded.Digest,
+		Expires:     decoded.Expires,
+		Description: decoded.Description,
+		Opaque:      opaque,
+	}
+	return nil
+}
+
 // FromAuthenticate parses an authentication header value into a Challenge.
 func FromAuthenticate(header string) (*Challenge, error) {
 	return ParseChallenge(header)
@@ -135,4 +214,146 @@ func (c *Challenge) ToEcho() ChallengeEcho {
 		Digest:  c.Digest,
 		Opaque:  c.Opaque,
 	}
+}
+
+func (e ChallengeEcho) toChallenge() Challenge {
+	return Challenge{
+		ID:         e.ID,
+		Method:     e.Method,
+		Intent:     e.Intent,
+		Realm:      e.Realm,
+		RequestB64: e.Request,
+		Digest:     e.Digest,
+		Expires:    e.Expires,
+		Opaque:     e.Opaque,
+	}
+}
+
+func requestForJSON(request map[string]any, requestB64 string) (map[string]any, error) {
+	if request != nil {
+		return request, nil
+	}
+	if requestB64 == "" {
+		return map[string]any{}, nil
+	}
+	decoded, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	return decoded, nil
+}
+
+func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]any, string, error) {
+	trimmed := bytes.TrimSpace(request)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		if requestB64 == "" {
+			requestB64 = b64EncodeRequest(nil)
+		}
+		decoded, err := B64Decode(requestB64)
+		if err != nil {
+			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+		}
+		return decoded, requestB64, nil
+	}
+
+	decoded, requestFromJSON, err := parseJSONRequestValue(trimmed)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if requestB64 == "" {
+		requestB64 = requestFromJSON
+		return decoded, requestB64, nil
+	}
+
+	decodedB64, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	if !JSONEqual(decoded, decodedB64) {
+		return nil, "", fmt.Errorf("mpp: challenge request and requestB64 do not match")
+	}
+	return decoded, requestB64, nil
+}
+
+func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, error) {
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var requestB64 string
+		if err := json.Unmarshal(trimmed, &requestB64); err != nil {
+			return nil, "", err
+		}
+		decoded, err := B64Decode(requestB64)
+		if err != nil {
+			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+		}
+		return decoded, requestB64, nil
+	}
+
+	var request map[string]any
+	if err := json.Unmarshal(trimmed, &request); err != nil {
+		return nil, "", fmt.Errorf("mpp: request must be an object or base64url string: %w", err)
+	}
+	if request == nil {
+		request = map[string]any{}
+	}
+	return request, b64EncodeRequest(request), nil
+}
+
+func decodeJSONOpaque(raw json.RawMessage) (map[string]string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+
+	if trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(trimmed, &encoded); err != nil {
+			return nil, err
+		}
+		if encoded == "" {
+			return map[string]string{}, nil
+		}
+		decoded, err := B64Decode(encoded)
+		if err != nil {
+			return map[string]string{"_raw": encoded}, nil
+		}
+		opaque := make(map[string]string, len(decoded))
+		for key, value := range decoded {
+			opaque[key] = anyStr(value)
+		}
+		return opaque, nil
+	}
+
+	var opaque map[string]string
+	if err := json.Unmarshal(trimmed, &opaque); err == nil {
+		return opaque, nil
+	}
+
+	var opaqueAny map[string]any
+	if err := json.Unmarshal(trimmed, &opaqueAny); err != nil {
+		return nil, fmt.Errorf("mpp: opaque must be an object or base64url string: %w", err)
+	}
+	opaque = make(map[string]string, len(opaqueAny))
+	for key, value := range opaqueAny {
+		opaque[key] = anyStr(value)
+	}
+	return opaque, nil
+}
+
+func opaqueForJSON(opaque map[string]string) any {
+	if opaque == nil {
+		return nil
+	}
+	if raw, ok := opaque["_raw"]; ok && len(opaque) == 1 {
+		decoded, err := B64Decode(raw)
+		if err != nil {
+			return raw
+		}
+		result := make(map[string]string, len(decoded))
+		for key, value := range decoded {
+			result[key] = anyStr(value)
+		}
+		return result
+	}
+	return opaque
 }
