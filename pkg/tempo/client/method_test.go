@@ -81,6 +81,24 @@ func TestCreateCredentialScenarios(t *testing.T) {
 			wantBroadcasts: 0,
 		},
 		{
+			name: "hash credential rejected for explicit memo challenge",
+			config: Config{
+				ChainID:        42431,
+				CredentialType: tempo.CredentialTypeHash,
+			},
+			rpc: &mockRPC{chainID: 42431},
+			params: tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+				Memo:      "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+			},
+			wantErr:        "hash credentials cannot be used with explicit memo challenges",
+			wantBroadcasts: 0,
+		},
+		{
 			name: "chain id mismatch",
 			config: Config{
 				ChainID: 42431,

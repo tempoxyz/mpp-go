@@ -69,6 +69,25 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "explicit primary memo forces pull mode",
+			config: MethodConfig{
+				Currency:  "0x20c0000000000000000000000000000000000001",
+				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+				ChainID:   42431,
+			},
+			params: mppserver.ChargeParams{
+				Amount:         "0.50",
+				Memo:           "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+				SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+			},
+			assertions: func(t *testing.T, request tempo.ChargeRequest) {
+				t.Helper()
+				if got := len(request.MethodDetails.SupportedModes); got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePull {
+					t.Fatalf("request.MethodDetails.SupportedModes = %#v, want [pull]", request.MethodDetails.SupportedModes)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
