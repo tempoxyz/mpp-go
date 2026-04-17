@@ -34,12 +34,12 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 
 			result, err := m.Charge(c.Request().Context(), chargeParams)
 			if err != nil {
-				server.WritePaymentError(c.Response().Writer, err)
+				server.WritePaymentError(c.Response(), err)
 				return nil
 			}
 
 			if result.Challenge != nil {
-				server.WriteChallenge(c.Response().Writer, result.Challenge, m.Realm())
+				server.WriteChallenge(c.Response(), result.Challenge, m.Realm())
 				return nil
 			}
 
@@ -47,7 +47,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			c.SetRequest(c.Request().WithContext(ctx))
 			c.Set(credentialKey, result.Credential)
 			c.Set(receiptKey, result.Receipt)
-			c.Response().Writer.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+			c.Response().Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
 			return next(c)
 		}
 	}

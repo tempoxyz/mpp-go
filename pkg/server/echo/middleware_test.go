@@ -31,6 +31,18 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	t.Parallel()
 
 	e := echofw.New()
+	var challengeCommitted bool
+	var challengeStatus int
+	e.Use(func(next echofw.HandlerFunc) echofw.HandlerFunc {
+		return func(c echofw.Context) error {
+			err := next(c)
+			if c.Request().Header.Get("Authorization") == "" {
+				challengeCommitted = c.Response().Committed
+				challengeStatus = c.Response().Status
+			}
+			return err
+		}
+	})
 	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
 	e.GET("/paid", func(c echofw.Context) error {
 		credential := Credential(c)
@@ -54,6 +66,12 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 
 	if challengeResponse.Code != http.StatusPaymentRequired {
 		t.Fatalf("challenge status = %d, want %d", challengeResponse.Code, http.StatusPaymentRequired)
+	}
+	if !challengeCommitted {
+		t.Fatal("challenge response was not marked committed in echo")
+	}
+	if challengeStatus != http.StatusPaymentRequired {
+		t.Fatalf("echo challenge status = %d, want %d", challengeStatus, http.StatusPaymentRequired)
 	}
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))

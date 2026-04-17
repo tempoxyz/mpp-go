@@ -159,6 +159,43 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 	}
 }
 
+func TestVerifyOrChallenge_AllowsDynamicExpiresOverrides(t *testing.T) {
+	request := map[string]any{
+		"amount":    "100",
+		"currency":  "0xabc",
+		"recipient": "0xdef",
+	}
+	issuedExpires := mpp.Expires.Minutes(5)
+	challenge := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+		mpp.WithExpires(issuedExpires),
+	)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request:       request,
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+		Expires:       mpp.Expires.Minutes(5),
+	})
+	if err != nil {
+		t.Fatalf("VerifyOrChallenge() error = %v", err)
+	}
+	if result.Receipt == nil || result.Receipt.Reference != "0xreceipt" {
+		t.Fatalf("expected successful receipt, got %#v", result)
+	}
+}
+
 func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 	request := map[string]any{
 		"amount":    "100",
