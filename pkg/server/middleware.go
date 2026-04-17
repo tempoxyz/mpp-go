@@ -15,6 +15,13 @@ const (
 	receiptKey
 )
 
+// ContextWithPayment stores the verified payment objects on a request context.
+func ContextWithPayment(ctx context.Context, credential *mpp.Credential, receipt *mpp.Receipt) context.Context {
+	ctx = context.WithValue(ctx, credentialKey, credential)
+	ctx = context.WithValue(ctx, receiptKey, receipt)
+	return ctx
+}
+
 // CredentialFromContext extracts the Credential from the request context.
 func CredentialFromContext(ctx context.Context) *mpp.Credential {
 	v, _ := ctx.Value(credentialKey).(*mpp.Credential)
@@ -41,12 +48,12 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 
 			result, err := m.Charge(r.Context(), chargeParams)
 			if err != nil {
-				writePaymentError(w, err)
+				WritePaymentError(w, err)
 				return
 			}
 
 			if result.Challenge != nil {
-				writeChallenge(w, result.Challenge, m.realm)
+				WriteChallenge(w, result.Challenge, m.realm)
 				return
 			}
 
@@ -56,16 +63,15 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 }
 
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {
-	ctx := r.Context()
-	ctx = context.WithValue(ctx, credentialKey, credential)
-	ctx = context.WithValue(ctx, receiptKey, receipt)
+	ctx := ContextWithPayment(r.Context(), credential, receipt)
 
 	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
 
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
-func writeChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
+// WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
+func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
 	w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(realm))
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -75,7 +81,8 @@ func writeChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm strin
 	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
 }
 
-func writePaymentError(w http.ResponseWriter, err error) {
+// WritePaymentError serializes MPP verification errors as problem details.
+func WritePaymentError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 

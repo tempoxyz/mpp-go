@@ -13,7 +13,7 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 	t.Parallel()
 
 	paymentErrorResponse := httptest.NewRecorder()
-	writePaymentError(paymentErrorResponse, mpp.ErrBadRequest("bad request"))
+	WritePaymentError(paymentErrorResponse, mpp.ErrBadRequest("bad request"))
 	if paymentErrorResponse.Code != http.StatusBadRequest {
 		t.Fatalf("paymentErrorResponse.Code = %d, want %d", paymentErrorResponse.Code, http.StatusBadRequest)
 	}
@@ -22,7 +22,7 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 	}
 
 	genericErrorResponse := httptest.NewRecorder()
-	writePaymentError(genericErrorResponse, errors.New("verification failed"))
+	WritePaymentError(genericErrorResponse, errors.New("verification failed"))
 	if genericErrorResponse.Code != http.StatusPaymentRequired {
 		t.Fatalf("genericErrorResponse.Code = %d, want %d", genericErrorResponse.Code, http.StatusPaymentRequired)
 	}

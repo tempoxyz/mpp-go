@@ -131,9 +131,72 @@ func main() {
 | Example | Description |
 |---------|-------------|
 | [basic](./examples/basic/) | Separate-process demo with a long-running server and standalone client, mirroring the `mpp-rs` sample layout |
+| [chi/server](./examples/chi/server/) | Chi router example using the existing `net/http` middleware helpers |
+| [gin/server](./examples/gin/server/) | Gin example using the dedicated adapter package and context helpers |
+| [echo/server](./examples/echo/server/) | Echo example using the dedicated adapter package and context helpers |
 | [charge-basic](./examples/charge-basic/) | Generic Tempo charge flow using the high-level MPP client and server helpers, available in both one-command and separate-process layouts |
 | [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential, available in both one-command and separate-process layouts |
 | [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer, available in both one-command and separate-process layouts |
+
+## Web Frameworks
+
+The most common Go HTTP stacks today are `net/http`, Gin, Echo, Chi, and Fiber.
+MPP already integrates directly with `net/http`, which also covers Chi because
+Chi handlers and middleware use the standard `http.Handler` interfaces.
+
+For the two most common non-stdlib frameworks, mpp-go now ships first-class
+adapters:
+
+- [`pkg/server/gin`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/server/gin) for Gin
+- [`pkg/server/echo`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/server/echo) for Echo
+
+Chi needs no special adapter:
+
+```go
+router.With(server.ChargeMiddleware(payment, server.ChargeParams{
+	Amount:      "0.50",
+	Description: "Paid content",
+})).Get("/paid", func(w http.ResponseWriter, r *http.Request) {
+	credential := server.CredentialFromContext(r.Context())
+	receipt := server.ReceiptFromContext(r.Context())
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"payer":   credential.Source,
+		"receipt": receipt.Reference,
+	})
+})
+```
+
+Gin route middleware:
+
+```go
+router.GET("/paid", ginadapter.ChargeMiddleware(payment, server.ChargeParams{
+	Amount:      "0.50",
+	Description: "Paid content",
+}), func(c *gin.Context) {
+	credential := ginadapter.Credential(c)
+	receipt := ginadapter.Receipt(c)
+	c.JSON(http.StatusOK, gin.H{
+		"payer":   credential.Source,
+		"receipt": receipt.Reference,
+	})
+})
+```
+
+Echo route middleware:
+
+```go
+e.GET("/paid", func(c echo.Context) error {
+	credential := echoadapter.Credential(c)
+	receipt := echoadapter.Receipt(c)
+	return c.JSON(http.StatusOK, map[string]any{
+		"payer":   credential.Source,
+		"receipt": receipt.Reference,
+	})
+}, echoadapter.ChargeMiddleware(payment, server.ChargeParams{
+	Amount:      "0.50",
+	Description: "Paid content",
+}))
+```
 
 ## Protocol
 
