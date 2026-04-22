@@ -53,14 +53,17 @@ func NewMethod(config MethodConfig) *Method {
 	if decimals == 0 {
 		decimals = tempo.DefaultDecimals
 	}
-	chainID := config.ChainID
-	currency := config.Currency
-	if currency == "" {
-		currency = tempo.DefaultCurrencyForChain(chainID)
-	}
 	intent := config.Intent
 	if intent == nil {
 		intent, _ = NewIntent(IntentConfig{})
+	}
+	chainID := config.ChainID
+	if chainID == 0 {
+		chainID = tempo.InferChainIDFromRPCURL(intent.rpcURL)
+	}
+	currency := config.Currency
+	if currency == "" {
+		currency = tempo.DefaultCurrencyForChain(chainID)
 	}
 	return &Method{
 		intent:         intent,
@@ -104,6 +107,9 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	chainID := int64(params.ChainID)
 	if chainID == 0 {
 		chainID = m.chainID
+	}
+	if chainID != 0 && m.intent.rpc == nil && m.intent.rpcURL == "" && !tempo.IsKnownChainID(chainID) {
+		return nil, fmt.Errorf("tempo server: unknown chain id %d; configure Intent.RPC or Intent.RPCURL explicitly", chainID)
 	}
 	memo := params.Memo
 	if memo == "" {

@@ -53,19 +53,12 @@ import (
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/pkg/server"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
-	intent, _ := charge.NewIntent(charge.IntentConfig{
+	method, _ := charge.MethodFromConfig(charge.Config{
 		RPCURL: "https://rpc.moderato.tempo.xyz",
-	})
-
-	method := charge.NewMethod(charge.MethodConfig{
-		Intent:    intent,
-		ChainID:   42431,
-		Currency:  tempo.DefaultCurrencyForChain(42431),
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
 
@@ -94,6 +87,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -102,8 +96,7 @@ import (
 
 func main() {
 	method, _ := charge.New(charge.Config{
-		PrivateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-		ChainID:    42431,
+		PrivateKey: os.Getenv("MPP_PRIVATE_KEY"),
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
 

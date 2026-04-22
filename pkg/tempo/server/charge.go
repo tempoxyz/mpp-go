@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,8 @@ type IntentConfig struct {
 	FeePayerSigner *temposigner.Signer
 	// FeePayerPrivateKey constructs FeePayerSigner when FeePayerSigner is nil.
 	FeePayerPrivateKey string
+	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
+	FeePayerPrivateKeyEnv string
 	// Store persists replay-protection keys for hash and proof credentials.
 	Store tempo.Store
 }
@@ -65,9 +68,16 @@ type Intent struct {
 
 // NewIntent constructs a Tempo charge verifier.
 func NewIntent(config IntentConfig) (*Intent, error) {
+	feePayerPrivateKey := config.FeePayerPrivateKey
+	if feePayerPrivateKey == "" && config.FeePayerPrivateKeyEnv != "" {
+		feePayerPrivateKey = os.Getenv(config.FeePayerPrivateKeyEnv)
+		if feePayerPrivateKey == "" {
+			return nil, fmt.Errorf("tempo server: %s is not set", config.FeePayerPrivateKeyEnv)
+		}
+	}
 	feePayerSigner := config.FeePayerSigner
-	if feePayerSigner == nil && config.FeePayerPrivateKey != "" {
-		resolved, err := temposigner.NewSigner(config.FeePayerPrivateKey)
+	if feePayerSigner == nil && feePayerPrivateKey != "" {
+		resolved, err := temposigner.NewSigner(feePayerPrivateKey)
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +128,10 @@ func (i *Intent) Verify(
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("credential type %q is not allowed for this challenge", payload.Type))
 	}
 
-	rpc := i.resolveRPC(request)
+	rpc, err := i.resolveRPC(request)
+	if err != nil {
+		return nil, err
+	}
 
 	switch payload.Type {
 	case tempo.CredentialTypeHash:
@@ -328,17 +341,21 @@ func (i *Intent) verifyTransaction(
 	), nil
 }
 
-func (i *Intent) resolveRPC(request tempo.ChargeRequest) tempo.RPCClient {
+func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error) {
 	if i.rpc != nil {
-		return i.rpc
+		return i.rpc, nil
 	}
 	if i.rpcURL != "" {
-		return tempo.NewRPCClient(i.rpcURL)
+		return tempo.NewRPCClient(i.rpcURL), nil
 	}
 	if request.MethodDetails.ChainID != nil {
-		return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(*request.MethodDetails.ChainID))
+		rpcURL, err := tempo.RPCURLForChain(*request.MethodDetails.ChainID)
+		if err != nil {
+			return nil, fmt.Errorf("tempo server: %w; configure Intent.RPC or Intent.RPCURL explicitly", err)
+		}
+		return tempo.NewRPCClient(rpcURL), nil
 	}
-	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0))
+	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0)), nil
 }
 
 // TODO(tempo-go): extract the Tempo transaction/receipt matching and fee-payer
