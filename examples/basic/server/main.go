@@ -47,17 +47,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	intent, err := charge.NewIntent(charge.IntentConfig{RPCURL: rpcURL})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	method := charge.NewMethod(charge.MethodConfig{
-		Intent:    intent,
+	method, err := charge.New(charge.Config{
+		RPCURL:    rpcURL,
 		ChainID:   chainID,
 		Currency:  devnet.Currency,
 		Recipient: merchant.Address().Hex(),
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	secretKey := "basic-example-secret"
 	if envSecret := getenv("MPP_SECRET_KEY"); envSecret != "" {

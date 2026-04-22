@@ -16,16 +16,15 @@ type exampleServer struct {
 }
 
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
-	intent, err := charge.NewIntent(charge.IntentConfig{RPCURL: rpcURL})
-	if err != nil {
-		return nil, err
-	}
-	method := charge.NewMethod(charge.MethodConfig{
-		Intent:    intent,
+	method, err := charge.New(charge.Config{
+		RPCURL:    rpcURL,
 		ChainID:   chainID,
 		Currency:  devnet.Currency,
 		Recipient: devnet.Recipient,
 	})
+	if err != nil {
+		return nil, err
+	}
 	payment := server.New(method, devnet.Realm, "example-secret")
 
 	handler := server.ChargeMiddleware(payment, server.ChargeParams{

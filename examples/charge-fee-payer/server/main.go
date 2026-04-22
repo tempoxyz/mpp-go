@@ -30,17 +30,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	intent, err := charge.NewIntent(charge.IntentConfig{FeePayerPrivateKey: devnet.FeePayerPrivateKey, RPCURL: rpcURL})
+	method, err := charge.New(charge.Config{
+		RPCURL:             rpcURL,
+		ChainID:            chainID,
+		Currency:           devnet.Currency,
+		FeePayerPrivateKey: devnet.FeePayerPrivateKey,
+		FeePayer:           true,
+		Recipient:          devnet.Recipient,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	method := charge.NewMethod(charge.MethodConfig{
-		Intent:    intent,
-		ChainID:   chainID,
-		Currency:  devnet.Currency,
-		FeePayer:  true,
-		Recipient: devnet.Recipient,
-	})
 	payment := server.New(method, devnet.Realm, "example-secret")
 
 	mux := http.NewServeMux()

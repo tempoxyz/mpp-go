@@ -21,17 +21,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	intent, err := charge.NewIntent(charge.IntentConfig{RPCURL: rpcURL})
-	if err != nil {
-		log.Fatal(err)
-	}
-	method := charge.NewMethod(charge.MethodConfig{
-		Intent:         intent,
+	method, err := charge.New(charge.Config{
+		RPCURL:         rpcURL,
 		ChainID:        chainID,
 		Currency:       devnet.Currency,
 		Recipient:      devnet.Recipient,
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 	payment := server.New(method, devnet.Realm, "example-secret")
 
 	mux := http.NewServeMux()
