@@ -87,6 +87,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -95,8 +96,8 @@ import (
 
 func main() {
 	method, _ := charge.New(charge.Config{
-		PrivateKeyEnv: "MPP_PRIVATE_KEY",
-		RPCURL:        "https://rpc.moderato.tempo.xyz",
+		PrivateKey: os.Getenv("MPP_PRIVATE_KEY"),
+		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
 
 	c := client.New([]client.Method{method})

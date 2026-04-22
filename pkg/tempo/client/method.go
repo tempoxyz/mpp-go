@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"os"
 	"strings"
 	"time"
 
@@ -28,8 +27,6 @@ type Config struct {
 	Signer *temposigner.Signer
 	// PrivateKey constructs Signer when Signer is nil.
 	PrivateKey string
-	// PrivateKeyEnv loads the signing key from an environment variable when PrivateKey is empty.
-	PrivateKeyEnv string
 	// RPC overrides the Tempo JSON-RPC client used for signing flows.
 	RPC tempo.RPCClient
 	// RPCURL is used to build an RPC client when RPC is nil.
@@ -59,19 +56,12 @@ func New(config Config) (*Method, error) {
 	if config.RPC == nil && config.RPCURL == "" && config.ChainID != 0 && !tempo.IsKnownChainID(config.ChainID) {
 		return nil, fmt.Errorf("tempo client: unknown chain id %d; configure RPC or RPCURL explicitly", config.ChainID)
 	}
-	privateKey := config.PrivateKey
-	if privateKey == "" && config.PrivateKeyEnv != "" {
-		privateKey = os.Getenv(config.PrivateKeyEnv)
-		if privateKey == "" {
-			return nil, fmt.Errorf("tempo client: %s is not set", config.PrivateKeyEnv)
-		}
-	}
 	signer := config.Signer
 	if signer == nil {
-		if privateKey == "" {
+		if config.PrivateKey == "" {
 			return nil, fmt.Errorf("tempo client: signer or private key is required")
 		}
-		resolved, err := temposigner.NewSigner(privateKey)
+		resolved, err := temposigner.NewSigner(config.PrivateKey)
 		if err != nil {
 			return nil, err
 		}

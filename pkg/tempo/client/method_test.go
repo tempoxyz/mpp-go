@@ -158,17 +158,6 @@ func TestNewInfersChainIDFromRPCURL(t *testing.T) {
 	}
 }
 
-func TestNewLoadsPrivateKeyFromEnv(t *testing.T) {
-	t.Setenv("MPP_PRIVATE_KEY", testPrivateKey)
-	method, err := New(Config{PrivateKeyEnv: "MPP_PRIVATE_KEY"})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if method.signer == nil {
-		t.Fatal("method.signer = nil, want signer")
-	}
-}
-
 func TestNewRejectsUnknownChainWithoutRPC(t *testing.T) {
 	t.Parallel()
 
