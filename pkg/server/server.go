@@ -101,6 +101,33 @@ func (r *ChargeResult) IsChallenge() bool {
 	return r.Challenge != nil
 }
 
+// buildChargeRequest produces the canonical request map for a charge operation.
+func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
+	if builder, ok := m.method.(ChargeRequestBuilder); ok {
+		return builder.BuildChargeRequest(params)
+	}
+	request := map[string]any{
+		"amount":   params.Amount,
+		"currency": params.Currency,
+	}
+	if params.Recipient != "" {
+		request["recipient"] = params.Recipient
+	}
+	if params.ExternalID != "" {
+		request["externalId"] = params.ExternalID
+	}
+	if params.FeePayer {
+		request["feePayer"] = true
+	}
+	if params.ChainID != 0 {
+		request["chainId"] = params.ChainID
+	}
+	if params.Memo != "" {
+		request["memo"] = params.Memo
+	}
+	return request, nil
+}
+
 // Charge handles a charge intent with human-readable amounts.
 func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, error) {
 	intent, ok := m.method.Intents()["charge"]
@@ -108,33 +135,9 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		return nil, fmt.Errorf("method %q does not support charge intent", m.method.Name())
 	}
 
-	request := map[string]any{}
-	if builder, ok := m.method.(ChargeRequestBuilder); ok {
-		var err error
-		request, err = builder.BuildChargeRequest(params)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		request = map[string]any{
-			"amount":   params.Amount,
-			"currency": params.Currency,
-		}
-		if params.Recipient != "" {
-			request["recipient"] = params.Recipient
-		}
-		if params.ExternalID != "" {
-			request["externalId"] = params.ExternalID
-		}
-		if params.FeePayer {
-			request["feePayer"] = true
-		}
-		if params.ChainID != 0 {
-			request["chainId"] = params.ChainID
-		}
-		if params.Memo != "" {
-			request["memo"] = params.Memo
-		}
+	request, err := m.buildChargeRequest(params)
+	if err != nil {
+		return nil, err
 	}
 
 	result, err := VerifyOrChallenge(ctx, VerifyParams{
