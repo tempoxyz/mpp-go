@@ -57,7 +57,7 @@ import (
 )
 
 func main() {
-	method, _ := charge.New(charge.Config{
+	method, _ := charge.MethodFromConfig(charge.Config{
 		RPCURL: "https://rpc.moderato.tempo.xyz",
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})

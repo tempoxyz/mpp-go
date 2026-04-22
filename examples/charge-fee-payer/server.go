@@ -16,7 +16,7 @@ type exampleServer struct {
 }
 
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
-	method, err := charge.New(charge.Config{
+	method, err := charge.MethodFromConfig(charge.Config{
 		RPCURL:             rpcURL,
 		ChainID:            chainID,
 		Currency:           devnet.Currency,

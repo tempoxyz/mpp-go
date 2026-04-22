@@ -40,8 +40,8 @@ type Config struct {
 	Store tempo.Store
 }
 
-// New constructs a Tempo charge method from one config struct.
-func New(config Config) (*Method, error) {
+// MethodFromConfig constructs a Tempo charge method from one config struct.
+func MethodFromConfig(config Config) (*Method, error) {
 	methodConfig := MethodConfig{
 		Intent:         config.Intent,
 		Currency:       config.Currency,

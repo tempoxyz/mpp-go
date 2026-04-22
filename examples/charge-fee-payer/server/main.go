@@ -30,7 +30,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	method, err := charge.New(charge.Config{
+	method, err := charge.MethodFromConfig(charge.Config{
 		RPCURL:             rpcURL,
 		ChainID:            chainID,
 		Currency:           devnet.Currency,

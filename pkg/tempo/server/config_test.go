@@ -8,15 +8,15 @@ import (
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
-func TestNewConvenienceBuildsMethod(t *testing.T) {
+func TestMethodFromConfigBuildsMethod(t *testing.T) {
 	t.Parallel()
 
-	method, err := New(Config{
+	method, err := MethodFromConfig(Config{
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 	})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("MethodFromConfig() error = %v", err)
 	}
 	requestMap, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50"})
 	if err != nil {
