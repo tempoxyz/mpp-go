@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -37,6 +38,9 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 	if len(configs) == 0 {
 		panic("server: ComposeMiddleware requires at least one ComposeConfig")
 	}
+	if configs[0].Mpp == nil {
+		panic("server: ComposeConfig[0].Mpp is nil")
+	}
 
 	realm := configs[0].Mpp.realm
 	entries := make([]composedEntry, len(configs))
@@ -61,28 +65,33 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
+			paymentAuth := mpp.FindPaymentAuthorization(auth)
 
 			// No credential — fan out and merge all challenges.
-			if mpp.FindPaymentAuthorization(auth) == "" {
+			if paymentAuth == "" {
 				composeChallenges(w, r, entries, realm)
 				return
 			}
 
 			// Credential present — find the matching entry.
-			cred, err := mpp.ParseCredential(auth)
+			cred, err := mpp.ParseCredential(paymentAuth)
 			if err != nil {
 				WritePaymentError(w, mpp.ErrMalformedCredential(err.Error()))
 				return
 			}
 
-			entry, ok := findMatchingEntry(entries, cred)
+			entry, ok, err := findMatchingEntry(entries, cred)
+			if err != nil {
+				WritePaymentError(w, err)
+				return
+			}
 			if !ok {
 				WritePaymentError(w, mpp.ErrMethodUnsupported(cred.Challenge.Method+"/"+cred.Challenge.Intent))
 				return
 			}
 
 			params := entry.params
-			params.Authorization = auth
+			params.Authorization = paymentAuth
 
 			result, err := entry.mpp.Charge(r.Context(), params)
 			if err != nil {
@@ -135,11 +144,11 @@ func composeChallenges(w http.ResponseWriter, r *http.Request, entries []compose
 
 // findMatchingEntry selects the entry whose method, intent, and canonical
 // request match the credential. This allows multiple entries with the same
-// method+intent but different amounts or currencies.
-func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedEntry, bool) {
+// method+intent but different amounts, currencies, or opaque metadata.
+func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedEntry, bool, error) {
 	echoedRequest, err := echoedRequestMap(cred)
 	if err != nil {
-		return composedEntry{}, false
+		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err))
 	}
 
 	// Prefer an exact match on method + intent + request.
@@ -151,8 +160,8 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedE
 		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
 			continue
 		}
-		if mpp.JSONEqual(echoedRequest, entry.request) {
-			return entry, true
+		if mpp.JSONEqual(echoedRequest, entry.request) && reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
+			return entry, true, nil
 		}
 	}
 
@@ -165,8 +174,8 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedE
 		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
 			continue
 		}
-		return entry, true
+		return entry, true, nil
 	}
 
-	return composedEntry{}, false
+	return composedEntry{}, false, nil
 }

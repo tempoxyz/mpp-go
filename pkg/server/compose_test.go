@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -205,6 +206,43 @@ func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
 	}
 }
 
+func TestComposeMiddleware_SameRequestDifferentMetaSelectsMatchingConfig(t *testing.T) {
+	methodBasic := New(composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
+	methodPro := New(composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodBasic, Params: ChargeParams{Amount: "1.00", Meta: map[string]string{"plan": "basic"}}},
+		ComposeConfig{Mpp: methodPro, Params: ChargeParams{Amount: "1.00", Meta: map[string]string{"plan": "pro"}}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	defer resp.Body.Close()
+
+	var proChallenge *mpp.Challenge
+	for _, h := range resp.Header.Values("WWW-Authenticate") {
+		c, err := mpp.ParseChallenge(h)
+		if err != nil {
+			t.Fatalf("ParseChallenge() error = %v", err)
+		}
+		if c.Opaque["plan"] == "pro" {
+			proChallenge = c
+			break
+		}
+	}
+	if proChallenge == nil {
+		t.Fatal("did not find the pro challenge")
+	}
+
+	paid := payWith(t, srv.URL, proChallenge)
+	defer paid.Body.Close()
+
+	if paid.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(paid.Body)
+		t.Fatalf("paid status = %d, want 200; body = %s", paid.StatusCode, body)
+	}
+}
+
 func TestComposeMiddleware_RejectsUnknownMethod(t *testing.T) {
 	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
@@ -255,6 +293,89 @@ func TestComposeMiddleware_CrossMethodCredentialRejected(t *testing.T) {
 
 	if paid.StatusCode == http.StatusOK {
 		t.Fatal("expected credential to be rejected, but got 200")
+	}
+}
+
+func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
+		ComposeConfig{Mpp: methodB, Params: ChargeParams{Amount: "2.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	betaChallenge := findChallenge(t, resp, "beta")
+	resp.Body.Close()
+
+	credential := &mpp.Credential{
+		Challenge: betaChallenge.ToEcho(),
+		Source:    "did:key:z6Mktest",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc"},
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token, "+credential.ToAuthorization())
+
+	paid, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer paid.Body.Close()
+
+	if paid.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(paid.Body)
+		t.Fatalf("paid status = %d, want 200; body = %s", paid.StatusCode, body)
+	}
+}
+
+func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	challenge := findChallenge(t, resp, "alpha")
+	resp.Body.Close()
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc"},
+	}
+	credential.Challenge.Request = "%%%"
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", credential.ToAuthorization())
+
+	paid, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer paid.Body.Close()
+
+	if paid.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(paid.Body)
+		t.Fatalf("status = %d, want %d; body = %s", paid.StatusCode, http.StatusBadRequest, body)
+	}
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(paid.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem) error = %v", err)
+	}
+	if problem.Type != string(mpp.ErrorTypeMalformedCredential) {
+		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeMalformedCredential)
 	}
 }
 
