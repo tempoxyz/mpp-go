@@ -5,11 +5,18 @@ updates:
     schedule:
       interval: weekly
     cooldown:
-      default-days: 7
+      default-days: 3
+      semver-major-days: 7
+    groups:
+      go-deps:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
     cooldown:
-      default-days: 7
+      default-days: 3
+    groups:
+      actions:
+        patterns: ["*"]
