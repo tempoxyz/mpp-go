@@ -5,10 +5,16 @@ import (
 
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 func TestMethodBuildChargeRequest(t *testing.T) {
 	t.Parallel()
+
+	moderatoIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlModerato})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
 
 	tests := []struct {
 		name       string
@@ -16,6 +22,35 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		params     mppserver.ChargeParams
 		assertions func(*testing.T, tempo.ChargeRequest)
 	}{
+		{
+			name: "infers chain and currency from intent rpc url",
+			config: MethodConfig{
+				Intent:    moderatoIntent,
+				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+			},
+			params: mppserver.ChargeParams{
+				Amount: "0.50",
+			},
+			assertions: func(t *testing.T, request tempo.ChargeRequest) {
+				t.Helper()
+				if request.Currency != tempotx.AlphaUSDAddress.Hex() {
+					t.Fatalf("request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex())
+				}
+				if request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != tempotx.ChainIdModerato {
+					t.Fatalf("request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato)
+				}
+			},
+		},
+		{
+			name: "rejects unknown chain without intent rpc",
+			config: MethodConfig{
+				ChainID:   999999,
+				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+			},
+			params: mppserver.ChargeParams{
+				Amount: "0.50",
+			},
+		},
 		{
 			name: "includes external id and fee payer url",
 			config: MethodConfig{
@@ -97,6 +132,12 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 
 			method := NewMethod(tt.config)
 			requestMap, err := method.BuildChargeRequest(tt.params)
+			if tt.name == "rejects unknown chain without intent rpc" {
+				if err == nil || err.Error() != "tempo server: unknown chain id 999999; configure Intent.RPC or Intent.RPCURL explicitly" {
+					t.Fatalf("BuildChargeRequest() error = %v, want unknown chain id error", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("BuildChargeRequest() error = %v", err)
 			}

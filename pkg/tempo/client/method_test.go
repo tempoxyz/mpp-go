@@ -9,6 +9,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 const (
@@ -139,6 +140,61 @@ func TestCreateCredentialScenarios(t *testing.T) {
 				t.Fatalf("len(tt.rpc.sentRawTxs) = %d, want %d", got, tt.wantBroadcasts)
 			}
 		})
+	}
+}
+
+func TestNewInfersChainIDFromRPCURL(t *testing.T) {
+	t.Parallel()
+
+	method, err := New(Config{
+		PrivateKey: testPrivateKey,
+		RPCURL:     tempotx.RpcUrlModerato,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if method.chainID != tempotx.ChainIdModerato {
+		t.Fatalf("method.chainID = %d, want %d", method.chainID, tempotx.ChainIdModerato)
+	}
+}
+
+func TestNewLoadsPrivateKeyFromEnv(t *testing.T) {
+	t.Setenv("MPP_PRIVATE_KEY", testPrivateKey)
+	method, err := New(Config{PrivateKeyEnv: "MPP_PRIVATE_KEY"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if method.signer == nil {
+		t.Fatal("method.signer = nil, want signer")
+	}
+}
+
+func TestNewRejectsUnknownChainWithoutRPC(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(Config{PrivateKey: testPrivateKey, ChainID: 999999})
+	if err == nil || err.Error() != "tempo client: unknown chain id 999999; configure RPC or RPCURL explicitly" {
+		t.Fatalf("New() error = %v, want unknown chain id error", err)
+	}
+}
+
+func TestCreateCredentialRejectsUnknownChallengeChainWithoutRPC(t *testing.T) {
+	t.Parallel()
+
+	method, err := New(Config{PrivateKey: testPrivateKey})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   999999,
+	})
+	_, err = method.CreateCredential(context.Background(), challenge)
+	if err == nil || !strings.Contains(err.Error(), "unknown chain id 999999") {
+		t.Fatalf("CreateCredential() error = %v, want unknown chain id error", err)
 	}
 }
 

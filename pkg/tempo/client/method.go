@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
 	"time"
 
@@ -27,6 +28,8 @@ type Config struct {
 	Signer *temposigner.Signer
 	// PrivateKey constructs Signer when Signer is nil.
 	PrivateKey string
+	// PrivateKeyEnv loads the signing key from an environment variable when PrivateKey is empty.
+	PrivateKeyEnv string
 	// RPC overrides the Tempo JSON-RPC client used for signing flows.
 	RPC tempo.RPCClient
 	// RPCURL is used to build an RPC client when RPC is nil.
@@ -53,22 +56,36 @@ var _ mppclient.Method = (*Method)(nil)
 
 // New constructs a Tempo charge client method.
 func New(config Config) (*Method, error) {
+	if config.RPC == nil && config.RPCURL == "" && config.ChainID != 0 && !tempo.IsKnownChainID(config.ChainID) {
+		return nil, fmt.Errorf("tempo client: unknown chain id %d; configure RPC or RPCURL explicitly", config.ChainID)
+	}
+	privateKey := config.PrivateKey
+	if privateKey == "" && config.PrivateKeyEnv != "" {
+		privateKey = os.Getenv(config.PrivateKeyEnv)
+		if privateKey == "" {
+			return nil, fmt.Errorf("tempo client: %s is not set", config.PrivateKeyEnv)
+		}
+	}
 	signer := config.Signer
 	if signer == nil {
-		if config.PrivateKey == "" {
+		if privateKey == "" {
 			return nil, fmt.Errorf("tempo client: signer or private key is required")
 		}
-		resolved, err := temposigner.NewSigner(config.PrivateKey)
+		resolved, err := temposigner.NewSigner(privateKey)
 		if err != nil {
 			return nil, err
 		}
 		signer = resolved
 	}
+	chainID := config.ChainID
+	if chainID == 0 {
+		chainID = tempo.InferChainIDFromRPCURL(config.RPCURL)
+	}
 	return &Method{
 		signer:         signer,
 		rpc:            config.RPC,
 		rpcURL:         config.RPCURL,
-		chainID:        config.ChainID,
+		chainID:        chainID,
 		clientID:       config.ClientID,
 		credentialType: config.CredentialType,
 	}, nil
@@ -98,7 +115,10 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 		credentialType = tempo.CredentialTypeTransaction
 	}
 
-	rpc, rpcURL := m.resolveRPC(request)
+	rpc, rpcURL, err := m.resolveRPC(request)
+	if err != nil {
+		return nil, err
+	}
 	if rpc == nil {
 		rpc = tempo.NewRPCClient(rpcURL)
 	}
@@ -340,18 +360,26 @@ func (m *Method) expectedChainID(request tempo.ChargeRequest) int64 {
 	return m.chainID
 }
 
-func (m *Method) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, string) {
+func (m *Method) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, string, error) {
 	if m.rpc != nil {
-		return m.rpc, m.rpcURL
+		return m.rpc, m.rpcURL, nil
 	}
 	if m.rpcURL != "" {
-		return nil, m.rpcURL
+		return nil, m.rpcURL, nil
 	}
 	if request.MethodDetails.ChainID != nil {
-		return nil, tempo.DefaultRPCURLForChain(*request.MethodDetails.ChainID)
+		rpcURL, err := tempo.RPCURLForChain(*request.MethodDetails.ChainID)
+		if err != nil {
+			return nil, "", fmt.Errorf("tempo client: %w; configure RPC or RPCURL explicitly", err)
+		}
+		return nil, rpcURL, nil
 	}
 	if m.chainID != 0 {
-		return nil, tempo.DefaultRPCURLForChain(m.chainID)
+		rpcURL, err := tempo.RPCURLForChain(m.chainID)
+		if err != nil {
+			return nil, "", fmt.Errorf("tempo client: %w; configure RPC or RPCURL explicitly", err)
+		}
+		return nil, rpcURL, nil
 	}
-	return nil, tempo.DefaultRPCURLForChain(0)
+	return nil, tempo.DefaultRPCURLForChain(0), nil
 }
