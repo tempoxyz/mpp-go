@@ -127,6 +127,7 @@ func main() {
 | [chi/server](./examples/chi/server/) | Chi router example using the existing `net/http` middleware helpers |
 | [gin/server](./examples/gin/server/) | Gin example using the dedicated adapter package and context helpers |
 | [echo/server](./examples/echo/server/) | Echo example using the dedicated adapter package and context helpers |
+| [fiber/server](./examples/fiber/server/) | Fiber example using the dedicated adapter package and context helpers |
 | [charge-basic](./examples/charge-basic/) | Generic Tempo charge flow using the high-level MPP client and server helpers, available in both one-command and separate-process layouts |
 | [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential, available in both one-command and separate-process layouts |
 | [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer, available in both one-command and separate-process layouts |
@@ -137,11 +138,11 @@ The most common Go HTTP stacks today are `net/http`, Gin, Echo, Chi, and Fiber.
 MPP already integrates directly with `net/http`, which also covers Chi because
 Chi handlers and middleware use the standard `http.Handler` interfaces.
 
-For the two most common non-stdlib frameworks, mpp-go now ships first-class
-adapters:
+For the most common non-stdlib frameworks, mpp-go ships first-class adapters:
 
 - [`pkg/server/gin`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/server/gin) for Gin
 - [`pkg/server/echo`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/server/echo) for Echo
+- [`pkg/server/fiber`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/server/fiber) for Fiber
 
 Chi needs no special adapter:
 
@@ -189,6 +190,22 @@ e.GET("/paid", func(c echo.Context) error {
 	Amount:      "0.50",
 	Description: "Paid content",
 }))
+```
+
+Fiber route middleware:
+
+```go
+app.Get("/paid", fiberadapter.ChargeMiddleware(payment, server.ChargeParams{
+	Amount:      "0.50",
+	Description: "Paid content",
+}), func(c *fiber.Ctx) error {
+	credential := fiberadapter.Credential(c)
+	receipt := fiberadapter.Receipt(c)
+	return c.Status(http.StatusOK).JSON(fiber.Map{
+		"payer":   credential.Source,
+		"receipt": receipt.Reference,
+	})
+})
 ```
 
 ## Protocol
