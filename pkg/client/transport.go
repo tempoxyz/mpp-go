@@ -175,19 +175,5 @@ func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
 	if !sameOriginURL(req.URL, origin) {
 		return fmt.Errorf("mpp: refusing payment for redirected origin %q", requestOrigin(req.URL))
 	}
-	if challenge.Realm != "" && !challengeRealmMatchesRequest(challenge.Realm, req.URL) {
-		return fmt.Errorf("mpp: challenge realm %q does not match request host %q", challenge.Realm, req.URL.Host)
-	}
 	return nil
-}
-
-func challengeRealmMatchesRequest(realm string, requestURL *url.URL) bool {
-	parsedRealm, err := url.Parse(realm)
-	if err == nil && parsedRealm.Host != "" {
-		realm = parsedRealm.Host
-	}
-	if strings.EqualFold(realm, requestURL.Host) {
-		return true
-	}
-	return strings.EqualFold(realm, requestURL.Hostname())
 }

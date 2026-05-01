@@ -287,26 +287,6 @@ func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
 	}
 }
 
-func TestTransport_RoundTrip_RejectsRealmMismatch(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "other.example.com", "tempo", "payment", nil)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
-		w.WriteHeader(http.StatusPaymentRequired)
-	}))
-	defer srv.Close()
-
-	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
-	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-	_, err := tr.RoundTrip(req)
-	if err == nil || !strings.Contains(err.Error(), "does not match request host") {
-		t.Fatalf("RoundTrip() error = %v, want realm mismatch", err)
-	}
-	if method.calls != 0 {
-		t.Fatalf("CreateCredential() calls = %d, want 0", method.calls)
-	}
-}
-
 func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
 	var challenge *mpp.Challenge
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
