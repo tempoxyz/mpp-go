@@ -35,14 +35,16 @@ const (
 )
 
 type mockRPC struct {
-	chainID     uint64
-	nonce       uint64
-	gasPrice    string
-	estimateGas string
-	callResult  string
-	receipts    map[string]map[string]any
-	sentRawTxs  []string
-	onSend      func(raw string) (string, map[string]any, error)
+	chainID          uint64
+	nonce            uint64
+	gasPrice         string
+	estimateGas      string
+	callResult       string
+	receipts         map[string]map[string]any
+	sentRawTxs       []string
+	estimateGasCalls []map[string]any
+	onSend           func(raw string) (string, map[string]any, error)
+	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 }
 
 func (m *mockRPC) GetChainID(context.Context) (uint64, error) {
@@ -73,6 +75,14 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 	case "eth_gasPrice":
 		return &temporpc.JSONRPCResponse{Result: m.gasPrice}, nil
 	case "eth_estimateGas":
+		if len(params) > 0 {
+			if callObject, ok := params[0].(map[string]any); ok {
+				m.estimateGasCalls = append(m.estimateGasCalls, callObject)
+			}
+		}
+		if m.onEstimateGas != nil {
+			return m.onEstimateGas(params...)
+		}
 		return &temporpc.JSONRPCResponse{Result: m.estimateGas}, nil
 	case "eth_call":
 		return &temporpc.JSONRPCResponse{Result: m.callResult}, nil
@@ -503,6 +513,92 @@ func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T)
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "sponsor policy") {
 		t.Fatalf("Verify() error = %v, want sponsor policy rejection", err)
+	}
+}
+
+func TestChargeFlow_FeePayerTransactionUsesChallengeOnceAfterRevert(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		return testReceiptHash, map[string]any{"status": "0x0", "logs": []any{}}, nil
+	}
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "transaction reverted") {
+		t.Fatalf("first Verify() error = %v, want reverted transaction", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected 1 broadcast after first Verify(), got %d", len(rpc.sentRawTxs))
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "challenge already used") {
+		t.Fatalf("second Verify() error = %v, want reused challenge rejection", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected no second broadcast, got %d", len(rpc.sentRawTxs))
+	}
+}
+
+func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	rpc.onEstimateGas = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+		callObject, ok := params[0].(map[string]any)
+		if !ok {
+			t.Fatalf("estimateGas params[0] type = %T, want map[string]any", params[0])
+		}
+		if _, ok := callObject["calls"]; !ok {
+			return &temporpc.JSONRPCResponse{Result: rpc.estimateGas}, nil
+		}
+		if callObject["from"] == "" {
+			t.Fatal("estimateGas call object missing from")
+		}
+		if callObject["feeToken"] != request.Currency {
+			t.Fatalf("estimateGas feeToken = %v, want %s", callObject["feeToken"], request.Currency)
+		}
+		calls, ok := callObject["calls"].([]map[string]any)
+		if !ok || len(calls) == 0 {
+			t.Fatalf("estimateGas calls = %#v, want non-empty call batch", callObject["calls"])
+		}
+		if _, ok := callObject["nonceKey"]; !ok {
+			t.Fatal("estimateGas call object missing nonceKey")
+		}
+		if _, ok := callObject["validBefore"]; !ok {
+			t.Fatal("estimateGas call object missing validBefore")
+		}
+		return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
+	}
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "transaction preflight failed") {
+		t.Fatalf("Verify() error = %v, want preflight failure", err)
+	}
+	if len(rpc.sentRawTxs) != 0 {
+		t.Fatalf("expected no broadcast after failed preflight, got %d", len(rpc.sentRawTxs))
+	}
+	if len(rpc.estimateGasCalls) < 2 {
+		t.Fatalf("expected client estimate and server preflight calls, got %d", len(rpc.estimateGasCalls))
 	}
 }
 
