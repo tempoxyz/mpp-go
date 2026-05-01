@@ -3,6 +3,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -56,6 +57,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
+	origin := requestOrigin(req.URL)
+	req = req.WithContext(withPaymentOrigin(req.Context(), origin))
 
 	transport := &Transport{
 		methods: c.methods,
@@ -65,6 +68,16 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	// Use a copy of the http.Client with our payment-aware transport.
 	hc := *c.httpClient
 	hc.Transport = transport
+	priorCheckRedirect := hc.CheckRedirect
+	hc.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameOriginURL(redirectReq.URL, origin) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
+		}
+		if priorCheckRedirect != nil {
+			return priorCheckRedirect(redirectReq, via)
+		}
+		return nil
+	}
 	return hc.Do(req)
 }
 

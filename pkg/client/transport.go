@@ -1,9 +1,11 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,6 +18,8 @@ type Transport struct {
 	methods map[string]Method
 	inner   http.RoundTripper
 }
+
+type paymentOriginContextKey struct{}
 
 // NewTransport creates a payment-aware transport.
 func NewTransport(methods []Method, inner http.RoundTripper) *Transport {
@@ -75,6 +79,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if matched == nil {
 		// No matching method found — return original 402 response as-is.
 		return resp, nil
+	}
+	if err := validatePaymentOrigin(req, matched); err != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return nil, err
 	}
 
 	// Drain and close the 402 response body so the connection can be reused.
@@ -136,4 +145,35 @@ func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []erro
 		}
 	}
 	return challenges, errs
+}
+
+func withPaymentOrigin(ctx context.Context, origin string) context.Context {
+	return context.WithValue(ctx, paymentOriginContextKey{}, origin)
+}
+
+func paymentOrigin(ctx context.Context) string {
+	origin, _ := ctx.Value(paymentOriginContextKey{}).(string)
+	return origin
+}
+
+func requestOrigin(requestURL *url.URL) string {
+	if requestURL == nil {
+		return ""
+	}
+	return strings.ToLower(requestURL.Scheme) + "://" + strings.ToLower(requestURL.Host)
+}
+
+func sameOriginURL(requestURL *url.URL, origin string) bool {
+	return requestOrigin(requestURL) == origin
+}
+
+func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
+	origin := paymentOrigin(req.Context())
+	if origin == "" {
+		origin = requestOrigin(req.URL)
+	}
+	if !sameOriginURL(req.URL, origin) {
+		return fmt.Errorf("mpp: refusing payment for redirected origin %q", requestOrigin(req.URL))
+	}
+	return nil
 }

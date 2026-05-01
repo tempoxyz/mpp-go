@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	urlpkg "net/url"
 	"strings"
 	"testing"
 
@@ -13,13 +14,15 @@ import (
 
 // mockMethod implements Method for testing.
 type mockMethod struct {
-	name string
-	cred *mpp.Credential
-	err  error
+	name  string
+	cred  *mpp.Credential
+	err   error
+	calls int
 }
 
 func (m *mockMethod) Name() string { return m.name }
 func (m *mockMethod) CreateCredential(_ context.Context, ch *mpp.Challenge) (*mpp.Credential, error) {
+	m.calls++
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -35,6 +38,15 @@ func newTestCredential(method string) *mpp.Credential {
 		},
 		Source: "test",
 	}
+}
+
+func challengeForURL(t *testing.T, rawURL, method string, request map[string]any, opts ...mpp.ChallengeOption) *mpp.Challenge {
+	t.Helper()
+	parsedURL, err := urlpkg.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error = %v", rawURL, err)
+	}
+	return mpp.NewChallenge("secret", parsedURL.Host, method, "payment", request, opts...)
 }
 
 func TestTransport_RoundTrip_No402(t *testing.T) {
@@ -57,13 +69,13 @@ func TestTransport_RoundTrip_No402(t *testing.T) {
 }
 
 func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "test-realm", "tempo", "payment", nil)
 	callCount := 0
+	var challenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("test-realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			w.Write([]byte("pay me"))
 			return
@@ -77,6 +89,7 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 		w.Write([]byte("paid"))
 	}))
 	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
@@ -149,8 +162,8 @@ func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 }
 
 func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil)
 	callCount := 0
+	var challenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -159,7 +172,7 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 			if string(body) != "request-body" {
 				t.Errorf("first request body = %q, want %q", string(body), "request-body")
 			}
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -170,6 +183,7 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
@@ -193,19 +207,21 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 }
 
 func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
-	stripeChallenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", map[string]any{"amount": "100"})
-	tempoChallenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", map[string]any{"amount": "100"})
+	var stripeChallenge *mpp.Challenge
+	var tempoChallenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Add("WWW-Authenticate", stripeChallenge.ToAuthenticate("realm"))
-			w.Header().Add("WWW-Authenticate", tempoChallenge.ToAuthenticate("realm"))
+			w.Header().Add("WWW-Authenticate", stripeChallenge.ToAuthenticate(stripeChallenge.Realm))
+			w.Header().Add("WWW-Authenticate", tempoChallenge.ToAuthenticate(tempoChallenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	stripeChallenge = challengeForURL(t, srv.URL, "stripe", map[string]any{"amount": "100"})
+	tempoChallenge = challengeForURL(t, srv.URL, "tempo", map[string]any{"amount": "100"})
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
@@ -222,17 +238,18 @@ func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
 }
 
 func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", map[string]any{"amount": "100"})
+	var challenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+challenge.ToAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", map[string]any{"amount": "100"})
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
@@ -270,12 +287,34 @@ func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
 	}
 }
 
+func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	req = req.WithContext(withPaymentOrigin(req.Context(), "https://api.example.com"))
+	_, err := tr.RoundTrip(req)
+	if err == nil || !strings.Contains(err.Error(), "refusing payment for redirected origin") {
+		t.Fatalf("RoundTrip() error = %v, want origin mismatch", err)
+	}
+	if method.calls != 0 {
+		t.Fatalf("CreateCredential() calls = %d, want 0", method.calls)
+	}
+}
+
 func TestClient_Get(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil)
+	var challenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -283,6 +322,7 @@ func TestClient_Get(t *testing.T) {
 		w.Write([]byte("hello"))
 	}))
 	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
@@ -298,7 +338,7 @@ func TestClient_Get(t *testing.T) {
 }
 
 func TestClient_Post(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil)
+	var challenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -308,13 +348,14 @@ func TestClient_Post(t *testing.T) {
 			t.Errorf("content-type = %q, want application/json", r.Header.Get("Content-Type"))
 		}
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
@@ -335,5 +376,30 @@ func TestClient_WithHTTPClient(t *testing.T) {
 	c := New(nil, WithHTTPClient(custom))
 	if c.httpClient != custom {
 		t.Fatal("expected custom http client to be set")
+	}
+}
+
+func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
+	var challenge *mpp.Challenge
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer attacker.Close()
+	challenge = challengeForURL(t, attacker.URL, "tempo", nil)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	c := New([]Method{method})
+	_, err := c.Get(context.Background(), origin.URL)
+	if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect") {
+		t.Fatalf("Get() error = %v, want cross-origin redirect rejection", err)
+	}
+	if method.calls != 0 {
+		t.Fatalf("CreateCredential() calls = %d, want 0", method.calls)
 	}
 }
