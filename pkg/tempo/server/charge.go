@@ -825,39 +825,12 @@ func defaultFeePayerPolicies() map[string]FeePayerPolicy {
 }
 
 func feePayerPolicyForDecimals(decimals int) FeePayerPolicy {
-	if decimals == tempo.DefaultDecimals {
-		return FeePayerPolicy{
-			Decimals:             decimals,
-			MaxFeePerGas:         big.NewInt(100_000),
-			MaxPriorityFeePerGas: big.NewInt(100_000),
-			MaxTotalFee:          big.NewInt(150_000_000),
-		}
-	}
-	maxFeePerGas := scaleFeePayerCap(feePayerMaxFeePerGas, decimals)
-	maxTotalFee := scaleFeePayerCap(feePayerMaxTotalFee, decimals)
-	minimumDefaultTotalFee := new(big.Int).Mul(new(big.Int).SetUint64(tempo.DefaultGasLimit), maxFeePerGas)
-	if maxTotalFee.Cmp(minimumDefaultTotalFee) < 0 {
-		maxTotalFee = minimumDefaultTotalFee
-	}
 	return FeePayerPolicy{
 		Decimals:             decimals,
-		MaxFeePerGas:         maxFeePerGas,
-		MaxPriorityFeePerGas: scaleFeePayerCap(feePayerMaxPriorityFeePerGas, decimals),
-		MaxTotalFee:          maxTotalFee,
+		MaxFeePerGas:         new(big.Int).Set(feePayerMaxFeePerGas),
+		MaxPriorityFeePerGas: new(big.Int).Set(feePayerMaxPriorityFeePerGas),
+		MaxTotalFee:          new(big.Int).Set(feePayerMaxTotalFee),
 	}
-}
-
-func scaleFeePayerCap(value *big.Int, decimals int) *big.Int {
-	if decimals >= 18 {
-		multiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals-18)), nil)
-		return new(big.Int).Mul(new(big.Int).Set(value), multiplier)
-	}
-	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(18-decimals)), nil)
-	quotient := new(big.Int).Quo(new(big.Int).Set(value), divisor)
-	if quotient.Sign() > 0 {
-		return quotient
-	}
-	return big.NewInt(1)
 }
 
 func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {

@@ -55,25 +55,25 @@ func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing default policy for %s", tempotx.AlphaUSDAddress.Hex())
 	}
-	if moderatoPolicy.MaxTotalFee.Cmp(big.NewInt(150_000_000)) != 0 {
-		t.Fatalf("moderato max total fee = %s, want 150000000", moderatoPolicy.MaxTotalFee)
+	if moderatoPolicy.MaxTotalFee.Cmp(big.NewInt(50_000_000_000_000_000)) != 0 {
+		t.Fatalf("moderato max total fee = %s, want 50000000000000000", moderatoPolicy.MaxTotalFee)
 	}
-	if moderatoPolicy.MaxFeePerGas.Cmp(big.NewInt(100_000)) != 0 {
-		t.Fatalf("moderato max fee per gas = %s, want 100000", moderatoPolicy.MaxFeePerGas)
+	if moderatoPolicy.MaxFeePerGas.Cmp(big.NewInt(100_000_000_000)) != 0 {
+		t.Fatalf("moderato max fee per gas = %s, want 100000000000", moderatoPolicy.MaxFeePerGas)
 	}
 	legacyPolicy, ok := intent.feePayerPolicy["0x20C0000000000000000000000000000000000000"]
 	if !ok {
 		t.Fatal("missing default policy for legacy moderato fee token")
 	}
-	if legacyPolicy.MaxTotalFee.Cmp(big.NewInt(150_000_000)) != 0 {
-		t.Fatalf("legacy moderato max total fee = %s, want 150000000", legacyPolicy.MaxTotalFee)
+	if legacyPolicy.MaxTotalFee.Cmp(big.NewInt(50_000_000_000_000_000)) != 0 {
+		t.Fatalf("legacy moderato max total fee = %s, want 50000000000000000", legacyPolicy.MaxTotalFee)
 	}
 	mainnetPolicy, ok := intent.feePayerPolicy[tempo.MainnetUSDCAddress]
 	if !ok {
 		t.Fatalf("missing default policy for %s", tempo.MainnetUSDCAddress)
 	}
-	if mainnetPolicy.MaxPriorityFeePerGas.Cmp(big.NewInt(100_000)) != 0 {
-		t.Fatalf("mainnet max priority fee per gas = %s, want 100000", mainnetPolicy.MaxPriorityFeePerGas)
+	if mainnetPolicy.MaxPriorityFeePerGas.Cmp(big.NewInt(100_000_000_000)) != 0 {
+		t.Fatalf("mainnet max priority fee per gas = %s, want 100000000000", mainnetPolicy.MaxPriorityFeePerGas)
 	}
 }
 
