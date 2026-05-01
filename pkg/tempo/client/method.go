@@ -121,7 +121,7 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, fmt.Errorf("tempo client: chain id mismatch (rpc=%d, expected=%d)", chainID, expected)
 	}
 	if request.Amount == "0" {
-		signature, err := m.signProof(int64(chainID), challenge.ID)
+		signature, err := m.signProof(int64(chainID), challenge.ID, challenge.Realm)
 		if err != nil {
 			return nil, err
 		}
@@ -241,8 +241,8 @@ func (m *Method) buildTransfer(
 	return serialized, nil
 }
 
-func (m *Method) signProof(chainID int64, challengeID string) (string, error) {
-	hash, err := tempo.ProofTypedDataHash(chainID, challengeID)
+func (m *Method) signProof(chainID int64, challengeID, realm string) (string, error) {
+	hash, err := tempo.ProofTypedDataHash(chainID, challengeID, realm)
 	if err != nil {
 		return "", fmt.Errorf("tempo client: build proof payload: %w", err)
 	}

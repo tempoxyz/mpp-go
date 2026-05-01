@@ -201,7 +201,7 @@ func (i *Intent) verifyProof(
 	if source.chainID != chainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	proofHash, err := tempo.ProofTypedDataHash(chainID, credential.Challenge.ID)
+	proofHash, err := tempo.ProofTypedDataHash(chainID, credential.Challenge.ID, credential.Challenge.Realm)
 	if err != nil {
 		return nil, mpp.ErrVerificationFailed("failed to construct proof payload")
 	}

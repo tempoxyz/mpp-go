@@ -234,7 +234,7 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSigner(access key) error = %v", err)
 	}
-	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID)
+	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID, challenge.Realm)
 	if err != nil {
 		t.Fatalf("ProofTypedDataHash() error = %v", err)
 	}
@@ -293,7 +293,7 @@ func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSigner(access key) error = %v", err)
 	}
-	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID)
+	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID, challenge.Realm)
 	if err != nil {
 		t.Fatalf("ProofTypedDataHash() error = %v", err)
 	}
@@ -481,6 +481,37 @@ func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "credential source is invalid") {
 		t.Fatalf("Verify() error = %v, want invalid credential source", err)
+	}
+}
+
+func TestChargeFlow_ProofCredentialRejectsDifferentRealm(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeProof)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	credential.Challenge.Realm = "other.example.com"
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "proof signature does not match source") {
+		t.Fatalf("Verify() error = %v, want proof signature mismatch", err)
 	}
 }
 

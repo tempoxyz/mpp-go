@@ -14,7 +14,7 @@ func ProofSource(chainID int64, address common.Address) string {
 }
 
 // ProofTypedDataHash returns the EIP-712 digest for a Tempo proof credential.
-func ProofTypedDataHash(chainID int64, challengeID string) (common.Hash, error) {
+func ProofTypedDataHash(chainID int64, challengeID, realm string) (common.Hash, error) {
 	typedData := apitypes.TypedData{
 		Types: apitypes.Types{
 			"EIP712Domain": {
@@ -24,6 +24,7 @@ func ProofTypedDataHash(chainID int64, challengeID string) (common.Hash, error) 
 			},
 			"Proof": {
 				{Name: "challengeId", Type: "string"},
+				{Name: "realm", Type: "string"},
 			},
 		},
 		PrimaryType: "Proof",
@@ -34,6 +35,7 @@ func ProofTypedDataHash(chainID int64, challengeID string) (common.Hash, error) 
 		},
 		Message: apitypes.TypedDataMessage{
 			"challengeId": challengeID,
+			"realm":       realm,
 		},
 	}
 	hash, _, err := apitypes.TypedDataAndHash(typedData)
