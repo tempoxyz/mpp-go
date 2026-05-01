@@ -633,6 +633,85 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 	}
 }
 
+func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  "0x20c0000000000000000000000000000000000002",
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+		FeePayer:  true,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("Verify() error = %v, want unsupported fee token rejection", err)
+	}
+	if len(rpc.sentRawTxs) != 0 {
+		t.Fatalf("expected unsupported fee token to be rejected before broadcast, got %d broadcasts", len(rpc.sentRawTxs))
+	}
+}
+
+func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  "0x20c0000000000000000000000000000000000002",
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+		FeePayer:  true,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	rpc := newMockRPC(request)
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{
+		RPC:                rpc,
+		FeePayerPrivateKey: feePayerKey,
+		FeePayerPolicies: map[string]FeePayerPolicy{
+			request.Currency: {
+				Decimals:             6,
+				MaxFeePerGas:         big.NewInt(10),
+				MaxPriorityFeePerGas: big.NewInt(10),
+				MaxTotalFee:          big.NewInt(1_000_000),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected configured fee token to broadcast once, got %d", len(rpc.sentRawTxs))
+	}
+}
+
 func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
 	rpc := &mockRPC{receipts: map[string]map[string]any{}}
 	ctx, cancel := context.WithCancel(context.Background())
