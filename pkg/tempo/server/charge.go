@@ -825,6 +825,14 @@ func defaultFeePayerPolicies() map[string]FeePayerPolicy {
 }
 
 func feePayerPolicyForDecimals(decimals int) FeePayerPolicy {
+	if decimals == tempo.DefaultDecimals {
+		return FeePayerPolicy{
+			Decimals:             decimals,
+			MaxFeePerGas:         big.NewInt(100_000),
+			MaxPriorityFeePerGas: big.NewInt(100_000),
+			MaxTotalFee:          big.NewInt(150_000_000),
+		}
+	}
 	maxFeePerGas := scaleFeePayerCap(feePayerMaxFeePerGas, decimals)
 	maxTotalFee := scaleFeePayerCap(feePayerMaxTotalFee, decimals)
 	minimumDefaultTotalFee := new(big.Int).Mul(new(big.Int).SetUint64(tempo.DefaultGasLimit), maxFeePerGas)
