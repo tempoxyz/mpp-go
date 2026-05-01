@@ -818,8 +818,9 @@ func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string
 func defaultFeePayerPolicies() map[string]FeePayerPolicy {
 	policy := feePayerPolicyForDecimals(tempo.DefaultDecimals)
 	return map[string]FeePayerPolicy{
-		tempotx.AlphaUSDAddress.Hex(): policy,
-		tempo.MainnetUSDCAddress:      policy,
+		"0x20c0000000000000000000000000000000000000": policy,
+		tempotx.AlphaUSDAddress.Hex():                policy,
+		tempo.MainnetUSDCAddress:                     policy,
 	}
 }
 

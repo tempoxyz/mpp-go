@@ -61,6 +61,13 @@ func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
 	if moderatoPolicy.MaxFeePerGas.Cmp(big.NewInt(1)) != 0 {
 		t.Fatalf("moderato max fee per gas = %s, want 1", moderatoPolicy.MaxFeePerGas)
 	}
+	legacyPolicy, ok := intent.feePayerPolicy["0x20C0000000000000000000000000000000000000"]
+	if !ok {
+		t.Fatal("missing default policy for legacy moderato fee token")
+	}
+	if legacyPolicy.MaxTotalFee.Cmp(big.NewInt(1_000_000)) != 0 {
+		t.Fatalf("legacy moderato max total fee = %s, want 1000000", legacyPolicy.MaxTotalFee)
+	}
 	mainnetPolicy, ok := intent.feePayerPolicy[tempo.MainnetUSDCAddress]
 	if !ok {
 		t.Fatalf("missing default policy for %s", tempo.MainnetUSDCAddress)
