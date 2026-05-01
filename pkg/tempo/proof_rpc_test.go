@@ -31,23 +31,30 @@ func TestProofHelpers(t *testing.T) {
 		t.Fatalf("ProofSource() = %q, want %q", got, "did:pkh:eip155:42431:"+address.Hex())
 	}
 
-	hash1, err := ProofTypedDataHash(42431, "challenge-1")
+	hash1, err := ProofTypedDataHash(42431, "challenge-1", "api.example.com")
 	if err != nil {
 		t.Fatalf("ProofTypedDataHash() error = %v", err)
 	}
-	hash2, err := ProofTypedDataHash(42431, "challenge-1")
+	hash2, err := ProofTypedDataHash(42431, "challenge-1", "api.example.com")
 	if err != nil {
 		t.Fatalf("ProofTypedDataHash() repeat error = %v", err)
 	}
-	hash3, err := ProofTypedDataHash(42431, "challenge-2")
+	hash3, err := ProofTypedDataHash(42431, "challenge-2", "api.example.com")
 	if err != nil {
 		t.Fatalf("ProofTypedDataHash() different challenge error = %v", err)
+	}
+	hash4, err := ProofTypedDataHash(42431, "challenge-1", "other.example.com")
+	if err != nil {
+		t.Fatalf("ProofTypedDataHash() different realm error = %v", err)
 	}
 	if hash1 != hash2 {
 		t.Fatalf("hash1 = %s, want same hash as hash2 %s", hash1.Hex(), hash2.Hex())
 	}
 	if hash1 == hash3 {
 		t.Fatalf("hash1 = %s, want different hash from hash3 %s", hash1.Hex(), hash3.Hex())
+	}
+	if hash1 == hash4 {
+		t.Fatalf("hash1 = %s, want different hash from hash4 %s", hash1.Hex(), hash4.Hex())
 	}
 }
 
