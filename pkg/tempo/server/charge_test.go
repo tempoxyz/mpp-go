@@ -694,7 +694,6 @@ func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
 		FeePayerPrivateKey: feePayerKey,
 		FeePayerPolicies: map[string]FeePayerPolicy{
 			request.Currency: {
-				Decimals:             6,
 				MaxFeePerGas:         big.NewInt(10),
 				MaxPriorityFeePerGas: big.NewInt(10),
 				MaxTotalFee:          big.NewInt(1_000_000),

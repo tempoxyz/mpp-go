@@ -23,8 +23,8 @@ import (
 const receiptRetryDelay = 500 * time.Millisecond
 const receiptRetryAttempts = 20
 
-// Sponsor policy caps for fee-payer transactions. These values are defined in
-// 18-decimal precision and scaled per supported fee token.
+// Sponsor policy caps for fee-payer transactions. Tempo fee tokens are TIP-20
+// assets, so the fee budget uses the chain's shared 18-decimal fee accounting.
 var feePayerMaxGas = uint64(2_000_000)
 
 var feePayerMaxFeePerGas = big.NewInt(100_000_000_000)
@@ -42,9 +42,8 @@ type sourceDID struct {
 	address string
 }
 
-// FeePayerPolicy configures sponsored transaction limits for one fee token.
+// FeePayerPolicy configures sponsored transaction limits for one TIP-20 fee token.
 type FeePayerPolicy struct {
-	Decimals             int
 	MaxFeePerGas         *big.Int
 	MaxPriorityFeePerGas *big.Int
 	MaxTotalFee          *big.Int
@@ -879,9 +878,6 @@ func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string
 		if !common.IsHexAddress(currency) {
 			return nil, fmt.Errorf("tempo server: invalid fee payer policy currency %q", currency)
 		}
-		if policy.Decimals < 0 {
-			return nil, fmt.Errorf("tempo server: invalid fee payer policy decimals for %s", currency)
-		}
 		if policy.MaxFeePerGas == nil || policy.MaxFeePerGas.Sign() <= 0 {
 			return nil, fmt.Errorf("tempo server: invalid max fee per gas for %s", currency)
 		}
@@ -895,7 +891,6 @@ func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string
 			return nil, fmt.Errorf("tempo server: invalid max total fee for %s", currency)
 		}
 		policies[common.HexToAddress(currency).Hex()] = FeePayerPolicy{
-			Decimals:             policy.Decimals,
 			MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
 			MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
 			MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
@@ -905,7 +900,7 @@ func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string
 }
 
 func defaultFeePayerPolicies() map[string]FeePayerPolicy {
-	policy := feePayerPolicyForDecimals(tempo.DefaultDecimals)
+	policy := defaultFeePayerPolicy()
 	return map[string]FeePayerPolicy{
 		"0x20c0000000000000000000000000000000000000": policy,
 		tempotx.AlphaUSDAddress.Hex():                policy,
@@ -913,9 +908,8 @@ func defaultFeePayerPolicies() map[string]FeePayerPolicy {
 	}
 }
 
-func feePayerPolicyForDecimals(decimals int) FeePayerPolicy {
+func defaultFeePayerPolicy() FeePayerPolicy {
 	return FeePayerPolicy{
-		Decimals:             decimals,
 		MaxFeePerGas:         new(big.Int).Set(feePayerMaxFeePerGas),
 		MaxPriorityFeePerGas: new(big.Int).Set(feePayerMaxPriorityFeePerGas),
 		MaxTotalFee:          new(big.Int).Set(feePayerMaxTotalFee),
@@ -928,7 +922,6 @@ func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {
 		return FeePayerPolicy{}, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
 	}
 	return FeePayerPolicy{
-		Decimals:             policy.Decimals,
 		MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
 		MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
 		MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),

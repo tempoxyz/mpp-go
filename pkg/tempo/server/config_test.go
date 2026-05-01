@@ -81,7 +81,6 @@ func TestNewIntentRejectsInvalidFeePayerPolicy(t *testing.T) {
 	_, err := NewIntent(IntentConfig{
 		FeePayerPolicies: map[string]FeePayerPolicy{
 			testCurrency: {
-				Decimals:             6,
 				MaxFeePerGas:         big.NewInt(1),
 				MaxPriorityFeePerGas: big.NewInt(2),
 				MaxTotalFee:          big.NewInt(10),
