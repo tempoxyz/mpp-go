@@ -108,6 +108,11 @@ func TestStoreKeys(t *testing.T) {
 			got:  ChargeProofStoreKey("challenge-1"),
 			want: "mppx:charge:proof:challenge-1",
 		},
+		{
+			name: "sponsored key prefixes challenge id",
+			got:  ChargeSponsoredChallengeStoreKey("challenge-1"),
+			want: "mppx:charge:sponsor:challenge-1",
+		},
 	}
 
 	for _, tt := range tests {

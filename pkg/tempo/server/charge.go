@@ -271,6 +271,17 @@ func (i *Intent) verifyTransaction(
 		if tx.FeeToken != (common.Address{}) {
 			return nil, mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
 		}
+		accepted, err := i.store.PutIfAbsent(
+			ctx,
+			tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID),
+			credential.Challenge.ID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
+		}
 		if i.feePayerSigner != nil {
 			tx.From = sender
 			tx.FeeToken = common.HexToAddress(request.Currency)
@@ -308,6 +319,10 @@ func (i *Intent) verifyTransaction(
 		}
 		if coSignedSender != sender {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction sender does not match the credential signer")
+		}
+		tx.From = coSignedSender
+		if err := simulateTransactionPreflight(ctx, rpc, tx); err != nil {
+			return nil, err
 		}
 	}
 
@@ -759,6 +774,80 @@ func signWithRemoteFeePayer(ctx context.Context, feePayerURL, raw string) (strin
 		return "", mpp.ErrVerificationFailed("fee payer returned no signed transaction")
 	}
 	return serialized, nil
+}
+
+func simulateTransactionPreflight(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
+	response, err := rpc.SendRequest(ctx, "eth_estimateGas", transactionCallObject(tx))
+	if err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	if err := response.CheckError(); err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	return nil
+}
+
+func transactionCallObject(tx *tempotx.Tx) map[string]any {
+	callObject := map[string]any{
+		"accessList":           accessListCallObject(tx.AccessList),
+		"calls":                callsCallObject(tx.Calls),
+		"chainId":              hexBig(tx.ChainID),
+		"from":                 tx.From.Hex(),
+		"gas":                  hexutil.EncodeUint64(tx.Gas),
+		"maxFeePerGas":         hexBig(tx.MaxFeePerGas),
+		"maxPriorityFeePerGas": hexBig(tx.MaxPriorityFeePerGas),
+		"nonce":                hexutil.EncodeUint64(tx.Nonce),
+	}
+	if tx.NonceKey != nil {
+		callObject["nonceKey"] = hexBig(tx.NonceKey)
+	}
+	if tx.ValidBefore != 0 {
+		callObject["validBefore"] = hexutil.EncodeUint64(tx.ValidBefore)
+	}
+	if tx.ValidAfter != 0 {
+		callObject["validAfter"] = hexutil.EncodeUint64(tx.ValidAfter)
+	}
+	if tx.FeeToken != (common.Address{}) {
+		callObject["feeToken"] = tx.FeeToken.Hex()
+	}
+	return callObject
+}
+
+func callsCallObject(calls []tempotx.Call) []map[string]any {
+	encoded := make([]map[string]any, 0, len(calls))
+	for _, call := range calls {
+		entry := map[string]any{
+			"data":  hexutil.Encode(call.Data),
+			"value": hexBig(call.Value),
+		}
+		if call.To != nil {
+			entry["to"] = call.To.Hex()
+		}
+		encoded = append(encoded, entry)
+	}
+	return encoded
+}
+
+func accessListCallObject(accessList tempotx.AccessList) []map[string]any {
+	encoded := make([]map[string]any, 0, len(accessList))
+	for _, tuple := range accessList {
+		storageKeys := make([]string, 0, len(tuple.StorageKeys))
+		for _, key := range tuple.StorageKeys {
+			storageKeys = append(storageKeys, key.Hex())
+		}
+		encoded = append(encoded, map[string]any{
+			"address":     tuple.Address.Hex(),
+			"storageKeys": storageKeys,
+		})
+	}
+	return encoded
+}
+
+func hexBig(value *big.Int) string {
+	if value == nil {
+		return hexutil.EncodeBig(big.NewInt(0))
+	}
+	return hexutil.EncodeBig(value)
 }
 
 func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string) error {

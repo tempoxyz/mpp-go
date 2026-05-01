@@ -74,6 +74,12 @@ func ChargeStoreKey(hash string) string {
 	return ReplayKeyPrefix + strings.ToLower(hash)
 }
 
+// ChargeSponsoredChallengeStoreKey normalizes a replay-protection key for a
+// sponsored Tempo challenge.
+func ChargeSponsoredChallengeStoreKey(challengeID string) string {
+	return ReplayKeyPrefix + "sponsor:" + challengeID
+}
+
 // ChargeProofStoreKey normalizes a replay-protection key for a Tempo proof credential.
 func ChargeProofStoreKey(challengeID string) string {
 	return ReplayKeyPrefix + "proof:" + challengeID
