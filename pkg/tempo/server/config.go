@@ -36,6 +36,8 @@ type Config struct {
 	FeePayerPrivateKey string
 	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
 	FeePayerPrivateKeyEnv string
+	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor.
+	FeePayerPolicies map[string]FeePayerPolicy
 	// Store persists replay-protection keys for hash and proof credentials.
 	Store tempo.Store
 }
@@ -60,6 +62,7 @@ func MethodFromConfig(config Config) (*Method, error) {
 			FeePayerSigner:        config.FeePayerSigner,
 			FeePayerPrivateKey:    config.FeePayerPrivateKey,
 			FeePayerPrivateKeyEnv: config.FeePayerPrivateKeyEnv,
+			FeePayerPolicies:      config.FeePayerPolicies,
 			Store:                 config.Store,
 		})
 		if err != nil {

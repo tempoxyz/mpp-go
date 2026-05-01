@@ -1,6 +1,7 @@
 package chargeserver
 
 import (
+	"math/big"
 	"testing"
 
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
@@ -42,5 +43,45 @@ func TestNewIntentLoadsFeePayerPrivateKeyFromEnv(t *testing.T) {
 	}
 	if intent.feePayerSigner == nil {
 		t.Fatal("intent.feePayerSigner = nil, want signer")
+	}
+}
+
+func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
+	intent, err := NewIntent(IntentConfig{})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	moderatoPolicy, ok := intent.feePayerPolicy[tempotx.AlphaUSDAddress.Hex()]
+	if !ok {
+		t.Fatalf("missing default policy for %s", tempotx.AlphaUSDAddress.Hex())
+	}
+	if moderatoPolicy.MaxTotalFee.Cmp(big.NewInt(1_000_000)) != 0 {
+		t.Fatalf("moderato max total fee = %s, want 1000000", moderatoPolicy.MaxTotalFee)
+	}
+	if moderatoPolicy.MaxFeePerGas.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("moderato max fee per gas = %s, want 1", moderatoPolicy.MaxFeePerGas)
+	}
+	mainnetPolicy, ok := intent.feePayerPolicy[tempo.MainnetUSDCAddress]
+	if !ok {
+		t.Fatalf("missing default policy for %s", tempo.MainnetUSDCAddress)
+	}
+	if mainnetPolicy.MaxPriorityFeePerGas.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("mainnet max priority fee per gas = %s, want 1", mainnetPolicy.MaxPriorityFeePerGas)
+	}
+}
+
+func TestNewIntentRejectsInvalidFeePayerPolicy(t *testing.T) {
+	_, err := NewIntent(IntentConfig{
+		FeePayerPolicies: map[string]FeePayerPolicy{
+			testCurrency: {
+				Decimals:             6,
+				MaxFeePerGas:         big.NewInt(1),
+				MaxPriorityFeePerGas: big.NewInt(2),
+				MaxTotalFee:          big.NewInt(10),
+			},
+		},
+	})
+	if err == nil || err.Error() != "tempo server: max priority fee per gas exceeds max fee per gas for 0x20c0000000000000000000000000000000000001" {
+		t.Fatalf("NewIntent() error = %v, want max priority fee validation error", err)
 	}
 }
