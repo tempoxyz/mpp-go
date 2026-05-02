@@ -1,3 +1,4 @@
+// changelogs:version 0.1.0
 module github.com/tempoxyz/mpp-go
 
 go 1.26
