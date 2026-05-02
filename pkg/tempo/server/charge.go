@@ -23,8 +23,8 @@ import (
 const receiptRetryDelay = 500 * time.Millisecond
 const receiptRetryAttempts = 20
 
-// Sponsor policy caps for fee-payer transactions. These values match the
-// narrow Tempo charge flow this package supports today.
+// Sponsor policy caps for fee-payer transactions. Tempo fee tokens are TIP-20
+// assets, so the fee budget uses the chain's shared 18-decimal fee accounting.
 var feePayerMaxGas = uint64(2_000_000)
 
 var feePayerMaxFeePerGas = big.NewInt(100_000_000_000)
@@ -42,6 +42,13 @@ type sourceDID struct {
 	address string
 }
 
+// FeePayerPolicy configures sponsored transaction limits for one TIP-20 fee token.
+type FeePayerPolicy struct {
+	MaxFeePerGas         *big.Int
+	MaxPriorityFeePerGas *big.Int
+	MaxTotalFee          *big.Int
+}
+
 // IntentConfig configures Tempo charge verification.
 type IntentConfig struct {
 	// RPC overrides the Tempo JSON-RPC client used for verification.
@@ -54,6 +61,8 @@ type IntentConfig struct {
 	FeePayerPrivateKey string
 	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
 	FeePayerPrivateKeyEnv string
+	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor.
+	FeePayerPolicies map[string]FeePayerPolicy
 	// Store persists replay-protection keys for hash and proof credentials.
 	Store tempo.Store
 }
@@ -63,6 +72,7 @@ type Intent struct {
 	rpc            tempo.RPCClient
 	rpcURL         string
 	feePayerSigner *temposigner.Signer
+	feePayerPolicy map[string]FeePayerPolicy
 	store          tempo.Store
 }
 
@@ -87,10 +97,15 @@ func NewIntent(config IntentConfig) (*Intent, error) {
 	if store == nil {
 		store = tempo.NewMemoryStore()
 	}
+	feePayerPolicy, err := normalizeFeePayerPolicies(config.FeePayerPolicies)
+	if err != nil {
+		return nil, err
+	}
 	return &Intent{
 		rpc:            config.RPC,
 		rpcURL:         config.RPCURL,
 		feePayerSigner: feePayerSigner,
+		feePayerPolicy: feePayerPolicy,
 		store:          store,
 	}, nil
 }
@@ -254,9 +269,13 @@ func (i *Intent) verifyTransaction(
 	}
 
 	if request.MethodDetails.FeePayer {
+		policy, err := i.feePayerPolicyFor(request.Currency)
+		if err != nil {
+			return nil, err
+		}
 		// tempo-go exposes the signing primitives already; this package keeps the
 		// sponsor policy checks local until a shared helper exists upstream.
-		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires); err != nil {
+		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires, policy); err != nil {
 			return nil, err
 		}
 		if !tx.AwaitingFeePayer {
@@ -304,7 +323,7 @@ func (i *Intent) verifyTransaction(
 		if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction does not contain a matching Tempo transfer")
 		}
-		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires); err != nil {
+		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires, policy); err != nil {
 			return nil, err
 		}
 		if tx.AwaitingFeePayer {
@@ -850,7 +869,66 @@ func hexBig(value *big.Int) string {
 	return hexutil.EncodeBig(value)
 }
 
-func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string) error {
+func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string]FeePayerPolicy, error) {
+	if len(configured) == 0 {
+		configured = defaultFeePayerPolicies()
+	}
+	policies := make(map[string]FeePayerPolicy, len(configured))
+	for currency, policy := range configured {
+		if !common.IsHexAddress(currency) {
+			return nil, fmt.Errorf("tempo server: invalid fee payer policy currency %q", currency)
+		}
+		if policy.MaxFeePerGas == nil || policy.MaxFeePerGas.Sign() <= 0 {
+			return nil, fmt.Errorf("tempo server: invalid max fee per gas for %s", currency)
+		}
+		if policy.MaxPriorityFeePerGas == nil || policy.MaxPriorityFeePerGas.Sign() <= 0 {
+			return nil, fmt.Errorf("tempo server: invalid max priority fee per gas for %s", currency)
+		}
+		if policy.MaxPriorityFeePerGas.Cmp(policy.MaxFeePerGas) > 0 {
+			return nil, fmt.Errorf("tempo server: max priority fee per gas exceeds max fee per gas for %s", currency)
+		}
+		if policy.MaxTotalFee == nil || policy.MaxTotalFee.Sign() <= 0 {
+			return nil, fmt.Errorf("tempo server: invalid max total fee for %s", currency)
+		}
+		policies[common.HexToAddress(currency).Hex()] = FeePayerPolicy{
+			MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
+			MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
+			MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
+		}
+	}
+	return policies, nil
+}
+
+func defaultFeePayerPolicies() map[string]FeePayerPolicy {
+	policy := defaultFeePayerPolicy()
+	return map[string]FeePayerPolicy{
+		"0x20c0000000000000000000000000000000000000": policy,
+		tempotx.AlphaUSDAddress.Hex():                policy,
+		tempo.MainnetUSDCAddress:                     policy,
+	}
+}
+
+func defaultFeePayerPolicy() FeePayerPolicy {
+	return FeePayerPolicy{
+		MaxFeePerGas:         new(big.Int).Set(feePayerMaxFeePerGas),
+		MaxPriorityFeePerGas: new(big.Int).Set(feePayerMaxPriorityFeePerGas),
+		MaxTotalFee:          new(big.Int).Set(feePayerMaxTotalFee),
+	}
+}
+
+func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {
+	policy, ok := i.feePayerPolicy[common.HexToAddress(currency).Hex()]
+	if !ok {
+		return FeePayerPolicy{}, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+	}
+	return FeePayerPolicy{
+		MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
+		MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
+		MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
+	}, nil
+}
+
+func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string, policy FeePayerPolicy) error {
 	if tx.Gas == 0 {
 		return mpp.ErrInvalidPayload("fee payer transaction must declare gas")
 	}
@@ -860,19 +938,19 @@ func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string) error 
 	if tx.MaxFeePerGas == nil || tx.MaxFeePerGas.Sign() <= 0 {
 		return mpp.ErrInvalidPayload("fee payer transaction must declare max fee per gas")
 	}
-	if tx.MaxFeePerGas.Cmp(feePayerMaxFeePerGas) > 0 {
+	if tx.MaxFeePerGas.Cmp(policy.MaxFeePerGas) > 0 {
 		return mpp.ErrInvalidPayload("fee payer transaction max fee per gas exceeds sponsor policy")
 	}
 	if tx.MaxPriorityFeePerGas != nil {
 		if tx.MaxPriorityFeePerGas.Cmp(tx.MaxFeePerGas) > 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction max priority fee exceeds max fee")
 		}
-		if tx.MaxPriorityFeePerGas.Cmp(feePayerMaxPriorityFeePerGas) > 0 {
+		if tx.MaxPriorityFeePerGas.Cmp(policy.MaxPriorityFeePerGas) > 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction max priority fee exceeds sponsor policy")
 		}
 	}
 	maxTotalFee := new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas), tx.MaxFeePerGas)
-	if maxTotalFee.Cmp(feePayerMaxTotalFee) > 0 {
+	if maxTotalFee.Cmp(policy.MaxTotalFee) > 0 {
 		return mpp.ErrInvalidPayload("fee payer transaction total fee budget exceeds sponsor policy")
 	}
 	if tx.ValidBefore != 0 {
