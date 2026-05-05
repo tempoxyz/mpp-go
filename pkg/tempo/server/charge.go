@@ -260,9 +260,39 @@ func (i *Intent) verifyTransaction(
 		return nil, mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
 	}
 
-	sender, err := tempotx.VerifySignature(tx)
-	if err != nil {
-		return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+	var sender common.Address
+	if tx.Signature != nil && tx.Signature.Type == "keychain" {
+		// Keychain (Account Abstraction) envelopes can't be verified via
+		// off-chain ecrecover. Use the upstream helper to recover the access
+		// key and treat the embedded root account as the authorising sender.
+		// The Tempo CLI emits the inner secp256k1 YParity in the legacy
+		// {27, 28} form rather than {0, 1}, so normalise byte 85 in a copy
+		// before verification — the original tx.Signature.Raw is preserved
+		// for the on-chain SendRawTransaction broadcast that follows.
+		// We deliberately do not pre-check `isActiveAccessKey` against the
+		// keychain precompile: that would false-reject counterfactual smart
+		// accounts whose access key is registered as part of execution at
+		// first-tx time. The chain rejects unauthorised keys at submission.
+		txForVerify := *tx
+		if len(tx.Signature.Raw) == keychain.KeychainSignatureLength {
+			rawCopy := append([]byte(nil), tx.Signature.Raw...)
+			if rawCopy[keychain.KeychainSignatureLength-1] >= 27 {
+				rawCopy[keychain.KeychainSignatureLength-1] -= 27
+			}
+			sigCopy := *tx.Signature
+			sigCopy.Raw = rawCopy
+			txForVerify.Signature = &sigCopy
+		}
+		_, rootAccount, err := keychain.VerifyAccessKeySignature(&txForVerify)
+		if err != nil {
+			return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+		}
+		sender = rootAccount
+	} else {
+		sender, err = tempotx.VerifySignature(tx)
+		if err != nil {
+			return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+		}
 	}
 	if source != nil && !strings.EqualFold(source.address, sender.Hex()) {
 		return nil, mpp.ErrInvalidPayload("credential source does not match transaction signer")
@@ -398,7 +428,12 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 
 func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, challengeID string) bool {
 	expected := expectedTransfers(request)
-	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 || tx.KeyAuthorization != nil {
+	// KeyAuthorization is allowed: it scopes which session/access key may
+	// execute the transaction on behalf of the smart-account root, not what
+	// gets paid. Tempo-cli AA wallets set it on every tx; rejecting on its
+	// presence makes every keychain-signed payment fail. Payment correctness
+	// is established by walking tx.Calls below.
+	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 {
 		return false
 	}
 	actual := make([]decodedTransfer, 0, len(tx.Calls))
