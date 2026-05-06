@@ -390,9 +390,38 @@ func (i *Intent) verifyTransaction(
 		if tx.FeeToken != common.HexToAddress(request.Currency) {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the charge request")
 		}
-		coSignedSender, _, err := tempotx.VerifyDualSignatures(tx)
-		if err != nil {
-			return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+		// VerifyDualSignatures calls VerifySignature which is secp256k1-only,
+		// so keychain (AA-wallet) sender signatures get rejected with
+		// "only secp256k1 can be verified off-chain". Mirror the pre-co-sign
+		// keychain branch above: re-verify the access key, then verify the
+		// fee-payer signature separately against the recovered root account.
+		var coSignedSender common.Address
+		if tx.Signature != nil && tx.Signature.Type == "keychain" {
+			txForVerify := *tx
+			if len(tx.Signature.Raw) == keychain.KeychainSignatureLength {
+				rawCopy := make([]byte, keychain.KeychainSignatureLength)
+				copy(rawCopy, tx.Signature.Raw)
+				if rawCopy[keychain.KeychainSignatureLength-1] >= 27 {
+					rawCopy[keychain.KeychainSignatureLength-1] -= 27
+				}
+				sigCopy := *tx.Signature
+				sigCopy.Raw = rawCopy
+				txForVerify.Signature = &sigCopy
+			}
+			_, rootAccount, keychainErr := keychain.VerifyAccessKeySignature(&txForVerify)
+			if keychainErr != nil {
+				return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+			}
+			if _, feePayerErr := tempotx.VerifyFeePayerSignature(tx, rootAccount); feePayerErr != nil {
+				return nil, mpp.ErrVerificationFailed("co-signed fee payer signature verification failed")
+			}
+			coSignedSender = rootAccount
+		} else {
+			var dualErr error
+			coSignedSender, _, dualErr = tempotx.VerifyDualSignatures(tx)
+			if dualErr != nil {
+				return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+			}
 		}
 		if coSignedSender != sender {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction sender does not match the credential signer")
