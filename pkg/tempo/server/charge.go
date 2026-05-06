@@ -252,9 +252,37 @@ func (i *Intent) verifyTransaction(
 	raw string,
 	source *sourceDID,
 ) (*mpp.Receipt, error) {
-	tx, err := tempotx.Deserialize(raw)
+	// Tempo CLI 1.6.0+ sends sponsored credentials in the fee-payer-signing
+	// form (0x78 prefix) rather than the broadcast/normal form (0x76).
+	// Per tempo-go's serialize.go, both formats produce the same 13–15 field
+	// RLP body; they only differ in (a) the prefix byte and (b) field 11
+	// (0x76 holds the fee-payer signature or 0x00 marker; 0x78 holds the
+	// sender address). tempo-go's Deserialize hard-codes 0x76 acceptance,
+	// so swap the prefix and let the existing parser run. Field-11 sender
+	// bytes fall through the deserializer's "unusual case" branch without
+	// corrupting the Tx struct; we then manually set AwaitingFeePayer since
+	// the 0x78 prefix inherently means the tx is awaiting a fee-payer
+	// signature (the marker that would have signaled it in 0x76 isn't
+	// present in the 0x78 wire form).
+	parseRaw, isFeePayerForm := translateFeePayerFormToNormal(raw)
+	tx, err := tempotx.Deserialize(parseRaw)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("failed to deserialize transaction payload")
+	}
+	if isFeePayerForm {
+		// 0x78 inherently means awaiting fee payer; the field-11 sender
+		// address bytes don't trigger the deserializer's 0x00 marker check,
+		// so AwaitingFeePayer comes back false and we set it explicitly.
+		tx.AwaitingFeePayer = true
+		// 0x78 also always includes fee_token (per Tempo spec), but the
+		// downstream "fee payer transaction must omit fee token before
+		// co-signing" check expects it empty. Clearing here is safe — the
+		// server overwrites tx.FeeToken with request.Currency before
+		// broadcast, and the sender's signing digest excludes fee_token
+		// when fee-payer is involved (skipFeeToken=true in
+		// SerializeForSigning), so the on-chain signature stays valid
+		// regardless of which token the client originally specified.
+		tx.FeeToken = common.Address{}
 	}
 	if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
 		return nil, mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
@@ -1071,4 +1099,35 @@ func asString(value any) string {
 	default:
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+// translateFeePayerFormToNormal swaps the TempoTransaction fee-payer-signing
+// prefix (0x78) for the normal-form prefix (0x76) so that tempo-go's
+// Deserialize (which hard-codes 0x76 acceptance) can parse credentials
+// emitted by clients that wire-encode in fee-payer-signing form. Returns
+// the (possibly swapped) input and whether a swap occurred.
+//
+// The two formats share the same 13/14/15-field RLP body shape per
+// tempo-go/pkg/transaction/buildRLPList. Only field 11 differs:
+//   - 0x76 (normal): empty bytes / 0x00 marker / signature tuple
+//   - 0x78 (feePayer signing): sender address bytes
+//
+// The deserializer treats non-tuple non-0x00 field-11 bytes as an "unusual
+// case" no-op, leaving Tx.FeePayerSignature nil and AwaitingFeePayer false.
+// Callers that observe isFeePayerForm=true must set AwaitingFeePayer
+// themselves to recover the semantic the prefix would have implied.
+func translateFeePayerFormToNormal(raw string) (string, bool) {
+	// Normalize hex case + 0x prefix without mutating the caller's input
+	// outside of the prefix byte we replace. tempotx.Deserialize is
+	// case-insensitive and accepts an optional 0x; we mirror that.
+	trimmed := strings.TrimPrefix(raw, "0x")
+	trimmed = strings.TrimPrefix(trimmed, "0X")
+	if len(trimmed) < 2 {
+		return raw, false
+	}
+	prefix := strings.ToLower(trimmed[:2])
+	if prefix != "78" {
+		return raw, false
+	}
+	return "0x76" + trimmed[2:], true
 }
