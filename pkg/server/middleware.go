@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -67,7 +68,51 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 
 	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
 
-	next.ServeHTTP(w, r.WithContext(ctx))
+	vw := &varyResponseWriter{
+		ResponseWriter: w,
+		vary:           "Authorization",
+	}
+	next.ServeHTTP(vw, r.WithContext(ctx))
+	if !vw.wroteHeader {
+		appendVary(w.Header(), vw.vary)
+	}
+}
+
+type varyResponseWriter struct {
+	http.ResponseWriter
+	vary        string
+	wroteHeader bool
+}
+
+func (w *varyResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *varyResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	appendVary(w.Header(), w.vary)
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *varyResponseWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func appendVary(header http.Header, value string) {
+	for _, existing := range header.Values("Vary") {
+		for _, part := range strings.Split(existing, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), value) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", value)
 }
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
