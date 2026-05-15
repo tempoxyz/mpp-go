@@ -161,6 +161,37 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 
 }
 
+func TestVerifyOrChallenge_RejectsMissingDefaultExpires(t *testing.T) {
+	request := map[string]any{
+		"amount":    "100",
+		"currency":  "0xabc",
+		"recipient": "0xdef",
+	}
+	tampered := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+	)
+	credential := &mpp.Credential{
+		Challenge: tampered.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request:       request,
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required expires") {
+		t.Fatalf("VerifyOrChallenge() error = %v, want missing required expires", err)
+	}
+}
+
 func TestVerifyOrChallenge_AllowsDynamicExpiresOverrides(t *testing.T) {
 	request := map[string]any{
 		"amount":    "100",
