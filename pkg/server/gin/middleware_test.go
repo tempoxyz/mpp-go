@@ -84,6 +84,9 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	if receipt.Reference != "0xreceipt" {
 		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, "0xreceipt")
 	}
+	if got := paidResponse.Header().Values("Vary"); len(got) != 1 || got[0] != "Authorization" {
+		t.Fatalf("Vary = %#v, want Authorization", got)
+	}
 
 	if got := paidResponse.Body.String(); got != "did:key:z6Mkrdemo:0xreceipt" {
 		t.Fatalf("response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
