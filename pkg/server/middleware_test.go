@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -162,4 +165,69 @@ func TestChargeMiddleware_PreservesExistingVary(t *testing.T) {
 	if len(got) != 2 || got[0] != "Accept-Encoding" || got[1] != "Authorization" {
 		t.Fatalf("Vary = %#v, want Accept-Encoding and Authorization", got)
 	}
+}
+
+func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {
+	w := newOptionalResponseWriter()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatalf("wrapped ResponseWriter does not expose http.Flusher")
+		}
+		if _, ok := w.(http.Hijacker); !ok {
+			t.Fatalf("wrapped ResponseWriter does not expose http.Hijacker")
+		}
+		flusher.Flush()
+	})
+
+	serveVerified(
+		handler,
+		w,
+		httptest.NewRequest(http.MethodGet, "/", nil),
+		&mpp.Credential{},
+		mpp.Success("0xreceipt"),
+	)
+
+	if !w.flushed {
+		t.Fatalf("Flush was not forwarded to the underlying ResponseWriter")
+	}
+	if got := w.header.Values("Vary"); len(got) != 1 || got[0] != "Authorization" {
+		t.Fatalf("Vary = %#v, want Authorization", got)
+	}
+}
+
+type optionalResponseWriter struct {
+	header  http.Header
+	body    bytes.Buffer
+	status  int
+	flushed bool
+}
+
+func newOptionalResponseWriter() *optionalResponseWriter {
+	return &optionalResponseWriter{header: make(http.Header)}
+}
+
+func (w *optionalResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *optionalResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.body.Write(body)
+}
+
+func (w *optionalResponseWriter) WriteHeader(statusCode int) {
+	if w.status == 0 {
+		w.status = statusCode
+	}
+}
+
+func (w *optionalResponseWriter) Flush() {
+	w.flushed = true
+}
+
+func (w *optionalResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, nil
 }
