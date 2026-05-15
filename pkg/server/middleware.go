@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 
@@ -68,13 +70,30 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 
 	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
 
+	vw := newVaryResponseWriter(w, "Authorization")
+	next.ServeHTTP(vw, r.WithContext(ctx))
+	if varyWriter, ok := vw.(interface{ wrote() bool }); ok && !varyWriter.wrote() {
+		appendVary(w.Header(), "Authorization")
+	}
+}
+
+func newVaryResponseWriter(w http.ResponseWriter, vary string) http.ResponseWriter {
 	vw := &varyResponseWriter{
 		ResponseWriter: w,
-		vary:           "Authorization",
+		vary:           vary,
 	}
-	next.ServeHTTP(vw, r.WithContext(ctx))
-	if !vw.wroteHeader {
-		appendVary(w.Header(), vw.vary)
+
+	_, hasFlusher := w.(http.Flusher)
+	_, hasHijacker := w.(http.Hijacker)
+	switch {
+	case hasFlusher && hasHijacker:
+		return &varyFlusherHijacker{varyResponseWriter: vw}
+	case hasFlusher:
+		return &varyFlusher{varyResponseWriter: vw}
+	case hasHijacker:
+		return &varyHijacker{varyResponseWriter: vw}
+	default:
+		return vw
 	}
 }
 
@@ -86,6 +105,10 @@ type varyResponseWriter struct {
 
 func (w *varyResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+func (w *varyResponseWriter) wrote() bool {
+	return w.wroteHeader
 }
 
 func (w *varyResponseWriter) WriteHeader(statusCode int) {
@@ -102,6 +125,40 @@ func (w *varyResponseWriter) Write(body []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(body)
+}
+
+type varyFlusher struct {
+	*varyResponseWriter
+}
+
+func (w *varyFlusher) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.ResponseWriter.(http.Flusher).Flush()
+}
+
+type varyHijacker struct {
+	*varyResponseWriter
+}
+
+func (w *varyHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.ResponseWriter.(http.Hijacker).Hijack()
+}
+
+type varyFlusherHijacker struct {
+	*varyResponseWriter
+}
+
+func (w *varyFlusherHijacker) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.ResponseWriter.(http.Flusher).Flush()
+}
+
+func (w *varyFlusherHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.ResponseWriter.(http.Hijacker).Hijack()
 }
 
 func appendVary(header http.Header, value string) {
