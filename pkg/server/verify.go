@@ -140,7 +140,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			"credential request does not match this route's requirements",
 		)
 	}
-	if params.Expires != "" && echoed.Expires == "" {
+	if expires != "" && echoed.Expires == "" {
 		return nil, mpp.ErrInvalidChallenge(echoed.ID, "missing required expires")
 	}
 	if !reflect.DeepEqual(echoed.Opaque, challenge.Opaque) {
