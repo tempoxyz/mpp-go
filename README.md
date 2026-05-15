@@ -137,7 +137,10 @@ func main() {
 For paid POST routes or agent tool calls, bind each logical operation to a
 stable `ExternalID`. The value is included in the MPP charge request and echoed
 back in the `Payment-Receipt`, so servers can distinguish a safe retry from a
-different paid operation.
+different paid operation. `ExternalID` is receipt metadata; it does not by
+itself persist or reject duplicate operations. Your application must keep its
+own idempotency record or response cache keyed by the client idempotency value
+before running the paid side effect.
 
 If your API already accepts an `Idempotency-Key` header, pass that value through
 as `ChargeParams.ExternalID` when constructing the charge:
@@ -159,7 +162,8 @@ result, err := payment.Charge(r.Context(), server.ChargeParams{
 
 Use the same `ExternalID` for retries of the same operation. Do not generate a
 new value for each retry, and avoid reusing one value across different paid
-operations.
+operations. On retry, check the stored idempotency result first and return the
+cached response or receipt instead of executing the POST operation again.
 
 ## Web Frameworks
 
