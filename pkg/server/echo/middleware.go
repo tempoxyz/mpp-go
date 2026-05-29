@@ -1,6 +1,9 @@
 package echoadapter
 
 import (
+	"net/http"
+	"strings"
+
 	echofw "github.com/labstack/echo/v4"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -48,7 +51,19 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			c.Set(credentialKey, result.Credential)
 			c.Set(receiptKey, result.Receipt)
 			c.Response().Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+			appendVary(c.Response().Header(), "Authorization")
 			return next(c)
 		}
 	}
+}
+
+func appendVary(header http.Header, value string) {
+	for _, existing := range header.Values("Vary") {
+		for _, part := range strings.Split(existing, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), value) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", value)
 }
