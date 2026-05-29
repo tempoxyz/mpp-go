@@ -1,5 +1,11 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.1.1`
+
+### Patch Changes
+
+- Harden Tempo charge verification by rejecting mismatched challenge chain IDs, requiring expiring challenge echoes, and reserving transaction hashes before non-sponsored broadcasts. (by @EmmaJamieson-Hoare, [#43](https://github.com/tempoxyz/mpp-go/pull/43))
+
 ## `github.com/tempoxyz/mpp-go@0.1.0`
 
 ### Minor Changes
