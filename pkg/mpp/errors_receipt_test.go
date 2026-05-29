@@ -192,6 +192,36 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "receipt missing reference") {
 		t.Fatalf("ParseReceipt() error = %v, want missing reference error", err)
 	}
+
+	_, err = ParseReceipt(b64EncodeAny(map[string]any{
+		"status":    "success",
+		"method":    "Tempo",
+		"timestamp": "2026-01-01T00:00:00Z",
+		"reference": "ref-123",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid receipt method") {
+		t.Fatalf("ParseReceipt() error = %v, want invalid method error", err)
+	}
+
+	_, err = ParseReceipt(b64EncodeAny(map[string]any{
+		"status":    "success",
+		"method":    "tempo2",
+		"timestamp": "2026-01-01T00:00:00Z",
+		"reference": "ref-123",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid receipt method") {
+		t.Fatalf("ParseReceipt() error = %v, want invalid method error", err)
+	}
+
+	_, err = ParseReceipt(b64EncodeAny(map[string]any{
+		"status":    "success",
+		"method":    "tempo.pay",
+		"timestamp": "2026-01-01T00:00:00Z",
+		"reference": "ref-123",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid receipt method") {
+		t.Fatalf("ParseReceipt() error = %v, want invalid method error", err)
+	}
 }
 
 func TestChallengeVerifyAndToEcho(t *testing.T) {

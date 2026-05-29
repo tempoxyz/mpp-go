@@ -197,6 +197,9 @@ func ParseChallenge(header string) (*Challenge, error) {
 	if id == "" || realm == "" || method == "" || intent == "" || requestB64 == "" {
 		return nil, fmt.Errorf("mpp: missing required challenge fields (id, realm, method, intent, request)")
 	}
+	if !isMethodName(method) {
+		return nil, fmt.Errorf("mpp: invalid challenge method %q", method)
+	}
 
 	request, err := B64Decode(requestB64)
 	if err != nil {
@@ -335,6 +338,9 @@ func ParseCredential(header string) (*Credential, error) {
 	if echo.Method == "" {
 		return nil, fmt.Errorf("mpp: credential challenge missing required field: method")
 	}
+	if !isMethodName(echo.Method) {
+		return nil, fmt.Errorf("mpp: invalid credential challenge method %q", echo.Method)
+	}
 	if echo.Intent == "" {
 		return nil, fmt.Errorf("mpp: credential challenge missing required field: intent")
 	}
@@ -445,6 +451,9 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 	}
 
 	method := anyStr(data["method"])
+	if method != "" && !isMethodName(method) {
+		return nil, fmt.Errorf("mpp: invalid receipt method %q", method)
+	}
 
 	var externalID string
 	if v, ok := data["externalId"]; ok {
@@ -491,9 +500,18 @@ func FormatPaymentReceipt(r *Receipt) string {
 
 // b64EncodeAny encodes a value as compact JSON then base64url without padding.
 func b64EncodeAny(data map[string]any) string {
-	// json.Marshal sorts map keys by default in Go.
-	b, _ := json.Marshal(data)
+	b, _ := encodeStableJSON(data)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func isMethodName(value string) bool {
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if ch < 'a' || ch > 'z' {
+			return false
+		}
+	}
+	return value != ""
 }
 
 // B64Decode decodes a base64url (no padding) string into a map.

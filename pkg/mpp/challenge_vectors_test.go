@@ -194,6 +194,25 @@ func TestGenerateChallengeIDGoldenVectors(t *testing.T) {
 			want: "TqujwpuDDg_zsWGINAd5XObO2rRe6uYufpqvtDmr6N8",
 		},
 		{
+			name: "HTML-sensitive characters",
+			in: GenerateChallengeIDInput{
+				SecretKey: secret,
+				Realm:     "api.example.com",
+				Method:    "tempo",
+				Intent:    "charge",
+				Request: map[string]any{
+					"amount":      "100",
+					"description": "<tag>&value",
+					"items":       []any{"b", "a"},
+					"nested": map[string]any{
+						"a": 2,
+						"z": 1,
+					},
+				},
+			},
+			want: "7sN4-SNxjcU69yFUFT39nXXwvc9SRjod6WRoO_wmfgQ",
+		},
+		{
 			name: "empty request",
 			in:   GenerateChallengeIDInput{SecretKey: secret, Realm: "api.example.com", Method: "tempo", Intent: "charge", Request: map[string]any{}},
 			want: "yLN7yChAejW9WNmb54HpJIWpdb1WWXeA3_aCx4dxmkU",

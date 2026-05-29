@@ -8,15 +8,25 @@ import (
 
 // JSONEqual compares two JSON-like values using Go's stable JSON encoding.
 func JSONEqual(left, right any) bool {
-	leftJSON, err := json.Marshal(left)
+	leftJSON, err := encodeStableJSON(left)
 	if err != nil {
 		return false
 	}
-	rightJSON, err := json.Marshal(right)
+	rightJSON, err := encodeStableJSON(right)
 	if err != nil {
 		return false
 	}
 	return bytes.Equal(leftJSON, rightJSON)
+}
+
+func encodeStableJSON(value any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // ExtractAuthorizationScheme returns the first authorization value that matches
