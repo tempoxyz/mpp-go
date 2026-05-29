@@ -252,17 +252,75 @@ func (i *Intent) verifyTransaction(
 	raw string,
 	source *sourceDID,
 ) (*mpp.Receipt, error) {
-	tx, err := tempotx.Deserialize(raw)
+	// Tempo CLI 1.6.0+ sends sponsored credentials in the fee-payer-signing
+	// form (0x78 prefix) rather than the broadcast/normal form (0x76).
+	// Per tempo-go's serialize.go, both formats produce the same 13–15 field
+	// RLP body; they only differ in (a) the prefix byte and (b) field 11
+	// (0x76 holds the fee-payer signature or 0x00 marker; 0x78 holds the
+	// sender address). tempo-go's Deserialize hard-codes 0x76 acceptance,
+	// so swap the prefix and let the existing parser run. Field-11 sender
+	// bytes fall through the deserializer's "unusual case" branch without
+	// corrupting the Tx struct; we then manually set AwaitingFeePayer since
+	// the 0x78 prefix inherently means the tx is awaiting a fee-payer
+	// signature (the marker that would have signaled it in 0x76 isn't
+	// present in the 0x78 wire form).
+	parseRaw, isFeePayerForm := translateFeePayerFormToNormal(raw)
+	tx, err := tempotx.Deserialize(parseRaw)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("failed to deserialize transaction payload")
+	}
+	if isFeePayerForm {
+		// 0x78 inherently means awaiting fee payer; the field-11 sender
+		// address bytes don't trigger the deserializer's 0x00 marker check,
+		// so AwaitingFeePayer comes back false and we set it explicitly.
+		tx.AwaitingFeePayer = true
+		// 0x78 also always includes fee_token (per Tempo spec), but the
+		// downstream "fee payer transaction must omit fee token before
+		// co-signing" check expects it empty. Clearing here is safe — the
+		// server overwrites tx.FeeToken with request.Currency before
+		// broadcast, and the sender's signing digest excludes fee_token
+		// when fee-payer is involved (skipFeeToken=true in
+		// SerializeForSigning), so the on-chain signature stays valid
+		// regardless of which token the client originally specified.
+		tx.FeeToken = common.Address{}
 	}
 	if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
 		return nil, mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
 	}
 
-	sender, err := tempotx.VerifySignature(tx)
-	if err != nil {
-		return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+	var sender common.Address
+	if tx.Signature != nil && tx.Signature.Type == "keychain" {
+		// Keychain (Account Abstraction) envelopes can't be verified via
+		// off-chain ecrecover. Use the upstream helper to recover the access
+		// key and treat the embedded root account as the authorising sender.
+		// The Tempo CLI emits the inner secp256k1 YParity in the legacy
+		// {27, 28} form rather than {0, 1}, so normalise byte 85 in a copy
+		// before verification — the original tx.Signature.Raw is preserved
+		// for the on-chain SendRawTransaction broadcast that follows.
+		// We deliberately do not pre-check `isActiveAccessKey` against the
+		// keychain precompile: that would false-reject counterfactual smart
+		// accounts whose access key is registered as part of execution at
+		// first-tx time. The chain rejects unauthorised keys at submission.
+		txForVerify := *tx
+		if len(tx.Signature.Raw) == keychain.KeychainSignatureLength {
+			rawCopy := append([]byte(nil), tx.Signature.Raw...)
+			if rawCopy[keychain.KeychainSignatureLength-1] >= 27 {
+				rawCopy[keychain.KeychainSignatureLength-1] -= 27
+			}
+			sigCopy := *tx.Signature
+			sigCopy.Raw = rawCopy
+			txForVerify.Signature = &sigCopy
+		}
+		_, rootAccount, err := keychain.VerifyAccessKeySignature(&txForVerify)
+		if err != nil {
+			return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+		}
+		sender = rootAccount
+	} else {
+		sender, err = tempotx.VerifySignature(tx)
+		if err != nil {
+			return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+		}
 	}
 	if source != nil && !strings.EqualFold(source.address, sender.Hex()) {
 		return nil, mpp.ErrInvalidPayload("credential source does not match transaction signer")
@@ -332,9 +390,38 @@ func (i *Intent) verifyTransaction(
 		if tx.FeeToken != common.HexToAddress(request.Currency) {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the charge request")
 		}
-		coSignedSender, _, err := tempotx.VerifyDualSignatures(tx)
-		if err != nil {
-			return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+		// VerifyDualSignatures calls VerifySignature which is secp256k1-only,
+		// so keychain (AA-wallet) sender signatures get rejected with
+		// "only secp256k1 can be verified off-chain". Mirror the pre-co-sign
+		// keychain branch above: re-verify the access key, then verify the
+		// fee-payer signature separately against the recovered root account.
+		var coSignedSender common.Address
+		if tx.Signature != nil && tx.Signature.Type == "keychain" {
+			txForVerify := *tx
+			if len(tx.Signature.Raw) == keychain.KeychainSignatureLength {
+				rawCopy := make([]byte, keychain.KeychainSignatureLength)
+				copy(rawCopy, tx.Signature.Raw)
+				if rawCopy[keychain.KeychainSignatureLength-1] >= 27 {
+					rawCopy[keychain.KeychainSignatureLength-1] -= 27
+				}
+				sigCopy := *tx.Signature
+				sigCopy.Raw = rawCopy
+				txForVerify.Signature = &sigCopy
+			}
+			_, rootAccount, keychainErr := keychain.VerifyAccessKeySignature(&txForVerify)
+			if keychainErr != nil {
+				return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+			}
+			if _, feePayerErr := tempotx.VerifyFeePayerSignature(tx, rootAccount); feePayerErr != nil {
+				return nil, mpp.ErrVerificationFailed("co-signed fee payer signature verification failed")
+			}
+			coSignedSender = rootAccount
+		} else {
+			var dualErr error
+			coSignedSender, _, dualErr = tempotx.VerifyDualSignatures(tx)
+			if dualErr != nil {
+				return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
+			}
 		}
 		if coSignedSender != sender {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction sender does not match the credential signer")
@@ -426,7 +513,12 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 
 func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, challengeID string) bool {
 	expected := expectedTransfers(request)
-	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 || tx.KeyAuthorization != nil {
+	// KeyAuthorization is allowed: it scopes which session/access key may
+	// execute the transaction on behalf of the smart-account root, not what
+	// gets paid. Tempo-cli AA wallets set it on every tx; rejecting on its
+	// presence makes every keychain-signed payment fail. Payment correctness
+	// is established by walking tx.Calls below.
+	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 {
 		return false
 	}
 	actual := make([]decodedTransfer, 0, len(tx.Calls))
@@ -1036,4 +1128,35 @@ func asString(value any) string {
 	default:
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+// translateFeePayerFormToNormal swaps the TempoTransaction fee-payer-signing
+// prefix (0x78) for the normal-form prefix (0x76) so that tempo-go's
+// Deserialize (which hard-codes 0x76 acceptance) can parse credentials
+// emitted by clients that wire-encode in fee-payer-signing form. Returns
+// the (possibly swapped) input and whether a swap occurred.
+//
+// The two formats share the same 13/14/15-field RLP body shape per
+// tempo-go/pkg/transaction/buildRLPList. Only field 11 differs:
+//   - 0x76 (normal): empty bytes / 0x00 marker / signature tuple
+//   - 0x78 (feePayer signing): sender address bytes
+//
+// The deserializer treats non-tuple non-0x00 field-11 bytes as an "unusual
+// case" no-op, leaving Tx.FeePayerSignature nil and AwaitingFeePayer false.
+// Callers that observe isFeePayerForm=true must set AwaitingFeePayer
+// themselves to recover the semantic the prefix would have implied.
+func translateFeePayerFormToNormal(raw string) (string, bool) {
+	// Normalize hex case + 0x prefix without mutating the caller's input
+	// outside of the prefix byte we replace. tempotx.Deserialize is
+	// case-insensitive and accepts an optional 0x; we mirror that.
+	trimmed := strings.TrimPrefix(raw, "0x")
+	trimmed = strings.TrimPrefix(trimmed, "0X")
+	if len(trimmed) < 2 {
+		return raw, false
+	}
+	prefix := strings.ToLower(trimmed[:2])
+	if prefix != "78" {
+		return raw, false
+	}
+	return "0x76" + trimmed[2:], true
 }

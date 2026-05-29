@@ -138,8 +138,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/supranational/blst v0.3.16 h1:bTDadT+3fK497EvLdWRQEjiGnUtzJ7jjIUMF0jqwYhE=
 github.com/supranational/blst v0.3.16/go.mod h1:jZJtfjgudtNl4en1tzwPIV3KjUnQUvG3/j+w+fVonLw=
-github.com/tempoxyz/tempo-go v0.4.0 h1:PnWnlHq9C4j1mf2ag7JWLU+zMsFplHY5RffzgSXFbjo=
-github.com/tempoxyz/tempo-go v0.4.0/go.mod h1:wQ5bXjtfwfxMoZfG8QfpNf+Jl7vbapTrYcs4+ns3rbE=
+github.com/tempoxyz/tempo-go v0.4.1 h1:09upmr7C3YfIEAlwP7eOzQLEoBJR7gH93St8SGcg9BA=
+github.com/tempoxyz/tempo-go v0.4.1/go.mod h1:PATi6I9r/0ZmmbLdFueqYywJ/odj8DhlwMbP93A60Rs=
 github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFAEVmqU=
 github.com/tklauser/go-sysconf v0.3.12/go.mod h1:Ho14jnntGE1fpdOqQEEaiKRpvIavV0hSfmBq8nJbHYI=
 github.com/tklauser/numcpus v0.6.1 h1:ng9scYS7az0Bk4OZLvrNXNSAO2Pxr1XXRAPyjhIx+Fk=
