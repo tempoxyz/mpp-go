@@ -138,6 +138,35 @@ func TestFindPaymentAuthorization(t *testing.T) {
 	}
 }
 
+func TestIsMethodName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "lowercase", value: "tempo", want: true},
+		{name: "empty", value: "", want: false},
+		{name: "uppercase", value: "Tempo", want: false},
+		{name: "digit", value: "tempo2", want: false},
+		{name: "hyphen", value: "tempo-pay", want: false},
+		{name: "underscore", value: "tempo_pay", want: false},
+		{name: "dot", value: "tempo.pay", want: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isMethodName(tt.value); got != tt.want {
+				t.Fatalf("isMethodName(%q) = %t, want %t", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseChallenge(t *testing.T) {
 	t.Parallel()
 
@@ -180,6 +209,21 @@ func TestParseChallenge(t *testing.T) {
 			name:    "missing required fields",
 			header:  `Payment id="abc", method="tempo", intent="charge"`,
 			wantErr: `missing required challenge fields`,
+		},
+		{
+			name:    "invalid uppercase method",
+			header:  `Payment id="abc", realm="api.example.com", method="Tempo", intent="charge", request="e30"`,
+			wantErr: `invalid challenge method`,
+		},
+		{
+			name:    "invalid method with digit",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo2", intent="charge", request="e30"`,
+			wantErr: `invalid challenge method`,
+		},
+		{
+			name:    "invalid punctuated method",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo-pay", intent="charge", request="e30"`,
+			wantErr: `invalid challenge method`,
 		},
 		{
 			name:    "duplicate auth params",
@@ -295,6 +339,21 @@ func TestParseCredential(t *testing.T) {
 			name:    "missing echoed challenge id",
 			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"method": "tempo", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
 			wantErr: `credential challenge missing required field: id`,
+		},
+		{
+			name:    "invalid uppercase method",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "Tempo", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
+			wantErr: `invalid credential challenge method`,
+		},
+		{
+			name:    "invalid method with digit",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo2", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
+			wantErr: `invalid credential challenge method`,
+		},
+		{
+			name:    "invalid punctuated method",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo-pay", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
+			wantErr: `invalid credential challenge method`,
 		},
 		{
 			name:    "invalid opaque encoding",

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"sort"
 	"strings"
 )
@@ -74,8 +73,8 @@ func b64EncodeSortedStringMap(m map[string]string) string {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		kb, _ := json.Marshal(k)
-		vb, _ := json.Marshal(m[k])
+		kb, _ := encodeStableJSON(k)
+		vb, _ := encodeStableJSON(m[k])
 		buf.Write(kb)
 		buf.WriteByte(':')
 		buf.Write(vb)
