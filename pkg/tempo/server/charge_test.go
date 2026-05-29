@@ -45,6 +45,7 @@ type mockRPC struct {
 	estimateGasCalls []map[string]any
 	onSend           func(raw string) (string, map[string]any, error)
 	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
+	onGetReceipt     func(hash string) (*temporpc.JSONRPCResponse, error)
 }
 
 func (m *mockRPC) GetChainID(context.Context) (uint64, error) {
@@ -88,6 +89,9 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 		return &temporpc.JSONRPCResponse{Result: m.callResult}, nil
 	case "eth_getTransactionReceipt":
 		hash := params[0].(string)
+		if m.onGetReceipt != nil {
+			return m.onGetReceipt(hash)
+		}
 		return &temporpc.JSONRPCResponse{Result: m.receipts[hash]}, nil
 	default:
 		return nil, fmt.Errorf("unexpected rpc method %q", method)
@@ -522,6 +526,149 @@ func TestChargeFlow_ProofCredentialRejectsDifferentRealm(t *testing.T) {
 	}
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "proof signature does not match source") {
 		t.Fatalf("Verify() error = %v, want proof signature mismatch", err)
+	}
+}
+
+func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		hash, err := tempotx.ComputeHash(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		return hash.Hex(), buildReceipt(raw, request, sender), nil
+	}
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
+		t.Fatalf("first Verify() error = %v", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected 1 broadcast after first Verify(), got %d", len(rpc.sentRawTxs))
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
+		t.Fatalf("second Verify() error = %v", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected no second broadcast, got %d", len(rpc.sentRawTxs))
+	}
+}
+
+func TestChargeFlow_TransactionCredentialRefetchesReservedHashAfterReceiptFailure(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	failReceiptFetch := true
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		hash, err := tempotx.ComputeHash(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		return hash.Hex(), buildReceipt(raw, request, sender), nil
+	}
+	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		if failReceiptFetch {
+			failReceiptFetch = false
+			return nil, fmt.Errorf("temporary receipt rpc failure")
+		}
+		return &temporpc.JSONRPCResponse{Result: rpc.receipts[hash]}, nil
+	}
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "failed to fetch transaction receipt") {
+		t.Fatalf("first Verify() error = %v, want receipt fetch failure", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected first Verify() to broadcast once, got %d", len(rpc.sentRawTxs))
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
+		t.Fatalf("second Verify() error = %v", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected retry to refetch without rebroadcast, got %d broadcasts", len(rpc.sentRawTxs))
+	}
+}
+
+func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailure(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		return "", nil, fmt.Errorf("network down")
+	}
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	if err != nil {
+		t.Fatalf("NewIntent() error = %v", err)
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "transaction submission failed") {
+		t.Fatalf("first Verify() error = %v, want submission failure", err)
+	}
+	if len(rpc.sentRawTxs) != 1 {
+		t.Fatalf("expected first Verify() to broadcast once, got %d", len(rpc.sentRawTxs))
+	}
+
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		return testReceiptHash, buildReceipt(raw, request, sender), nil
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
+		t.Fatalf("second Verify() error = %v", err)
+	}
+	if len(rpc.sentRawTxs) != 2 {
+		t.Fatalf("expected second Verify() to broadcast after release, got %d broadcasts", len(rpc.sentRawTxs))
 	}
 }
 

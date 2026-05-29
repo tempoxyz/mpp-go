@@ -350,10 +350,36 @@ func (i *Intent) verifyTransaction(
 		return nil, mpp.ErrVerificationFailed("failed to serialize transaction")
 	}
 
-	txHash, err := rpc.SendRawTransaction(ctx, serialized)
-	if err != nil {
-		return nil, mpp.ErrVerificationFailed("transaction submission failed")
+	reservedHash := ""
+	txHash := ""
+	shouldBroadcast := true
+	if !request.MethodDetails.FeePayer {
+		computedHash, err := tempotx.ComputeHash(serialized)
+		if err != nil {
+			return nil, mpp.ErrVerificationFailed("failed to compute transaction hash")
+		}
+		reservedHash = computedHash.Hex()
+		txHash = reservedHash
+		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(reservedHash), reservedHash)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			shouldBroadcast = false
+		}
 	}
+
+	if shouldBroadcast {
+		var err error
+		txHash, err = rpc.SendRawTransaction(ctx, serialized)
+		if err != nil {
+			if reservedHash != "" {
+				_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
+			}
+			return nil, mpp.ErrVerificationFailed("transaction submission failed")
+		}
+	}
+
 	receiptMap, err := fetchReceipt(ctx, rpc, txHash)
 	if err != nil {
 		return nil, err
@@ -361,12 +387,14 @@ func (i *Intent) verifyTransaction(
 	if !receiptMatches(receiptMap, credential, request, sender.Hex()) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
-	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(txHash), txHash)
-	if err != nil {
-		return nil, err
-	}
-	if !accepted {
-		return nil, mpp.ErrVerificationFailed("transaction hash already used")
+	if request.MethodDetails.FeePayer {
+		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(txHash), txHash)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+		}
 	}
 	return mpp.Success(
 		txHash,

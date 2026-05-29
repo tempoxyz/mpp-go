@@ -125,14 +125,6 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 		"currency":  "0xabc",
 		"recipient": "0xdef",
 	}
-	issued := mpp.NewChallenge(
-		"secret-key",
-		"api.example.com",
-		"tempo",
-		"charge",
-		request,
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
-	)
 	tampered := mpp.NewChallenge(
 		"secret-key",
 		"api.example.com",
@@ -152,7 +144,6 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 		Realm:         "api.example.com",
 		SecretKey:     "secret-key",
 		Method:        "tempo",
-		Expires:       issued.Expires,
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing required expires") {
 		t.Fatalf("VerifyOrChallenge() error = %v, want missing required expires", err)

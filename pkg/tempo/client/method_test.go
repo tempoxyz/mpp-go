@@ -115,6 +115,22 @@ func TestCreateCredentialScenarios(t *testing.T) {
 			wantErr:        "chain id mismatch",
 			wantBroadcasts: 0,
 		},
+		{
+			name: "challenge chain id conflicts with client pin",
+			config: Config{
+				ChainID: 42431,
+			},
+			rpc: &mockRPC{chainID: 42431},
+			params: tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   1,
+			},
+			wantErr:        "challenge chain id mismatch",
+			wantBroadcasts: 0,
+		},
 	}
 
 	for _, tt := range tests {

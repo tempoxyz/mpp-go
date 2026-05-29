@@ -104,6 +104,10 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	if credentialType == "" {
 		credentialType = tempo.CredentialTypeTransaction
 	}
+	expectedChainID, err := m.expectedChainID(request)
+	if err != nil {
+		return nil, err
+	}
 
 	rpc, rpcURL, err := m.resolveRPC(request)
 	if err != nil {
@@ -117,8 +121,8 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	if err != nil {
 		return nil, fmt.Errorf("tempo client: get chain id: %w", err)
 	}
-	if expected := m.expectedChainID(request); expected != 0 && int64(chainID) != expected {
-		return nil, fmt.Errorf("tempo client: chain id mismatch (rpc=%d, expected=%d)", chainID, expected)
+	if expectedChainID != 0 && int64(chainID) != expectedChainID {
+		return nil, fmt.Errorf("tempo client: chain id mismatch (rpc=%d, expected=%d)", chainID, expectedChainID)
 	}
 	if request.Amount == "0" {
 		signature, err := m.signProof(int64(chainID), challenge.ID, challenge.Realm)
@@ -343,11 +347,15 @@ func (m *Method) estimateGas(
 	return tempo.ParseHexUint64(value)
 }
 
-func (m *Method) expectedChainID(request tempo.ChargeRequest) int64 {
+func (m *Method) expectedChainID(request tempo.ChargeRequest) (int64, error) {
 	if request.MethodDetails.ChainID != nil {
-		return *request.MethodDetails.ChainID
+		challengeChainID := *request.MethodDetails.ChainID
+		if m.chainID != 0 && challengeChainID != m.chainID {
+			return 0, fmt.Errorf("tempo client: challenge chain id mismatch (challenge=%d, expected=%d)", challengeChainID, m.chainID)
+		}
+		return challengeChainID, nil
 	}
-	return m.chainID
+	return m.chainID, nil
 }
 
 func (m *Method) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, string, error) {
