@@ -4,6 +4,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSplitAuthenticate(t *testing.T) {
@@ -180,15 +183,9 @@ func TestFormatAuthenticateStrict(t *testing.T) {
 	)
 
 	got, err := challenge.ToAuthenticateStrict("api.example.com")
-	if err != nil {
-		t.Fatalf("ToAuthenticateStrict() unexpected error: %v", err)
-	}
-	if want := challenge.ToAuthenticate("api.example.com"); got != want {
-		t.Fatalf("ToAuthenticateStrict() = %q, want %q", got, want)
-	}
-	if want := `description="Pay \"premium\" path C:\\tempo\\api"`; !strings.Contains(got, want) {
-		t.Fatalf("ToAuthenticateStrict() = %q, want escaped description containing %q", got, want)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, challenge.ToAuthenticate("api.example.com"), got)
+	assert.Contains(t, got, `description="Pay \"premium\" path C:\\tempo\\api"`)
 }
 
 func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
@@ -236,12 +233,9 @@ func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
 			}
 
 			got, err := challenge.ToAuthenticateStrict(realm)
-			if err == nil {
-				t.Fatalf("ToAuthenticateStrict() = %q, want error", got)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "CR or LF") {
-				t.Fatalf("ToAuthenticateStrict() error = %v, want %q and CR/LF detail", err, tt.wantErr)
-			}
+			require.Error(t, err, "ToAuthenticateStrict() = %q", got)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Contains(t, err.Error(), "CR or LF")
 		})
 	}
 }

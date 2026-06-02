@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -430,23 +432,14 @@ func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusBadRequest {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusBadRequest, body)
-	}
-	if got := resp.Header.Values("WWW-Authenticate"); len(got) != 0 {
-		t.Fatalf("WWW-Authenticate = %#v, want empty", got)
-	}
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Empty(t, resp.Header.Values("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
-		t.Fatalf("Decode(problem) error = %v", err)
-	}
-	if problem.Type != string(mpp.ErrorTypeInvalidChallenge) {
-		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeInvalidChallenge)
-	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInvalidChallenge), problem.Type)
 }
 
 func TestComposeMiddleware_PanicsOnEmptyConfigs(t *testing.T) {
