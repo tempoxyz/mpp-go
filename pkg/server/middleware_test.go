@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -93,20 +95,12 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
-	}
-	if got := resp.Header().Get("WWW-Authenticate"); got != "" {
-		t.Fatalf("WWW-Authenticate = %q, want empty", got)
-	}
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+	assert.Empty(t, resp.Header().Get("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
-		t.Fatalf("Decode(problem) error = %v", err)
-	}
-	if problem.Type != string(mpp.ErrorTypeInvalidChallenge) {
-		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeInvalidChallenge)
-	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInvalidChallenge), problem.Type)
 }

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	fiberfw "github.com/gofiber/fiber/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -121,20 +123,12 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	}
 	defer challengeResponse.Body.Close()
 
-	if challengeResponse.StatusCode != http.StatusBadRequest {
-		t.Fatalf("challenge status = %d, want %d", challengeResponse.StatusCode, http.StatusBadRequest)
-	}
-	if got := challengeResponse.Header.Get("WWW-Authenticate"); got != "" {
-		t.Fatalf("WWW-Authenticate = %q, want empty", got)
-	}
+	require.Equal(t, http.StatusBadRequest, challengeResponse.StatusCode)
+	assert.Empty(t, challengeResponse.Header.Get("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
-	if err := json.NewDecoder(challengeResponse.Body).Decode(&problem); err != nil {
-		t.Fatalf("Decode(problem) error = %v", err)
-	}
-	if problem.Type != string(mpp.ErrorTypeInvalidChallenge) {
-		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeInvalidChallenge)
-	}
+	require.NoError(t, json.NewDecoder(challengeResponse.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInvalidChallenge), problem.Type)
 }
