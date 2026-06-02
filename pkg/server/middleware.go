@@ -72,7 +72,13 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
 func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
-	w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(realm))
+	header, err := challenge.ToAuthenticateStrict(realm)
+	if err != nil {
+		WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, err.Error()))
+		return
+	}
+
+	w.Header().Set("WWW-Authenticate", header)
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusPaymentRequired)

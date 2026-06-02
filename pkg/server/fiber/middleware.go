@@ -58,7 +58,13 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 // This is the Fiber equivalent of [server.WriteChallenge]. Fiber is built on
 // fasthttp and cannot use http.ResponseWriter directly.
 func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
-	c.Set("WWW-Authenticate", challenge.ToAuthenticate(realm))
+	header, err := challenge.ToAuthenticateStrict(realm)
+	if err != nil {
+		WritePaymentError(c, mpp.ErrInvalidChallenge(challenge.ID, err.Error()))
+		return
+	}
+
+	c.Set("WWW-Authenticate", header)
 	c.Set("Content-Type", "application/problem+json")
 	c.Set("Cache-Control", "no-store")
 
