@@ -20,7 +20,21 @@ jobs:
         id: changelog
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          NOTES=$(awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
+          MODULE=$(awk '$1 == "module" { print $2; exit }' go.mod)
+          NOTES=$(awk -v version="$VERSION" -v module="$MODULE" '
+            /^## / {
+              if (found) exit
+              if ($0 ~ "^## \\[" version "\\]([[:space:]]|$)") {
+                found = 1
+                next
+              }
+              if (module != "" && ($0 == "## `" module "@" version "`" || $0 == "## " module "@" version)) {
+                found = 1
+                next
+              }
+            }
+            found { print }
+          ' CHANGELOG.md)
           echo "notes<<EOF" >> "$GITHUB_OUTPUT"
           echo "$NOTES" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
