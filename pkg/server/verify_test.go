@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -56,12 +57,15 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 		Method:    "tempo",
 		Expires:   challenge.Expires,
 	})
-	if err != nil {
-		t.Fatalf("VerifyOrChallenge() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"VerifyOrChallenge() error = %v", err) {
+		return
 	}
-	if result.Receipt == nil || result.Receipt.Reference != "0xreceipt" {
-		t.Fatalf("expected successful receipt, got %#v", result)
+	if !assert.Falsef(t, result.Receipt == nil || result.Receipt.Reference != "0xreceipt",
+		"expected successful receipt, got %#v", result) {
+		return
 	}
+
 }
 
 func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
@@ -94,11 +98,13 @@ func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
 		Meta:          map[string]string{},
 		Expires:       challenge.Expires,
 	})
-	if err != nil {
-		t.Fatalf("VerifyOrChallenge(issue) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"VerifyOrChallenge(issue) error = %v", err) {
+		return
 	}
-	if issued.Challenge == nil || issued.Challenge.Opaque == nil {
-		t.Fatalf("issued challenge opaque = %#v, want empty map", issued.Challenge)
+	if !assert.Falsef(t, issued.Challenge == nil || issued.Challenge.Opaque == nil,
+		"issued challenge opaque = %#v, want empty map", issued.Challenge) {
+		return
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
@@ -111,12 +117,15 @@ func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
 		Meta:          map[string]string{},
 		Expires:       challenge.Expires,
 	})
-	if err != nil {
-		t.Fatalf("VerifyOrChallenge(verify) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"VerifyOrChallenge(verify) error = %v", err) {
+		return
 	}
-	if result.Receipt == nil || result.Receipt.Reference != "0xreceipt" {
-		t.Fatalf("expected successful receipt, got %#v", result)
+	if !assert.Falsef(t, result.Receipt == nil || result.Receipt.Reference != "0xreceipt",
+		"expected successful receipt, got %#v", result) {
+		return
 	}
+
 }
 
 func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
@@ -145,9 +154,11 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 		SecretKey:     "secret-key",
 		Method:        "tempo",
 	})
-	if err == nil || !strings.Contains(err.Error(), "missing required expires") {
-		t.Fatalf("VerifyOrChallenge() error = %v, want missing required expires", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "missing required expires"),
+		"VerifyOrChallenge() error = %v, want missing required expires", err) {
+		return
 	}
+
 }
 
 func TestVerifyOrChallenge_AllowsDynamicExpiresOverrides(t *testing.T) {
@@ -179,12 +190,15 @@ func TestVerifyOrChallenge_AllowsDynamicExpiresOverrides(t *testing.T) {
 		Method:        "tempo",
 		Expires:       mpp.Expires.Minutes(5),
 	})
-	if err != nil {
-		t.Fatalf("VerifyOrChallenge() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"VerifyOrChallenge() error = %v", err) {
+		return
 	}
-	if result.Receipt == nil || result.Receipt.Reference != "0xreceipt" {
-		t.Fatalf("expected successful receipt, got %#v", result)
+	if !assert.Falsef(t, result.Receipt == nil || result.Receipt.Reference != "0xreceipt",
+		"expected successful receipt, got %#v", result) {
+		return
 	}
+
 }
 
 func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
@@ -217,7 +231,9 @@ func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 		Meta:          map[string]string{"trace": "current"},
 		Expires:       challenge.Expires,
 	})
-	if err == nil || !strings.Contains(err.Error(), "opaque metadata does not match") {
-		t.Fatalf("VerifyOrChallenge() error = %v, want opaque metadata mismatch", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "opaque metadata does not match"),
+		"VerifyOrChallenge() error = %v, want opaque metadata mismatch", err) {
+		return
 	}
+
 }

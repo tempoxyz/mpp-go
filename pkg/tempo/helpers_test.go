@@ -2,11 +2,11 @@ package tempo
 
 import (
 	"math/big"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
@@ -30,46 +30,58 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 		}},
 		SupportedModes: []ChargeMode{ChargeModePull, ChargeModePush},
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
+	}
+	if !assert.Equalf(t, "500000", request.Amount,
+		"request.Amount = %q, want %q", request.Amount, "500000") {
+		return
+	}
+	if !assert.Equalf(t, common.HexToAddress("0x20c0000000000000000000000000000000000001").Hex(), request.Currency,
+		"request.Currency = %q", request.Currency) {
+		return
+	}
+	if !assert.Equalf(t, common.HexToAddress("0x70997970c51812dc3a010c7d01b50e0d17dc79c8").Hex(), request.Recipient,
+		"request.Recipient = %q", request.Recipient) {
+		return
+	}
+	if !assert.Equalf(t, "0x"+strings.Repeat("ab", 32), request.MethodDetails.Memo,
+		"request.MethodDetails.Memo = %q", request.MethodDetails.Memo) {
+		return
+	}
+	if !assert.Equalf(t, "https://fee-payer.example.com", request.MethodDetails.FeePayerURL,
+		"request.MethodDetails.FeePayerURL = %q", request.MethodDetails.FeePayerURL) {
+		return
 	}
 
-	if request.Amount != "500000" {
-		t.Fatalf("request.Amount = %q, want %q", request.Amount, "500000")
-	}
-	if request.Currency != common.HexToAddress("0x20c0000000000000000000000000000000000001").Hex() {
-		t.Fatalf("request.Currency = %q", request.Currency)
-	}
-	if request.Recipient != common.HexToAddress("0x70997970c51812dc3a010c7d01b50e0d17dc79c8").Hex() {
-		t.Fatalf("request.Recipient = %q", request.Recipient)
-	}
-	if request.MethodDetails.Memo != "0x"+strings.Repeat("ab", 32) {
-		t.Fatalf("request.MethodDetails.Memo = %q", request.MethodDetails.Memo)
-	}
-	if request.MethodDetails.FeePayerURL != "https://fee-payer.example.com" {
-		t.Fatalf("request.MethodDetails.FeePayerURL = %q", request.MethodDetails.FeePayerURL)
-	}
 	if got := len(request.MethodDetails.Splits); got != 1 {
-		t.Fatalf("len(request.MethodDetails.Splits) = %d, want 1", got)
+		assert.Failf(t, "", "len(request.MethodDetails.Splits) = %d, want 1", got)
+		return
 	}
-	if request.MethodDetails.Splits[0].Amount != "100000" {
-		t.Fatalf("request.MethodDetails.Splits[0].Amount = %q, want 100000", request.MethodDetails.Splits[0].Amount)
+	if !assert.Equalf(t, "100000", request.MethodDetails.Splits[0].Amount,
+		"request.MethodDetails.Splits[0].Amount = %q, want 100000", request.MethodDetails.Splits[0].Amount) {
+		return
 	}
 
 	parsed, err := ParseChargeRequest(request.Map())
-	if err != nil {
-		t.Fatalf("ParseChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseChargeRequest() error = %v", err) {
+		return
 	}
-	if !reflect.DeepEqual(parsed, request) {
-		t.Fatalf("ParseChargeRequest() = %#v, want %#v", parsed, request)
+	if !assert.Equalf(t, request, parsed,
+		"ParseChargeRequest() = %#v, want %#v", parsed, request) {
+		return
+	}
+	if !assert.True(t, request.Allows(CredentialTypeTransaction),
+		"request should allow transaction credentials") {
+		return
+	}
+	if !assert.True(t, request.Allows(CredentialTypeHash),
+		"request should allow hash credentials") {
+		return
 	}
 
-	if !request.Allows(CredentialTypeTransaction) {
-		t.Fatal("request should allow transaction credentials")
-	}
-	if !request.Allows(CredentialTypeHash) {
-		t.Fatal("request should allow hash credentials")
-	}
 }
 
 func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {
@@ -81,9 +93,11 @@ func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 		Memo:      "0x1234",
 	})
-	if err == nil || !strings.Contains(err.Error(), "memo must be exactly 32 bytes") {
-		t.Fatalf("NormalizeChargeRequest() error = %v, want invalid memo error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "memo must be exactly 32 bytes"),
+		"NormalizeChargeRequest() error = %v, want invalid memo error", err) {
+		return
 	}
+
 }
 
 func TestNormalizeChargeRequest_RejectsNegativeDecimals(t *testing.T) {
@@ -95,9 +109,11 @@ func TestNormalizeChargeRequest_RejectsNegativeDecimals(t *testing.T) {
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 		Decimals:  -1,
 	})
-	if err == nil || !strings.Contains(err.Error(), "decimals must be non-negative") {
-		t.Fatalf("NormalizeChargeRequest() error = %v, want negative decimals error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "decimals must be non-negative"),
+		"NormalizeChargeRequest() error = %v, want negative decimals error", err) {
+		return
 	}
+
 }
 
 func TestNormalizeChargeRequest_RejectsInvalidSplits(t *testing.T) {
@@ -112,33 +128,42 @@ func TestNormalizeChargeRequest_RejectsInvalidSplits(t *testing.T) {
 			Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
 		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "split total must be less than the total amount") {
-		t.Fatalf("NormalizeChargeRequest() error = %v, want invalid split total", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "split total must be less than the total amount"),
+		"NormalizeChargeRequest() error = %v, want invalid split total", err) {
+		return
 	}
+
 }
 
 func TestEncodeAttribution_VerifiesServerFingerprint(t *testing.T) {
 	t.Parallel()
 
 	memo := EncodeAttribution("api.example.com", "cli-app", "challenge-1")
-	if len(memo) != 66 {
-		t.Fatalf("len(memo) = %d, want 66", len(memo))
+	if !assert.Lenf(t, memo, 66,
+		"len(memo) = %d, want 66", len(memo)) {
+		return
 	}
-	if !IsAttributionMemo(memo) {
-		t.Fatalf("IsAttributionMemo(%q) = false, want true", memo)
+	if !assert.Truef(t, IsAttributionMemo(memo),
+		"IsAttributionMemo(%q) = false, want true", memo) {
+		return
 	}
-	if !VerifyAttributionServer(memo, "api.example.com") {
-		t.Fatalf("VerifyAttributionServer(%q, api.example.com) = false, want true", memo)
+	if !assert.Truef(t, VerifyAttributionServer(memo, "api.example.com"),
+		"VerifyAttributionServer(%q, api.example.com) = false, want true", memo) {
+		return
 	}
-	if VerifyAttributionServer(memo, "other.example.com") {
-		t.Fatalf("VerifyAttributionServer(%q, other.example.com) = true, want false", memo)
+	if !assert.Falsef(t, VerifyAttributionServer(memo, "other.example.com"),
+		"VerifyAttributionServer(%q, other.example.com) = true, want false", memo) {
+		return
 	}
-	if !VerifyAttributionChallenge(memo, "challenge-1") {
-		t.Fatalf("VerifyAttributionChallenge(%q, challenge-1) = false, want true", memo)
+	if !assert.Truef(t, VerifyAttributionChallenge(memo, "challenge-1"),
+		"VerifyAttributionChallenge(%q, challenge-1) = false, want true", memo) {
+		return
 	}
-	if VerifyAttributionChallenge(memo, "challenge-2") {
-		t.Fatalf("VerifyAttributionChallenge(%q, challenge-2) = true, want false", memo)
+	if !assert.Falsef(t, VerifyAttributionChallenge(memo, "challenge-2"),
+		"VerifyAttributionChallenge(%q, challenge-2) = true, want false", memo) {
+		return
 	}
+
 }
 
 func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
@@ -158,29 +183,36 @@ func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
 	}
 
 	calldata, err := EncodeTransferWithMemo(recipient, amount, explicitMemo)
-	if err != nil {
-		t.Fatalf("EncodeTransferWithMemo() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"EncodeTransferWithMemo() error = %v", err) {
+		return
 	}
-	if !MatchTransferCalldata(calldata, explicitRequest, "ignored.example.com", "ignored-challenge") {
-		t.Fatal("MatchTransferCalldata() = false, want true for explicit memo")
+	if !assert.True(t, MatchTransferCalldata(calldata, explicitRequest, "ignored.example.com", "ignored-challenge"),
+		"MatchTransferCalldata() = false, want true for explicit memo") {
+		return
 	}
 
 	implicitRequest := explicitRequest
 	implicitRequest.MethodDetails.Memo = ""
 	attributionMemo := EncodeAttribution("api.example.com", "cli-app", "challenge-1")
 	attributedCalldata, err := EncodeTransferWithMemo(recipient, amount, attributionMemo)
-	if err != nil {
-		t.Fatalf("EncodeTransferWithMemo() attribution error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"EncodeTransferWithMemo() attribution error = %v", err) {
+		return
 	}
-	if !MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-1") {
-		t.Fatal("MatchTransferCalldata() = false, want true for attribution memo")
+	if !assert.True(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = false, want true for attribution memo") {
+		return
 	}
-	if MatchTransferCalldata(attributedCalldata, implicitRequest, "other.example.com", "challenge-1") {
-		t.Fatal("MatchTransferCalldata() = true, want false for wrong attribution realm")
+	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "other.example.com", "challenge-1"),
+		"MatchTransferCalldata() = true, want false for wrong attribution realm") {
+		return
 	}
-	if MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-2") {
-		t.Fatal("MatchTransferCalldata() = true, want false for wrong challenge binding")
+	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-2"),
+		"MatchTransferCalldata() = true, want false for wrong challenge binding") {
+		return
 	}
+
 }
 
 func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
@@ -226,20 +258,26 @@ func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
 
 			payload, err := ParseChargeCredentialPayload(tt.input)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("ParseChargeCredentialPayload() error = %v, want substring %q", err, tt.wantErr)
+				if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), tt.wantErr),
+					"ParseChargeCredentialPayload() error = %v, want substring %q", err, tt.wantErr) {
+					return
 				}
+
 				return
 			}
-			if err != nil {
-				t.Fatalf("ParseChargeCredentialPayload() error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"ParseChargeCredentialPayload() error = %v", err) {
+				return
 			}
-			if !reflect.DeepEqual(payload, tt.want) {
-				t.Fatalf("ParseChargeCredentialPayload() = %#v, want %#v", payload, tt.want)
+			if !assert.Equalf(t, tt.want, payload,
+				"ParseChargeCredentialPayload() = %#v, want %#v", payload, tt.want) {
+				return
 			}
-			if !reflect.DeepEqual(payload.Map(), tt.input) {
-				t.Fatalf("payload.Map() = %#v, want %#v", payload.Map(), tt.input)
+			if !assert.Equalf(t, tt.input, payload.Map(),
+				"payload.Map() = %#v, want %#v", payload.Map(), tt.input) {
+				return
 			}
+
 		})
 	}
 }

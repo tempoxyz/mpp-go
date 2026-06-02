@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
@@ -16,65 +17,88 @@ func TestMethodFromConfigBuildsMethod(t *testing.T) {
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 	})
-	if err != nil {
-		t.Fatalf("MethodFromConfig() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"MethodFromConfig() error = %v", err) {
+		return
 	}
+
 	requestMap, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50"})
-	if err != nil {
-		t.Fatalf("BuildChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"BuildChargeRequest() error = %v", err) {
+		return
 	}
+
 	request, err := tempo.ParseChargeRequest(requestMap)
-	if err != nil {
-		t.Fatalf("ParseChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseChargeRequest() error = %v", err) {
+		return
 	}
-	if request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != tempotx.ChainIdModerato {
-		t.Fatalf("request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato)
+	if !assert.Falsef(t, request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != tempotx.ChainIdModerato,
+		"request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato) {
+		return
 	}
-	if request.Currency != tempotx.AlphaUSDAddress.Hex() {
-		t.Fatalf("request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex())
+	if !assert.Equalf(t, tempotx.AlphaUSDAddress.Hex(), request.Currency,
+		"request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex()) {
+		return
 	}
+
 }
 
 func TestNewIntentLoadsFeePayerPrivateKeyFromEnv(t *testing.T) {
 	t.Setenv("FEE_PAYER_KEY", feePayerKey)
 	intent, err := NewIntent(IntentConfig{FeePayerPrivateKeyEnv: "FEE_PAYER_KEY"})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if intent.feePayerSigner == nil {
-		t.Fatal("intent.feePayerSigner = nil, want signer")
+	if !assert.NotNil(t, intent.feePayerSigner,
+		"intent.feePayerSigner = nil, want signer") {
+		return
 	}
+
 }
 
 func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
 	intent, err := NewIntent(IntentConfig{})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	moderatoPolicy, ok := intent.feePayerPolicy[tempotx.AlphaUSDAddress.Hex()]
-	if !ok {
-		t.Fatalf("missing default policy for %s", tempotx.AlphaUSDAddress.Hex())
+	if !assert.Truef(t, ok,
+		"missing default policy for %s", tempotx.AlphaUSDAddress.Hex()) {
+		return
 	}
-	if moderatoPolicy.MaxTotalFee.Cmp(big.NewInt(50_000_000_000_000_000)) != 0 {
-		t.Fatalf("moderato max total fee = %s, want 50000000000000000", moderatoPolicy.MaxTotalFee)
+	if !assert.Equalf(t, 0, moderatoPolicy.MaxTotalFee.Cmp(big.NewInt(50_000_000_000_000_000)),
+		"moderato max total fee = %s, want 50000000000000000", moderatoPolicy.MaxTotalFee) {
+		return
 	}
-	if moderatoPolicy.MaxFeePerGas.Cmp(big.NewInt(100_000_000_000)) != 0 {
-		t.Fatalf("moderato max fee per gas = %s, want 100000000000", moderatoPolicy.MaxFeePerGas)
+	if !assert.Equalf(t, 0, moderatoPolicy.MaxFeePerGas.Cmp(big.NewInt(100_000_000_000)),
+		"moderato max fee per gas = %s, want 100000000000", moderatoPolicy.MaxFeePerGas) {
+		return
 	}
+
 	legacyPolicy, ok := intent.feePayerPolicy["0x20C0000000000000000000000000000000000000"]
-	if !ok {
-		t.Fatal("missing default policy for legacy moderato fee token")
+	if !assert.True(t, ok,
+		"missing default policy for legacy moderato fee token") {
+		return
 	}
-	if legacyPolicy.MaxTotalFee.Cmp(big.NewInt(50_000_000_000_000_000)) != 0 {
-		t.Fatalf("legacy moderato max total fee = %s, want 50000000000000000", legacyPolicy.MaxTotalFee)
+	if !assert.Equalf(t, 0, legacyPolicy.MaxTotalFee.Cmp(big.NewInt(50_000_000_000_000_000)),
+		"legacy moderato max total fee = %s, want 50000000000000000", legacyPolicy.MaxTotalFee) {
+		return
 	}
+
 	mainnetPolicy, ok := intent.feePayerPolicy[tempo.MainnetUSDCAddress]
-	if !ok {
-		t.Fatalf("missing default policy for %s", tempo.MainnetUSDCAddress)
+	if !assert.Truef(t, ok,
+		"missing default policy for %s", tempo.MainnetUSDCAddress) {
+		return
 	}
-	if mainnetPolicy.MaxPriorityFeePerGas.Cmp(big.NewInt(100_000_000_000)) != 0 {
-		t.Fatalf("mainnet max priority fee per gas = %s, want 100000000000", mainnetPolicy.MaxPriorityFeePerGas)
+	if !assert.Equalf(t, 0, mainnetPolicy.MaxPriorityFeePerGas.Cmp(big.NewInt(100_000_000_000)),
+		"mainnet max priority fee per gas = %s, want 100000000000", mainnetPolicy.MaxPriorityFeePerGas) {
+		return
 	}
+
 }
 
 func TestNewIntentRejectsInvalidFeePayerPolicy(t *testing.T) {
@@ -87,7 +111,9 @@ func TestNewIntentRejectsInvalidFeePayerPolicy(t *testing.T) {
 			},
 		},
 	})
-	if err == nil || err.Error() != "tempo server: max priority fee per gas exceeds max fee per gas for 0x20c0000000000000000000000000000000000001" {
-		t.Fatalf("NewIntent() error = %v, want max priority fee validation error", err)
+	if !assert.Falsef(t, err == nil || err.Error() != "tempo server: max priority fee per gas exceeds max fee per gas for 0x20c0000000000000000000000000000000000001",
+		"NewIntent() error = %v, want max priority fee validation error", err) {
+		return
 	}
+
 }

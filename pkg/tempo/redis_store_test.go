@@ -7,6 +7,7 @@ import (
 
 	miniredis "github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestRedisStoreOperations(t *testing.T) {
@@ -21,25 +22,38 @@ func TestRedisStoreOperations(t *testing.T) {
 			name: "missing key",
 			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
 				t.Helper()
-				if value, ok, err := store.Get(context.Background(), "missing"); err != nil || ok || value != "" {
-					t.Fatalf("Get() = (%q, %t, %v), want (\"\", false, nil)", value, ok, err)
+				{
+					value, ok, err := store.Get(context.Background(), "missing")
+					if !assert.Falsef(t, err != nil || ok || value != "",
+						"Get() = (%q, %t, %v), want (\"\", false, nil)", value, ok, err) {
+						return
+					}
 				}
+
 			},
 		},
 		{
 			name: "put and get",
 			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
 				t.Helper()
-				if err := store.Put(context.Background(), "k", "v"); err != nil {
-					t.Fatalf("Put() error = %v", err)
+				{
+					err := store.Put(context.Background(), "k", "v")
+					if !assert.NoErrorf(t, err,
+						"Put() error = %v", err) {
+						return
+					}
 				}
+
 				value, ok, err := store.Get(context.Background(), "k")
-				if err != nil {
-					t.Fatalf("Get() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"Get() error = %v", err) {
+					return
 				}
-				if !ok || value != "v" {
-					t.Fatalf("Get() = (%q, %t), want (\"v\", true)", value, ok)
+				if !assert.Falsef(t, !ok || value != "v",
+					"Get() = (%q, %t), want (\"v\", true)", value, ok) {
+					return
 				}
+
 			},
 		},
 		{
@@ -47,41 +61,65 @@ func TestRedisStoreOperations(t *testing.T) {
 			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
 				t.Helper()
 				inserted, err := store.PutIfAbsent(context.Background(), "k", "first")
-				if err != nil {
-					t.Fatalf("first PutIfAbsent() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"first PutIfAbsent() error = %v", err) {
+					return
 				}
-				if !inserted {
-					t.Fatal("first PutIfAbsent() = false, want true")
+				if !assert.True(t, inserted,
+					"first PutIfAbsent() = false, want true") {
+					return
 				}
+
 				inserted, err = store.PutIfAbsent(context.Background(), "k", "second")
-				if err != nil {
-					t.Fatalf("second PutIfAbsent() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"second PutIfAbsent() error = %v", err) {
+					return
 				}
-				if inserted {
-					t.Fatal("second PutIfAbsent() = true, want false")
+				if !assert.False(t, inserted,
+					"second PutIfAbsent() = true, want false") {
+					return
 				}
+
 				value, ok, err := store.Get(context.Background(), "k")
-				if err != nil {
-					t.Fatalf("Get() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"Get() error = %v", err) {
+					return
 				}
-				if !ok || value != "first" {
-					t.Fatalf("Get() = (%q, %t), want (\"first\", true)", value, ok)
+				if !assert.Falsef(t, !ok || value != "first",
+					"Get() = (%q, %t), want (\"first\", true)", value, ok) {
+					return
 				}
+
 			},
 		},
 		{
 			name: "delete removes key",
 			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
 				t.Helper()
-				if err := store.Put(context.Background(), "k", "v"); err != nil {
-					t.Fatalf("Put() error = %v", err)
+				{
+					err := store.Put(context.Background(), "k", "v")
+					if !assert.NoErrorf(t, err,
+						"Put() error = %v", err) {
+						return
+					}
 				}
-				if err := store.Delete(context.Background(), "k"); err != nil {
-					t.Fatalf("Delete() error = %v", err)
+				{
+
+					err := store.Delete(context.Background(), "k")
+					if !assert.NoErrorf(t, err,
+						"Delete() error = %v", err) {
+						return
+					}
 				}
-				if value, ok, err := store.Get(context.Background(), "k"); err != nil || ok || value != "" {
-					t.Fatalf("Get() after delete = (%q, %t, %v), want (\"\", false, nil)", value, ok, err)
+				{
+
+					value, ok, err := store.Get(context.Background(), "k")
+					if !assert.Falsef(t, err != nil || ok || value != "",
+						"Get() after delete = (%q, %t, %v), want (\"\", false, nil)", value, ok, err) {
+						return
+					}
 				}
+
 			},
 		},
 		{
@@ -89,13 +127,23 @@ func TestRedisStoreOperations(t *testing.T) {
 			ttl:  time.Minute,
 			run: func(t *testing.T, store *RedisStore, server *miniredis.Miniredis) {
 				t.Helper()
-				if err := store.Put(context.Background(), "k", "v"); err != nil {
-					t.Fatalf("Put() error = %v", err)
+				{
+					err := store.Put(context.Background(), "k", "v")
+					if !assert.NoErrorf(t, err,
+						"Put() error = %v", err) {
+						return
+					}
 				}
+
 				server.FastForward(time.Minute + time.Second)
-				if value, ok, err := store.Get(context.Background(), "k"); err != nil || ok || value != "" {
-					t.Fatalf("Get() after expiry = (%q, %t, %v), want (\"\", false, nil)", value, ok, err)
+				{
+					value, ok, err := store.Get(context.Background(), "k")
+					if !assert.Falsef(t, err != nil || ok || value != "",
+						"Get() after expiry = (%q, %t, %v), want (\"\", false, nil)", value, ok, err) {
+						return
+					}
 				}
+
 			},
 		},
 		{
@@ -104,20 +152,26 @@ func TestRedisStoreOperations(t *testing.T) {
 			run: func(t *testing.T, store *RedisStore, server *miniredis.Miniredis) {
 				t.Helper()
 				inserted, err := store.PutIfAbsent(context.Background(), "k", "v")
-				if err != nil {
-					t.Fatalf("PutIfAbsent() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"PutIfAbsent() error = %v", err) {
+					return
 				}
-				if !inserted {
-					t.Fatal("PutIfAbsent() = false, want true")
+				if !assert.True(t, inserted,
+					"PutIfAbsent() = false, want true") {
+					return
 				}
+
 				server.FastForward(time.Minute + time.Second)
 				value, ok, err := store.Get(context.Background(), "k")
-				if err != nil {
-					t.Fatalf("Get() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"Get() error = %v", err) {
+					return
 				}
-				if !ok || value != "v" {
-					t.Fatalf("Get() = (%q, %t), want (\"v\", true)", value, ok)
+				if !assert.Falsef(t, !ok || value != "v",
+					"Get() = (%q, %t), want (\"v\", true)", value, ok) {
+					return
 				}
+
 			},
 		},
 	}
@@ -128,9 +182,11 @@ func TestRedisStoreOperations(t *testing.T) {
 			t.Parallel()
 
 			server, err := miniredis.Run()
-			if err != nil {
-				t.Fatalf("miniredis.Run() error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"miniredis.Run() error = %v", err) {
+				return
 			}
+
 			defer server.Close()
 
 			client := redis.NewClient(&redis.Options{Addr: server.Addr()})

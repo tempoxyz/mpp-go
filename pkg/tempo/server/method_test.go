@@ -3,6 +3,7 @@ package chargeserver
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
@@ -12,8 +13,9 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 	t.Parallel()
 
 	moderatoIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlModerato})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
 
 	tests := []struct {
@@ -33,12 +35,15 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 			assertions: func(t *testing.T, request tempo.ChargeRequest) {
 				t.Helper()
-				if request.Currency != tempotx.AlphaUSDAddress.Hex() {
-					t.Fatalf("request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex())
+				if !assert.Equalf(t, tempotx.AlphaUSDAddress.Hex(), request.Currency,
+					"request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex()) {
+					return
 				}
-				if request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != tempotx.ChainIdModerato {
-					t.Fatalf("request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato)
+				if !assert.Falsef(t, request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != tempotx.ChainIdModerato,
+					"request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato) {
+					return
 				}
+
 			},
 		},
 		{
@@ -67,15 +72,19 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 			assertions: func(t *testing.T, request tempo.ChargeRequest) {
 				t.Helper()
-				if request.ExternalID != "ext-123" {
-					t.Fatalf("request.ExternalID = %q, want ext-123", request.ExternalID)
+				if !assert.Equalf(t, "ext-123", request.ExternalID,
+					"request.ExternalID = %q, want ext-123", request.ExternalID) {
+					return
 				}
-				if !request.MethodDetails.FeePayer {
-					t.Fatal("request.MethodDetails.FeePayer = false, want true")
+				if !assert.True(t, request.MethodDetails.FeePayer,
+					"request.MethodDetails.FeePayer = false, want true") {
+					return
 				}
-				if request.MethodDetails.FeePayerURL != "https://fee-payer.example.com" {
-					t.Fatalf("request.MethodDetails.FeePayerURL = %q, want https://fee-payer.example.com", request.MethodDetails.FeePayerURL)
+				if !assert.Equalf(t, "https://fee-payer.example.com", request.MethodDetails.FeePayerURL,
+					"request.MethodDetails.FeePayerURL = %q, want https://fee-payer.example.com", request.MethodDetails.FeePayerURL) {
+					return
 				}
+
 			},
 		},
 		{
@@ -96,12 +105,22 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 			assertions: func(t *testing.T, request tempo.ChargeRequest) {
 				t.Helper()
-				if got := len(request.MethodDetails.Splits); got != 1 {
-					t.Fatalf("len(request.MethodDetails.Splits) = %d, want 1", got)
+				{
+					got := len(request.MethodDetails.Splits)
+					if !assert.EqualValuesf(t, 1, got,
+						"len(request.MethodDetails.Splits) = %d, want 1", got) {
+						return
+					}
 				}
-				if got := len(request.MethodDetails.SupportedModes); got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePush {
-					t.Fatalf("request.MethodDetails.SupportedModes = %#v, want [push]", request.MethodDetails.SupportedModes)
+				{
+
+					got := len(request.MethodDetails.SupportedModes)
+					if !assert.Falsef(t, got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePush,
+						"request.MethodDetails.SupportedModes = %#v, want [push]", request.MethodDetails.SupportedModes) {
+						return
+					}
 				}
+
 			},
 		},
 		{
@@ -118,9 +137,14 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 			assertions: func(t *testing.T, request tempo.ChargeRequest) {
 				t.Helper()
-				if got := len(request.MethodDetails.SupportedModes); got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePull {
-					t.Fatalf("request.MethodDetails.SupportedModes = %#v, want [pull]", request.MethodDetails.SupportedModes)
+				{
+					got := len(request.MethodDetails.SupportedModes)
+					if !assert.Falsef(t, got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePull,
+						"request.MethodDetails.SupportedModes = %#v, want [pull]", request.MethodDetails.SupportedModes) {
+						return
+					}
 				}
+
 			},
 		},
 	}
@@ -133,19 +157,24 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			method := NewMethod(tt.config)
 			requestMap, err := method.BuildChargeRequest(tt.params)
 			if tt.name == "rejects unknown chain without intent rpc" {
-				if err == nil || err.Error() != "tempo server: unknown chain id 999999; configure Intent.RPC or Intent.RPCURL explicitly" {
-					t.Fatalf("BuildChargeRequest() error = %v, want unknown chain id error", err)
+				if !assert.Falsef(t, err == nil || err.Error() != "tempo server: unknown chain id 999999; configure Intent.RPC or Intent.RPCURL explicitly",
+					"BuildChargeRequest() error = %v, want unknown chain id error", err) {
+					return
 				}
+
 				return
 			}
-			if err != nil {
-				t.Fatalf("BuildChargeRequest() error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"BuildChargeRequest() error = %v", err) {
+				return
 			}
 
 			request, err := tempo.ParseChargeRequest(requestMap)
-			if err != nil {
-				t.Fatalf("ParseChargeRequest() error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"ParseChargeRequest() error = %v", err) {
+				return
 			}
+
 			tt.assertions(t, request)
 		})
 	}

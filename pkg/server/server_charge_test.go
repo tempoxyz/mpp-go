@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
 )
@@ -28,33 +29,43 @@ func TestMppCharge_UsesMetaAsChallengeMeta(t *testing.T) {
 		Memo:       "0x" + strings.Repeat("ab", 32),
 		Meta:       map[string]string{"trace": "abc123"},
 	})
-	if err != nil {
-		t.Fatalf("Charge() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Charge() error = %v", err) {
+		return
 	}
-	if !result.IsChallenge() {
-		t.Fatal("result.IsChallenge() = false, want true")
+	if !assert.True(t, result.IsChallenge(),
+		"result.IsChallenge() = false, want true") {
+		return
 	}
-	if result.Challenge.Opaque["trace"] != "abc123" {
-		t.Fatalf("result.Challenge.Opaque[trace] = %q, want %q", result.Challenge.Opaque["trace"], "abc123")
+	if !assert.Equalf(t, "abc123", result.Challenge.Opaque["trace"],
+		"result.Challenge.Opaque[trace] = %q, want %q", result.Challenge.Opaque["trace"], "abc123") {
+		return
 	}
-	if result.Challenge.Request["amount"] != "0.50" {
-		t.Fatalf("result.Challenge.Request[amount] = %#v, want %q", result.Challenge.Request["amount"], "0.50")
+	if !assert.Equalf(t, "0.50", result.Challenge.Request["amount"],
+		"result.Challenge.Request[amount] = %#v, want %q", result.Challenge.Request["amount"], "0.50") {
+		return
 	}
-	if result.Challenge.Request["recipient"] != "0x70997970c51812dc3a010c7d01b50e0d17dc79c8" {
-		t.Fatalf("result.Challenge.Request[recipient] = %#v", result.Challenge.Request["recipient"])
+	if !assert.Equalf(t, "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", result.Challenge.Request["recipient"],
+		"result.Challenge.Request[recipient] = %#v", result.Challenge.Request["recipient"]) {
+		return
 	}
-	if result.Challenge.Request["externalId"] != "ext-123" {
-		t.Fatalf("result.Challenge.Request[externalId] = %#v, want %q", result.Challenge.Request["externalId"], "ext-123")
+	if !assert.Equalf(t, "ext-123", result.Challenge.Request["externalId"],
+		"result.Challenge.Request[externalId] = %#v, want %q", result.Challenge.Request["externalId"], "ext-123") {
+		return
 	}
-	if result.Challenge.Request["feePayer"] != true {
-		t.Fatalf("result.Challenge.Request[feePayer] = %#v, want true", result.Challenge.Request["feePayer"])
+	if !assert.Equalf(t, true, result.Challenge.Request["feePayer"],
+		"result.Challenge.Request[feePayer] = %#v, want true", result.Challenge.Request["feePayer"]) {
+		return
 	}
-	if result.Challenge.Request["chainId"] != 42431 {
-		t.Fatalf("result.Challenge.Request[chainId] = %#v, want %d", result.Challenge.Request["chainId"], 42431)
+	if !assert.EqualValuesf(t, 42431, result.Challenge.Request["chainId"],
+		"result.Challenge.Request[chainId] = %#v, want %d", result.Challenge.Request["chainId"], 42431) {
+		return
 	}
-	if result.Challenge.Request["memo"] != "0x"+strings.Repeat("ab", 32) {
-		t.Fatalf("result.Challenge.Request[memo] = %#v", result.Challenge.Request["memo"])
+	if !assert.Equalf(t, "0x"+strings.Repeat("ab", 32), result.Challenge.Request["memo"],
+		"result.Challenge.Request[memo] = %#v", result.Challenge.Request["memo"]) {
+		return
 	}
+
 }
 
 func TestMppCharge_RequiresChargeIntent(t *testing.T) {
@@ -62,7 +73,9 @@ func TestMppCharge_RequiresChargeIntent(t *testing.T) {
 
 	mppServer := New(chargeTestMethod{intents: map[string]Intent{}}, "api.example.com", "secret-key")
 	_, err := mppServer.Charge(context.Background(), ChargeParams{Amount: "0.50"})
-	if err == nil || !strings.Contains(err.Error(), `does not support charge intent`) {
-		t.Fatalf("Charge() error = %v, want missing charge intent error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), `does not support charge intent`),
+		"Charge() error = %v, want missing charge intent error", err) {
+		return
 	}
+
 }

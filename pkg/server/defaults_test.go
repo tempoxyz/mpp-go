@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
 )
@@ -11,7 +12,8 @@ func TestDetectRealmPrecedenceAndDefault(t *testing.T) {
 	}
 
 	if got := DetectRealm(); got != "MPP Payment" {
-		t.Fatalf("DetectRealm() = %q, want %q", got, "MPP Payment")
+		assert.Failf(t, "", "DetectRealm() = %q, want %q", got, "MPP Payment")
+		return
 	}
 
 	t.Setenv("HOSTNAME", "host.example.com")
@@ -19,22 +21,27 @@ func TestDetectRealmPrecedenceAndDefault(t *testing.T) {
 	t.Setenv("MPP_REALM", "api.example.com")
 
 	if got := DetectRealm(); got != "api.example.com" {
-		t.Fatalf("DetectRealm() = %q, want %q", got, "api.example.com")
+		assert.Failf(t, "", "DetectRealm() = %q, want %q", got, "api.example.com")
+		return
 	}
 }
 
 func TestDetectSecretKey(t *testing.T) {
 	t.Setenv("MPP_SECRET_KEY", "")
 	if _, err := DetectSecretKey(); err == nil || !strings.Contains(err.Error(), "MPP_SECRET_KEY environment variable is not set") {
-		t.Fatalf("DetectSecretKey() error = %v, want missing env error", err)
+		assert.Failf(t, "", "DetectSecretKey() error = %v, want missing env error", err)
+		return
 	}
 
 	t.Setenv("MPP_SECRET_KEY", "secret-key")
 	key, err := DetectSecretKey()
-	if err != nil {
-		t.Fatalf("DetectSecretKey() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"DetectSecretKey() error = %v", err) {
+		return
 	}
-	if key != "secret-key" {
-		t.Fatalf("DetectSecretKey() = %q, want %q", key, "secret-key")
+	if !assert.Equalf(t, "secret-key", key,
+		"DetectSecretKey() = %q, want %q", key, "secret-key") {
+		return
 	}
+
 }

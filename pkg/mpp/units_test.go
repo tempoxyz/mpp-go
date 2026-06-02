@@ -1,6 +1,7 @@
 package mpp
 
 import (
+	"github.com/stretchr/testify/assert"
 	"testing"
 )
 
@@ -33,17 +34,18 @@ func TestParseUnits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseUnits(tc.value, tc.decimals)
 			if tc.wantErr {
-				if err == nil {
-					t.Errorf("expected error, got %d", got)
-				}
+				assert.Errorf(t, err,
+					"expected error, got %d", got)
+
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if !assert.NoErrorf(t, err,
+				"unexpected error: %v", err) {
+				return
 			}
-			if got != tc.want {
-				t.Errorf("got %d, want %d", got, tc.want)
-			}
+			assert.Equalf(t, tc.want, got,
+				"got %d, want %d", got, tc.want)
+
 		})
 	}
 }
@@ -56,18 +58,21 @@ func TestTransformUnits(t *testing.T) {
 			"extra":    "keep",
 		}
 		out, err := TransformUnits(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		if !assert.NoErrorf(t, err,
+			"unexpected error: %v", err) {
+			return
 		}
-		if out["amount"] != "1500000" {
-			t.Errorf("amount = %v, want 1500000", out["amount"])
+		assert.Equalf(t, "1500000", out["amount"],
+			"amount = %v, want 1500000", out["amount"])
+		{
+
+			_, ok := out["decimals"]
+			assert.False(t, ok,
+				"decimals key should be removed")
 		}
-		if _, ok := out["decimals"]; ok {
-			t.Error("decimals key should be removed")
-		}
-		if out["extra"] != "keep" {
-			t.Error("extra key should be preserved")
-		}
+		assert.Equal(t, "keep", out["extra"],
+			"extra key should be preserved")
+
 	})
 
 	t.Run("with suggestedDeposit", func(t *testing.T) {
@@ -77,15 +82,15 @@ func TestTransformUnits(t *testing.T) {
 			"decimals":         6,
 		}
 		out, err := TransformUnits(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		if !assert.NoErrorf(t, err,
+			"unexpected error: %v", err) {
+			return
 		}
-		if out["amount"] != "10000" {
-			t.Errorf("amount = %v, want 10000", out["amount"])
-		}
-		if out["suggestedDeposit"] != "1000000" {
-			t.Errorf("suggestedDeposit = %v, want 1000000", out["suggestedDeposit"])
-		}
+		assert.Equalf(t, "10000", out["amount"],
+			"amount = %v, want 10000", out["amount"])
+		assert.Equalf(t, "1000000", out["suggestedDeposit"],
+			"suggestedDeposit = %v, want 1000000", out["suggestedDeposit"])
+
 	})
 
 	t.Run("without decimals", func(t *testing.T) {
@@ -93,12 +98,13 @@ func TestTransformUnits(t *testing.T) {
 			"amount": "100",
 		}
 		out, err := TransformUnits(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		if !assert.NoErrorf(t, err,
+			"unexpected error: %v", err) {
+			return
 		}
-		if out["amount"] != "100" {
-			t.Errorf("amount should be unchanged, got %v", out["amount"])
-		}
+		assert.Equalf(t, "100", out["amount"],
+			"amount should be unchanged, got %v", out["amount"])
+
 	})
 
 	t.Run("does not mutate original", func(t *testing.T) {
@@ -107,15 +113,19 @@ func TestTransformUnits(t *testing.T) {
 			"decimals": 6,
 		}
 		_, err := TransformUnits(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		if !assert.NoErrorf(t, err,
+			"unexpected error: %v", err) {
+			return
 		}
-		if req["amount"] != "1.0" {
-			t.Error("original map was mutated")
+		assert.Equal(t, "1.0", req["amount"],
+			"original map was mutated")
+		{
+
+			_, ok := req["decimals"]
+			assert.True(t, ok,
+				"original map decimals was removed")
 		}
-		if _, ok := req["decimals"]; !ok {
-			t.Error("original map decimals was removed")
-		}
+
 	})
 
 	t.Run("float64 decimals from JSON", func(t *testing.T) {
@@ -124,11 +134,12 @@ func TestTransformUnits(t *testing.T) {
 			"decimals": float64(6),
 		}
 		out, err := TransformUnits(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		if !assert.NoErrorf(t, err,
+			"unexpected error: %v", err) {
+			return
 		}
-		if out["amount"] != "1000000" {
-			t.Errorf("amount = %v, want 1000000", out["amount"])
-		}
+		assert.Equalf(t, "1000000", out["amount"],
+			"amount = %v, want 1000000", out["amount"])
+
 	})
 }

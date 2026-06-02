@@ -1,7 +1,6 @@
 package mpp
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -86,9 +85,11 @@ func TestSplitAuthenticate(t *testing.T) {
 			t.Parallel()
 
 			got := SplitAuthenticate(tt.header)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("SplitAuthenticate() = %#v, want %#v", got, tt.want)
+			if !assert.Equalf(t, tt.want, got,
+				"SplitAuthenticate() = %#v, want %#v", got, tt.want) {
+				return
 			}
+
 		})
 	}
 }
@@ -134,9 +135,11 @@ func TestFindPaymentAuthorization(t *testing.T) {
 			t.Parallel()
 
 			got := FindPaymentAuthorization(tt.header)
-			if got != tt.want {
-				t.Fatalf("FindPaymentAuthorization() = %q, want %q", got, tt.want)
+			if !assert.Equalf(t, tt.want, got,
+				"FindPaymentAuthorization() = %q, want %q", got, tt.want) {
+				return
 			}
+
 		})
 	}
 }
@@ -162,10 +165,15 @@ func TestIsMethodName(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			{
 
-			if got := isMethodName(tt.value); got != tt.want {
-				t.Fatalf("isMethodName(%q) = %t, want %t", tt.value, got, tt.want)
+				got := isMethodName(tt.value)
+				if !assert.Equalf(t, tt.want, got,
+					"isMethodName(%q) = %t, want %t", tt.value, got, tt.want) {
+					return
+				}
 			}
+
 		})
 	}
 }
@@ -339,18 +347,24 @@ func TestParseChallenge(t *testing.T) {
 			} {
 				got, err := parse.fn(tt.header)
 				if tt.wantErr != "" {
-					if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-						t.Fatalf("%s() error = %v, want substring %q", parse.name, err, tt.wantErr)
+					if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), tt.wantErr),
+						"%s() error = %v, want substring %q", parse.name, err, tt.wantErr) {
+						return
 					}
+
 					continue
 				}
-				if err != nil {
-					t.Fatalf("%s() unexpected error: %v", parse.name, err)
+				if !assert.NoErrorf(t, err,
+					"%s() unexpected error: %v", parse.name, err) {
+					return
 				}
+
 				assertChallengeEqual(t, got, tt.want)
-				if got.Request == nil {
-					t.Fatalf("%s() returned nil Request, want empty object", parse.name)
+				if !assert.NotNilf(t, got.Request,
+					"%s() returned nil Request, want empty object", parse.name) {
+					return
 				}
+
 			}
 		})
 	}
@@ -454,14 +468,18 @@ func TestParseCredential(t *testing.T) {
 			} {
 				got, err := parse.fn(tt.header)
 				if tt.wantErr != "" {
-					if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-						t.Fatalf("%s() error = %v, want substring %q", parse.name, err, tt.wantErr)
+					if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), tt.wantErr),
+						"%s() error = %v, want substring %q", parse.name, err, tt.wantErr) {
+						return
 					}
+
 					continue
 				}
-				if err != nil {
-					t.Fatalf("%s() unexpected error: %v", parse.name, err)
+				if !assert.NoErrorf(t, err,
+					"%s() unexpected error: %v", parse.name, err) {
+					return
 				}
+
 				assertCredentialEqual(t, got, tt.want)
 			}
 		})
@@ -472,41 +490,54 @@ func assertChallengeEqual(t *testing.T, got, want *Challenge) {
 	t.Helper()
 
 	if got == nil || want == nil {
-		if got != want {
-			t.Fatalf("challenge mismatch: got %#v want %#v", got, want)
+		if !assert.Equalf(t, want, got,
+			"challenge mismatch: got %#v want %#v", got, want) {
+			return
 		}
+
 		return
 	}
-	if got.ID != want.ID || got.Realm != want.Realm || got.Method != want.Method || got.Intent != want.Intent {
-		t.Fatalf("challenge identity mismatch: got %#v want %#v", got, want)
+	if !assert.Falsef(t, got.ID != want.ID || got.Realm != want.Realm || got.Method != want.Method || got.Intent != want.Intent,
+		"challenge identity mismatch: got %#v want %#v", got, want) {
+		return
 	}
-	if got.RequestB64 != want.RequestB64 || got.Digest != want.Digest || got.Expires != want.Expires || got.Description != want.Description {
-		t.Fatalf("challenge metadata mismatch: got %#v want %#v", got, want)
+	if !assert.Falsef(t, got.RequestB64 != want.RequestB64 || got.Digest != want.Digest || got.Expires != want.Expires || got.Description != want.Description,
+		"challenge metadata mismatch: got %#v want %#v", got, want) {
+		return
 	}
-	if !JSONEqual(got.Request, want.Request) {
-		t.Fatalf("challenge request mismatch: got %#v want %#v", got.Request, want.Request)
+	if !assert.Truef(t, JSONEqual(got.Request, want.Request),
+		"challenge request mismatch: got %#v want %#v", got.Request, want.Request) {
+		return
 	}
-	if !reflect.DeepEqual(got.Opaque, want.Opaque) {
-		t.Fatalf("challenge opaque mismatch: got %#v want %#v", got.Opaque, want.Opaque)
+	if !assert.Equalf(t, want.Opaque, got.Opaque,
+		"challenge opaque mismatch: got %#v want %#v", got.Opaque, want.Opaque) {
+		return
 	}
+
 }
 
 func assertCredentialEqual(t *testing.T, got, want *Credential) {
 	t.Helper()
 
 	if got == nil || want == nil {
-		if got != want {
-			t.Fatalf("credential mismatch: got %#v want %#v", got, want)
+		if !assert.Equalf(t, want, got,
+			"credential mismatch: got %#v want %#v", got, want) {
+			return
 		}
+
 		return
 	}
-	if got.Source != want.Source {
-		t.Fatalf("credential source mismatch: got %q want %q", got.Source, want.Source)
+	if !assert.Equalf(t, want.Source, got.Source,
+		"credential source mismatch: got %q want %q", got.Source, want.Source) {
+		return
 	}
-	if !reflect.DeepEqual(got.Challenge, want.Challenge) {
-		t.Fatalf("credential challenge mismatch: got %#v want %#v", got.Challenge, want.Challenge)
+	if !assert.Equalf(t, want.Challenge, got.Challenge,
+		"credential challenge mismatch: got %#v want %#v", got.Challenge, want.Challenge) {
+		return
 	}
-	if !JSONEqual(got.Payload, want.Payload) {
-		t.Fatalf("credential payload mismatch: got %#v want %#v", got.Payload, want.Payload)
+	if !assert.Truef(t, JSONEqual(got.Payload, want.Payload),
+		"credential payload mismatch: got %#v want %#v", got.Payload, want.Payload) {
+		return
 	}
+
 }

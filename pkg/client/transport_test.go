@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -43,9 +44,11 @@ func newTestCredential(method string) *mpp.Credential {
 func challengeForURL(t *testing.T, rawURL, method string, request map[string]any, opts ...mpp.ChallengeOption) *mpp.Challenge {
 	t.Helper()
 	parsedURL, err := urlpkg.Parse(rawURL)
-	if err != nil {
-		t.Fatalf("url.Parse(%q) error = %v", rawURL, err)
+	if !assert.NoErrorf(t, err,
+		"url.Parse(%q) error = %v", rawURL, err) {
+		return *new(*mpp.Challenge)
 	}
+
 	return mpp.NewChallenge("secret", parsedURL.Host, method, "payment", request, opts...)
 }
 
@@ -59,13 +62,17 @@ func TestTransport_RoundTrip_No402(t *testing.T) {
 	tr := NewTransport(nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
@@ -82,9 +89,9 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 		}
 		// Verify we got a Payment authorization header.
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Payment ") {
-			t.Errorf("expected Payment auth scheme, got %q", auth)
-		}
+		assert.Truef(t, strings.HasPrefix(auth, "Payment "),
+			"expected Payment auth scheme, got %q", auth)
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("paid"))
 	}))
@@ -96,20 +103,27 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 	tr := NewTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
+
 	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "paid" {
-		t.Fatalf("expected body 'paid', got %q", string(body))
+	if !assert.Equalf(t, "paid", string(body),
+		"expected body 'paid', got %q", string(body)) {
+		return
 	}
-	if callCount != 2 {
-		t.Fatalf("expected 2 calls to server, got %d", callCount)
+	if !assert.EqualValuesf(t, 2, callCount,
+		"expected 2 calls to server, got %d", callCount) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
@@ -126,13 +140,17 @@ func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
 	tr := NewTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusPaymentRequired {
-		t.Fatalf("expected 402, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
+		"expected 402, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
@@ -151,14 +169,19 @@ func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 	tr := NewTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
+	if !
 	// Expired challenge → no matching method → return original 402.
-	if resp.StatusCode != http.StatusPaymentRequired {
-		t.Fatalf("expected 402 for expired challenge, got %d", resp.StatusCode)
+	assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
+		"expected 402 for expired challenge, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
@@ -169,17 +192,18 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 		callCount++
 		body, _ := io.ReadAll(r.Body)
 		if r.Header.Get("Authorization") == "" {
-			if string(body) != "request-body" {
-				t.Errorf("first request body = %q, want %q", string(body), "request-body")
-			}
+			assert.Equalf(t, "request-body", string(body),
+				"first request body = %q, want %q", string(body), "request-body")
+
 			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
-		// Retry should have the same body.
-		if string(body) != "request-body" {
-			t.Errorf("retry body = %q, want %q", string(body), "request-body")
-		}
+		assert.
+			// Retry should have the same body.
+			Equalf(t, "request-body", string(body),
+				"retry body = %q, want %q", string(body), "request-body")
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -194,16 +218,21 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 		return io.NopCloser(strings.NewReader(bodyStr)), nil
 	}
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
-	if callCount != 2 {
-		t.Fatalf("expected 2 calls, got %d", callCount)
+	if !assert.EqualValuesf(t, 2, callCount,
+		"expected 2 calls, got %d", callCount) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
@@ -228,13 +257,17 @@ func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
 	tr := NewTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
@@ -256,13 +289,17 @@ func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
 	tr := NewTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
@@ -277,14 +314,19 @@ func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
 	tr := NewTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
+	if !
 	// Non-Payment scheme → no matching method → return original 402.
-	if resp.StatusCode != http.StatusPaymentRequired {
-		t.Fatalf("expected 402, got %d", resp.StatusCode)
+	assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
+		"expected 402, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
@@ -301,12 +343,15 @@ func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	req = req.WithContext(withPaymentOrigin(req.Context(), "https://api.example.com"))
 	_, err := tr.RoundTrip(req)
-	if err == nil || !strings.Contains(err.Error(), "refusing payment for redirected origin") {
-		t.Fatalf("RoundTrip() error = %v, want origin mismatch", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "refusing payment for redirected origin"),
+		"RoundTrip() error = %v, want origin mismatch", err) {
+		return
 	}
-	if method.calls != 0 {
-		t.Fatalf("CreateCredential() calls = %d, want 0", method.calls)
+	if !assert.Equalf(t, 0, method.calls,
+		"CreateCredential() calls = %d, want 0", method.calls) {
+		return
 	}
+
 }
 
 func TestClient_Get(t *testing.T) {
@@ -328,25 +373,28 @@ func TestClient_Get(t *testing.T) {
 	method := &mockMethod{name: "tempo", cred: cred}
 	c := New([]Method{method})
 	resp, err := c.Get(context.Background(), srv.URL)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestClient_Post(t *testing.T) {
 	var challenge *mpp.Challenge
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("content-type = %q, want application/json", r.Header.Get("Content-Type"))
-		}
+		assert.Equalf(t, http.MethodPost, r.Method,
+			"expected POST, got %s", r.Method)
+		assert.Equalf(t, "application/json", r.Header.Get("Content-Type"),
+			"content-type = %q, want application/json", r.Header.Get("Content-Type"))
+
 		if r.Header.Get("Authorization") == "" {
 			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
@@ -362,21 +410,27 @@ func TestClient_Post(t *testing.T) {
 	c := New([]Method{method})
 	body := strings.NewReader(`{"key":"value"}`)
 	resp, err := c.Post(context.Background(), srv.URL, "application/json", body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
 	}
+
 }
 
 func TestClient_WithHTTPClient(t *testing.T) {
 	custom := &http.Client{}
 	c := New(nil, WithHTTPClient(custom))
-	if c.httpClient != custom {
-		t.Fatal("expected custom http client to be set")
+	if !assert.Equal(t, custom, c.httpClient,
+		"expected custom http client to be set") {
+		return
 	}
+
 }
 
 func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
@@ -396,10 +450,13 @@ func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
 	c := New([]Method{method})
 	_, err := c.Get(context.Background(), origin.URL)
-	if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect") {
-		t.Fatalf("Get() error = %v, want cross-origin redirect rejection", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect"),
+		"Get() error = %v, want cross-origin redirect rejection", err) {
+		return
 	}
-	if method.calls != 0 {
-		t.Fatalf("CreateCredential() calls = %d, want 0", method.calls)
+	if !assert.Equalf(t, 0, method.calls,
+		"CreateCredential() calls = %d, want 0", method.calls) {
+		return
 	}
+
 }
