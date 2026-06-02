@@ -1,5 +1,11 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.1.2`
+
+### Patch Changes
+
+- Reject CR/LF in `WWW-Authenticate` challenge formatting and built-in server challenge responses. (by @EmmaJamieson-Hoare, [#46](https://github.com/tempoxyz/mpp-go/pull/46))
+
 ## `github.com/tempoxyz/mpp-go@0.1.1`
 
 ### Patch Changes
