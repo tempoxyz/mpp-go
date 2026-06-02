@@ -240,32 +240,68 @@ func ParseChallenge(header string) (*Challenge, error) {
 //
 // Output format: Payment id="...", realm="...", method="...", intent="...", request="..."
 func FormatAuthenticate(c *Challenge, realm string) string {
+	header, _ := formatAuthenticate(c, realm, false)
+	return header
+}
+
+// FormatAuthenticateStrict formats a Challenge as an authentication header value
+// and rejects values that cannot be safely represented in quoted auth-params.
+func FormatAuthenticateStrict(c *Challenge, realm string) (string, error) {
+	return formatAuthenticate(c, realm, true)
+}
+
+func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, error) {
 	var parts []string
-	add := func(k, v string) {
-		if v != "" {
-			parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
+	add := func(k, v string) error {
+		if v == "" {
+			return nil
 		}
+		if rejectCRLF && strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("mpp: invalid %s auth-param: contains CR or LF", k)
+		}
+		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
+		return nil
 	}
 
-	add("id", c.ID)
-	add("realm", realm)
-	add("method", c.Method)
-	add("intent", c.Intent)
+	for _, param := range []struct {
+		key   string
+		value string
+	}{
+		{key: "id", value: c.ID},
+		{key: "realm", value: realm},
+		{key: "method", value: c.Method},
+		{key: "intent", value: c.Intent},
+	} {
+		if err := add(param.key, param.value); err != nil {
+			return "", err
+		}
+	}
 
 	reqB64 := c.RequestB64
 	if reqB64 == "" {
 		reqB64 = b64EncodeRequest(c.Request)
 	}
-	add("request", reqB64)
-	add("digest", c.Digest)
-	add("expires", c.Expires)
-	add("description", c.Description)
-
-	if c.Opaque != nil {
-		add("opaque", b64EncodeSortedStringMap(c.Opaque))
+	for _, param := range []struct {
+		key   string
+		value string
+	}{
+		{key: "request", value: reqB64},
+		{key: "digest", value: c.Digest},
+		{key: "expires", value: c.Expires},
+		{key: "description", value: c.Description},
+	} {
+		if err := add(param.key, param.value); err != nil {
+			return "", err
+		}
 	}
 
-	return "Payment " + strings.Join(parts, ", ")
+	if c.Opaque != nil {
+		if err := add("opaque", b64EncodeSortedStringMap(c.Opaque)); err != nil {
+			return "", err
+		}
+	}
+
+	return "Payment " + strings.Join(parts, ", "), nil
 }
 
 func b64EncodeRequest(request map[string]any) string {
