@@ -167,6 +167,85 @@ func TestIsMethodName(t *testing.T) {
 	}
 }
 
+func TestFormatAuthenticateStrict(t *testing.T) {
+	t.Parallel()
+
+	challenge := NewChallenge(
+		"secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "100"},
+		WithDescription(`Pay "premium" path C:\tempo\api`),
+	)
+
+	got, err := challenge.ToAuthenticateStrict("api.example.com")
+	if err != nil {
+		t.Fatalf("ToAuthenticateStrict() unexpected error: %v", err)
+	}
+	if want := challenge.ToAuthenticate("api.example.com"); got != want {
+		t.Fatalf("ToAuthenticateStrict() = %q, want %q", got, want)
+	}
+	if want := `description="Pay \"premium\" path C:\\tempo\\api"`; !strings.Contains(got, want) {
+		t.Fatalf("ToAuthenticateStrict() = %q, want escaped description containing %q", got, want)
+	}
+}
+
+func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		realm   string
+		mutate  func(*Challenge)
+		wantErr string
+	}{
+		{
+			name:    "realm line feed",
+			realm:   "api.example.com\nnext",
+			wantErr: "realm auth-param",
+		},
+		{
+			name: "id carriage return",
+			mutate: func(c *Challenge) {
+				c.ID = "challenge\rid"
+			},
+			wantErr: "id auth-param",
+		},
+		{
+			name: "description crlf",
+			mutate: func(c *Challenge) {
+				c.Description = "Line one\r\nLine two"
+			},
+			wantErr: "description auth-param",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			challenge := NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+			if tt.mutate != nil {
+				tt.mutate(challenge)
+			}
+			realm := "api.example.com"
+			if tt.realm != "" {
+				realm = tt.realm
+			}
+
+			got, err := challenge.ToAuthenticateStrict(realm)
+			if err == nil {
+				t.Fatalf("ToAuthenticateStrict() = %q, want error", got)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "CR or LF") {
+				t.Fatalf("ToAuthenticateStrict() error = %v, want %q and CR/LF detail", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseChallenge(t *testing.T) {
 	t.Parallel()
 

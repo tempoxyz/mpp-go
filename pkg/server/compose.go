@@ -131,8 +131,18 @@ func composeChallenges(w http.ResponseWriter, r *http.Request, entries []compose
 		return
 	}
 
+	var headers []string
 	for _, challenge := range challenges {
-		w.Header().Add("WWW-Authenticate", challenge.ToAuthenticate(realm))
+		header, err := challenge.ToAuthenticateStrict(realm)
+		if err != nil {
+			WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, err.Error()))
+			return
+		}
+		headers = append(headers, header)
+	}
+
+	for _, header := range headers {
+		w.Header().Add("WWW-Authenticate", header)
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")

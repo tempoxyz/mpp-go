@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -76,5 +77,36 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 	if got := string(body); got != "did:key:z6Mkrdemo:0xreceipt" {
 		t.Fatalf("response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
+	}
+}
+
+func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
+	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	handler := ChargeMiddleware(payment, ChargeParams{
+		Amount:      "0.50",
+		Description: "Line one\r\nLine two",
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
+	}
+	if got := resp.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q, want empty", got)
+	}
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem) error = %v", err)
+	}
+	if problem.Type != string(mpp.ErrorTypeInvalidChallenge) {
+		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeInvalidChallenge)
 	}
 }

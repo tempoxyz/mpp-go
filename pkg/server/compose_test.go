@@ -410,6 +410,45 @@ func TestComposeMiddleware_SingleMethod(t *testing.T) {
 	}
 }
 
+func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{
+			Mpp: methodA,
+			Params: ChargeParams{
+				Amount:      "1.00",
+				Description: "Line one\r\nLine two",
+			},
+		},
+	)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("http.Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusBadRequest, body)
+	}
+	if got := resp.Header.Values("WWW-Authenticate"); len(got) != 0 {
+		t.Fatalf("WWW-Authenticate = %#v, want empty", got)
+	}
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem) error = %v", err)
+	}
+	if problem.Type != string(mpp.ErrorTypeInvalidChallenge) {
+		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeInvalidChallenge)
+	}
+}
+
 func TestComposeMiddleware_PanicsOnEmptyConfigs(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

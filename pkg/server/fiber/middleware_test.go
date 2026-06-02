@@ -2,6 +2,7 @@ package fiberadapter
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -96,5 +97,44 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 	if got := string(body); got != "did:key:z6Mkrdemo:0xreceipt" {
 		t.Fatalf("response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
+	}
+}
+
+func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
+	t.Parallel()
+
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	app := fiberfw.New()
+
+	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{
+		Amount:      "0.50",
+		Description: "Line one\r\nLine two",
+	}), func(c *fiberfw.Ctx) error {
+		t.Fatal("handler should not be called")
+		return nil
+	})
+
+	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	challengeResponse, err := app.Test(challengeRequest)
+	if err != nil {
+		t.Fatalf("app.Test() error = %v", err)
+	}
+	defer challengeResponse.Body.Close()
+
+	if challengeResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("challenge status = %d, want %d", challengeResponse.StatusCode, http.StatusBadRequest)
+	}
+	if got := challengeResponse.Header.Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q, want empty", got)
+	}
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(challengeResponse.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem) error = %v", err)
+	}
+	if problem.Type != string(mpp.ErrorTypeInvalidChallenge) {
+		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeInvalidChallenge)
 	}
 }

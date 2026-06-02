@@ -181,6 +181,12 @@ func (c *Challenge) ToAuthenticate(realm string) string {
 	return FormatAuthenticate(c, realm)
 }
 
+// ToAuthenticateStrict formats this Challenge as an authentication header value
+// and rejects values that cannot be safely represented in quoted auth-params.
+func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
+	return FormatAuthenticateStrict(c, realm)
+}
+
 // Verify checks whether the challenge ID matches the expected HMAC for the
 // given secretKey and realm. Uses constant-time comparison.
 func (c *Challenge) Verify(secretKey, realm string) bool {
