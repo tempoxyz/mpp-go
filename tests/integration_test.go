@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
@@ -703,10 +704,8 @@ func waitForRPC(t *testing.T, ctx context.Context, rpc tempo.RPCClient) uint64 {
 		}
 		time.Sleep(rpcReadinessPollInterval)
 	}
-	assert.Failf(t, "", "Tempo RPC at %s did not become ready before timeout; start the local devnet with `docker compose up -d` in mpp-go or set TEMPO_RPC_URL", integrationRPCURL(t))
+	require.Failf(t, "", "Tempo RPC at %s did not become ready before timeout; start the local devnet with `docker compose up -d` in mpp-go or set TEMPO_RPC_URL", integrationRPCURL(t))
 	return *new(uint64)
-
-	return 0
 }
 
 func fundAddress(t *testing.T, ctx context.Context, rpc tempo.RPCClient, address common.Address) {

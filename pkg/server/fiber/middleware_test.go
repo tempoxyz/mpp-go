@@ -126,10 +126,8 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 		Amount:      "0.50",
 		Description: "Line one\r\nLine two",
 	}), func(c *fiberfw.Ctx) error {
-		assert.Fail(t, "handler should not be called")
+		require.Fail(t, "handler should not be called")
 		return *new(error)
-
-		return nil
 	})
 
 	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)

@@ -84,8 +84,6 @@ func findChallenge(t *testing.T, resp *http.Response, methodName string) *mpp.Ch
 	}
 	assert.Failf(t, "", "did not find challenge for method %q", methodName)
 	return *new(*mpp.Challenge)
-
-	return nil
 }
 
 // payWith sends a credential and returns the response.
