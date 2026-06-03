@@ -2,6 +2,7 @@ package mpp
 
 import (
 	"errors"
+	"github.com/stretchr/testify/assert"
 	"net/http"
 	"strings"
 	"testing"
@@ -94,16 +95,19 @@ func TestPaymentErrorConstructors(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			if !assert.Equalf(t, tt.want, tt.err.Type,
+				"err.Type = %q, want %q", tt.err.Type, tt.want) {
+				return
+			}
+			if !assert.Equalf(t, tt.status, tt.err.Status,
+				"err.Status = %d, want %d", tt.err.Status, tt.status) {
+				return
+			}
+			if !assert.Equalf(t, tt.detail, tt.err.Detail,
+				"err.Detail = %q, want %q", tt.err.Detail, tt.detail) {
+				return
+			}
 
-			if tt.err.Type != tt.want {
-				t.Fatalf("err.Type = %q, want %q", tt.err.Type, tt.want)
-			}
-			if tt.err.Status != tt.status {
-				t.Fatalf("err.Status = %d, want %d", tt.err.Status, tt.status)
-			}
-			if tt.err.Detail != tt.detail {
-				t.Fatalf("err.Detail = %q, want %q", tt.err.Detail, tt.detail)
-			}
 		})
 	}
 }
@@ -113,26 +117,33 @@ func TestPaymentErrorHelpers(t *testing.T) {
 
 	err := ErrVerificationFailed("signature mismatch")
 	if got := err.Error(); got != "Verification Failed: signature mismatch" {
-		t.Fatalf("err.Error() = %q, want %q", got, "Verification Failed: signature mismatch")
+		assert.Failf(t, "", "err.Error() = %q, want %q", got, "Verification Failed: signature mismatch")
+		return
 	}
-	if !errors.Is(err, ErrVerification) {
-		t.Fatal("errors.Is(err, ErrVerification) = false, want true")
+	if !assert.True(t, errors.Is(err, ErrVerification),
+		"errors.Is(err, ErrVerification) = false, want true") {
+		return
 	}
 
 	problem := err.ProblemDetails("challenge-1")
-	if problem["type"] != err.Type {
-		t.Fatalf("problem[type] = %#v, want %q", problem["type"], err.Type)
+	if !assert.Equalf(t, err.Type, problem["type"],
+		"problem[type] = %#v, want %q", problem["type"], err.Type) {
+		return
 	}
-	if problem["challengeId"] != "challenge-1" {
-		t.Fatalf("problem[challengeId] = %#v, want %q", problem["challengeId"], "challenge-1")
+	if !assert.Equalf(t, "challenge-1", problem["challengeId"],
+		"problem[challengeId] = %#v, want %q", problem["challengeId"], "challenge-1") {
+		return
 	}
 
 	nonVerification := ErrBadRequest("invalid")
-	if errors.Is(nonVerification, ErrVerification) {
-		t.Fatal("errors.Is(nonVerification, ErrVerification) = true, want false")
+	if !assert.False(t, errors.Is(nonVerification, ErrVerification),
+		"errors.Is(nonVerification, ErrVerification) = true, want false") {
+		return
 	}
+
 	if got := nonVerification.ProblemDetails(""); got["challengeId"] != nil {
-		t.Fatalf("problem[challengeId] = %#v, want nil", got["challengeId"])
+		assert.Failf(t, "", "problem[challengeId] = %#v, want nil", got["challengeId"])
+		return
 	}
 }
 
@@ -145,32 +156,41 @@ func TestReceiptRoundTrip(t *testing.T) {
 		WithExternalID("ext-123"),
 		WithExtra(map[string]any{"settled": true}),
 	)
-	if receipt.Status != "success" {
-		t.Fatalf("receipt.Status = %q, want %q", receipt.Status, "success")
+	if !assert.Equalf(t, "success", receipt.Status,
+		"receipt.Status = %q, want %q", receipt.Status, "success") {
+		return
 	}
-	if receipt.Timestamp.Location() != time.UTC {
-		t.Fatalf("receipt.Timestamp.Location() = %v, want UTC", receipt.Timestamp.Location())
+	if !assert.Equalf(t, time.UTC, receipt.Timestamp.Location(),
+		"receipt.Timestamp.Location() = %v, want UTC", receipt.Timestamp.Location()) {
+		return
 	}
 
 	header := FormatReceipt(receipt)
 	parsed, err := ParseReceipt(header)
-	if err != nil {
-		t.Fatalf("ParseReceipt() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseReceipt() error = %v", err) {
+		return
 	}
-	if parsed.Reference != receipt.Reference {
-		t.Fatalf("parsed.Reference = %q, want %q", parsed.Reference, receipt.Reference)
+	if !assert.Equalf(t, receipt.Reference, parsed.Reference,
+		"parsed.Reference = %q, want %q", parsed.Reference, receipt.Reference) {
+		return
 	}
-	if parsed.Method != receipt.Method {
-		t.Fatalf("parsed.Method = %q, want %q", parsed.Method, receipt.Method)
+	if !assert.Equalf(t, receipt.Method, parsed.Method,
+		"parsed.Method = %q, want %q", parsed.Method, receipt.Method) {
+		return
 	}
-	if parsed.ExternalID != receipt.ExternalID {
-		t.Fatalf("parsed.ExternalID = %q, want %q", parsed.ExternalID, receipt.ExternalID)
+	if !assert.Equalf(t, receipt.ExternalID, parsed.ExternalID,
+		"parsed.ExternalID = %q, want %q", parsed.ExternalID, receipt.ExternalID) {
+		return
 	}
-	if parsed.Extra["settled"] != true {
-		t.Fatalf("parsed.Extra[settled] = %#v, want true", parsed.Extra["settled"])
+	if !assert.Equalf(t, true, parsed.Extra["settled"],
+		"parsed.Extra[settled] = %#v, want true", parsed.Extra["settled"]) {
+		return
 	}
+
 	if got, want := parsed.Timestamp.Format("2006-01-02T15:04:05.000Z"), receipt.Timestamp.Format("2006-01-02T15:04:05.000Z"); got != want {
-		t.Fatalf("parsed.Timestamp = %q, want %q", got, want)
+		assert.Failf(t, "", "parsed.Timestamp = %q, want %q", got, want)
+		return
 	}
 }
 
@@ -182,15 +202,17 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 		"timestamp": "2026-01-01T00:00:00Z",
 		"reference": "ref-123",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "invalid receipt status") {
-		t.Fatalf("ParseReceipt() error = %v, want invalid status error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt status"),
+		"ParseReceipt() error = %v, want invalid status error", err) {
+		return
 	}
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{
 		"status": "success",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "receipt missing reference") {
-		t.Fatalf("ParseReceipt() error = %v, want missing reference error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "receipt missing reference"),
+		"ParseReceipt() error = %v, want missing reference error", err) {
+		return
 	}
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{
@@ -199,8 +221,9 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 		"timestamp": "2026-01-01T00:00:00Z",
 		"reference": "ref-123",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "invalid receipt method") {
-		t.Fatalf("ParseReceipt() error = %v, want invalid method error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt method"),
+		"ParseReceipt() error = %v, want invalid method error", err) {
+		return
 	}
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{
@@ -209,8 +232,9 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 		"timestamp": "2026-01-01T00:00:00Z",
 		"reference": "ref-123",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "invalid receipt method") {
-		t.Fatalf("ParseReceipt() error = %v, want invalid method error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt method"),
+		"ParseReceipt() error = %v, want invalid method error", err) {
+		return
 	}
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{
@@ -219,9 +243,11 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 		"timestamp": "2026-01-01T00:00:00Z",
 		"reference": "ref-123",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "invalid receipt method") {
-		t.Fatalf("ParseReceipt() error = %v, want invalid method error", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt method"),
+		"ParseReceipt() error = %v, want invalid method error", err) {
+		return
 	}
+
 }
 
 func TestChallengeVerifyAndToEcho(t *testing.T) {
@@ -235,27 +261,34 @@ func TestChallengeVerifyAndToEcho(t *testing.T) {
 		map[string]any{"amount": "100"},
 		WithExpires("2026-01-01T00:00:00.000Z"),
 	)
-	if !challenge.Verify("secret-key", "api.example.com") {
-		t.Fatal("challenge.Verify(secret-key, api.example.com) = false, want true")
+	if !assert.True(t, challenge.Verify("secret-key", "api.example.com"),
+		"challenge.Verify(secret-key, api.example.com) = false, want true") {
+		return
 	}
-	if challenge.Verify("secret-key", "other.example.com") {
-		t.Fatal("challenge.Verify(secret-key, other.example.com) = true, want false")
+	if !assert.False(t, challenge.Verify("secret-key", "other.example.com"),
+		"challenge.Verify(secret-key, other.example.com) = true, want false") {
+		return
 	}
 
 	challenge.RequestB64 = ""
 	echo := challenge.ToEcho()
-	if echo.Request == "" {
-		t.Fatal("echo.Request = empty, want base64-encoded request")
+	if !assert.NotEqual(t, "", echo.Request,
+		"echo.Request = empty, want base64-encoded request") {
+		return
 	}
-	if !ConstantTimeEqual(challenge.ID, echo.ID) {
-		t.Fatal("ConstantTimeEqual(challenge.ID, echo.ID) = false, want true")
+	if !assert.True(t, ConstantTimeEqual(challenge.ID, echo.ID),
+		"ConstantTimeEqual(challenge.ID, echo.ID) = false, want true") {
+		return
 	}
-	if ConstantTimeEqual(challenge.ID, "different") {
-		t.Fatal("ConstantTimeEqual(challenge.ID, different) = true, want false")
+	if !assert.False(t, ConstantTimeEqual(challenge.ID, "different"),
+		"ConstantTimeEqual(challenge.ID, different) = true, want false") {
+		return
 	}
-	if echo.Expires != challenge.Expires {
-		t.Fatalf("echo.Expires = %q, want %q", echo.Expires, challenge.Expires)
+	if !assert.Equalf(t, challenge.Expires, echo.Expires,
+		"echo.Expires = %q, want %q", echo.Expires, challenge.Expires) {
+		return
 	}
+
 }
 
 func TestChallengeNewCredential(t *testing.T) {
@@ -273,17 +306,21 @@ func TestChallengeNewCredential(t *testing.T) {
 		map[string]any{"type": "hash", "hash": "0xabc123"},
 		WithCredentialSource("did:pkh:eip155:42431:0x1234"),
 	)
+	if !assert.Equalf(t, challenge.ID, credential.Challenge.ID,
+		"credential.Challenge.ID = %q, want %q", credential.Challenge.ID, challenge.ID) {
+		return
+	}
+	if !assert.Equalf(t, challenge.ToEcho().Request, credential.Challenge.Request,
+		"credential.Challenge.Request = %q, want %q", credential.Challenge.Request, challenge.ToEcho().Request) {
+		return
+	}
+	if !assert.Equalf(t, "did:pkh:eip155:42431:0x1234", credential.Source,
+		"credential.Source = %q, want source", credential.Source) {
+		return
+	}
+	if !assert.Equalf(t, "0xabc123", credential.Payload["hash"],
+		"credential.Payload[hash] = %#v, want %q", credential.Payload["hash"], "0xabc123") {
+		return
+	}
 
-	if credential.Challenge.ID != challenge.ID {
-		t.Fatalf("credential.Challenge.ID = %q, want %q", credential.Challenge.ID, challenge.ID)
-	}
-	if credential.Challenge.Request != challenge.ToEcho().Request {
-		t.Fatalf("credential.Challenge.Request = %q, want %q", credential.Challenge.Request, challenge.ToEcho().Request)
-	}
-	if credential.Source != "did:pkh:eip155:42431:0x1234" {
-		t.Fatalf("credential.Source = %q, want source", credential.Source)
-	}
-	if credential.Payload["hash"] != "0xabc123" {
-		t.Fatalf("credential.Payload[hash] = %#v, want %q", credential.Payload["hash"], "0xabc123")
-	}
 }

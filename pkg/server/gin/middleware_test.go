@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	ginfw "github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -36,14 +37,16 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	router.GET("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
 		credential := Credential(c)
 		receipt := Receipt(c)
-		if credential == nil || receipt == nil {
-			t.Fatalf("expected credential and receipt on gin context")
+		if !assert.Falsef(t, credential == nil || receipt == nil,
+			"expected credential and receipt on gin context") {
+			return
 		}
 
 		ctxCredential := server.CredentialFromContext(c.Request.Context())
 		ctxReceipt := server.ReceiptFromContext(c.Request.Context())
-		if ctxCredential == nil || ctxReceipt == nil {
-			t.Fatalf("expected credential and receipt on request context")
+		if !assert.Falsef(t, ctxCredential == nil || ctxReceipt == nil,
+			"expected credential and receipt on request context") {
+			return
 		}
 
 		c.String(http.StatusOK, "%s:%s", credential.Source, receipt.Reference)
@@ -52,14 +55,15 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
 	challengeResponse := httptest.NewRecorder()
 	router.ServeHTTP(challengeResponse, challengeRequest)
-
-	if challengeResponse.Code != http.StatusPaymentRequired {
-		t.Fatalf("challenge status = %d, want %d", challengeResponse.Code, http.StatusPaymentRequired)
+	if !assert.Equalf(t, http.StatusPaymentRequired, challengeResponse.Code,
+		"challenge status = %d, want %d", challengeResponse.Code, http.StatusPaymentRequired) {
+		return
 	}
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
-	if err != nil {
-		t.Fatalf("ParseChallenge() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseChallenge() error = %v", err) {
+		return
 	}
 
 	credential := &mpp.Credential{
@@ -72,20 +76,23 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
-
-	if paidResponse.Code != http.StatusOK {
-		t.Fatalf("paid status = %d, want %d", paidResponse.Code, http.StatusOK)
+	if !assert.Equalf(t, http.StatusOK, paidResponse.Code,
+		"paid status = %d, want %d", paidResponse.Code, http.StatusOK) {
+		return
 	}
 
 	receipt, err := mpp.ParsePaymentReceipt(paidResponse.Header().Get("Payment-Receipt"))
-	if err != nil {
-		t.Fatalf("ParsePaymentReceipt() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParsePaymentReceipt() error = %v", err) {
+		return
 	}
-	if receipt.Reference != "0xreceipt" {
-		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, "0xreceipt")
+	if !assert.Equalf(t, "0xreceipt", receipt.Reference,
+		"receipt reference = %q, want %q", receipt.Reference, "0xreceipt") {
+		return
 	}
 
 	if got := paidResponse.Body.String(); got != "did:key:z6Mkrdemo:0xreceipt" {
-		t.Fatalf("response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
+		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
+		return
 	}
 }

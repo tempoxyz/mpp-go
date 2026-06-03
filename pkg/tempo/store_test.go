@@ -2,6 +2,7 @@ package tempo
 
 import (
 	"context"
+	"github.com/stretchr/testify/assert"
 	"testing"
 )
 
@@ -16,25 +17,38 @@ func TestMemoryStoreOperations(t *testing.T) {
 			name: "missing key",
 			run: func(t *testing.T, store *MemoryStore) {
 				t.Helper()
-				if value, ok, err := store.Get(context.Background(), "missing"); err != nil || ok || value != "" {
-					t.Fatalf("Get() = (%q, %t, %v), want (\"\", false, nil)", value, ok, err)
+				{
+					value, ok, err := store.Get(context.Background(), "missing")
+					if !assert.Falsef(t, err != nil || ok || value != "",
+						"Get() = (%q, %t, %v), want (\"\", false, nil)", value, ok, err) {
+						return
+					}
 				}
+
 			},
 		},
 		{
 			name: "put and get",
 			run: func(t *testing.T, store *MemoryStore) {
 				t.Helper()
-				if err := store.Put(context.Background(), "k", "v"); err != nil {
-					t.Fatalf("Put() error = %v", err)
+				{
+					err := store.Put(context.Background(), "k", "v")
+					if !assert.NoErrorf(t, err,
+						"Put() error = %v", err) {
+						return
+					}
 				}
+
 				value, ok, err := store.Get(context.Background(), "k")
-				if err != nil {
-					t.Fatalf("Get() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"Get() error = %v", err) {
+					return
 				}
-				if !ok || value != "v" {
-					t.Fatalf("Get() = (%q, %t), want (\"v\", true)", value, ok)
+				if !assert.Falsef(t, !ok || value != "v",
+					"Get() = (%q, %t), want (\"v\", true)", value, ok) {
+					return
 				}
+
 			},
 		},
 		{
@@ -42,41 +56,65 @@ func TestMemoryStoreOperations(t *testing.T) {
 			run: func(t *testing.T, store *MemoryStore) {
 				t.Helper()
 				inserted, err := store.PutIfAbsent(context.Background(), "k", "first")
-				if err != nil {
-					t.Fatalf("first PutIfAbsent() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"first PutIfAbsent() error = %v", err) {
+					return
 				}
-				if !inserted {
-					t.Fatal("first PutIfAbsent() = false, want true")
+				if !assert.True(t, inserted,
+					"first PutIfAbsent() = false, want true") {
+					return
 				}
+
 				inserted, err = store.PutIfAbsent(context.Background(), "k", "second")
-				if err != nil {
-					t.Fatalf("second PutIfAbsent() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"second PutIfAbsent() error = %v", err) {
+					return
 				}
-				if inserted {
-					t.Fatal("second PutIfAbsent() = true, want false")
+				if !assert.False(t, inserted,
+					"second PutIfAbsent() = true, want false") {
+					return
 				}
+
 				value, ok, err := store.Get(context.Background(), "k")
-				if err != nil {
-					t.Fatalf("Get() error = %v", err)
+				if !assert.NoErrorf(t, err,
+					"Get() error = %v", err) {
+					return
 				}
-				if !ok || value != "first" {
-					t.Fatalf("Get() = (%q, %t), want (\"first\", true)", value, ok)
+				if !assert.Falsef(t, !ok || value != "first",
+					"Get() = (%q, %t), want (\"first\", true)", value, ok) {
+					return
 				}
+
 			},
 		},
 		{
 			name: "delete removes key",
 			run: func(t *testing.T, store *MemoryStore) {
 				t.Helper()
-				if err := store.Put(context.Background(), "k", "v"); err != nil {
-					t.Fatalf("Put() error = %v", err)
+				{
+					err := store.Put(context.Background(), "k", "v")
+					if !assert.NoErrorf(t, err,
+						"Put() error = %v", err) {
+						return
+					}
 				}
-				if err := store.Delete(context.Background(), "k"); err != nil {
-					t.Fatalf("Delete() error = %v", err)
+				{
+
+					err := store.Delete(context.Background(), "k")
+					if !assert.NoErrorf(t, err,
+						"Delete() error = %v", err) {
+						return
+					}
 				}
-				if value, ok, err := store.Get(context.Background(), "k"); err != nil || ok || value != "" {
-					t.Fatalf("Get() after delete = (%q, %t, %v), want (\"\", false, nil)", value, ok, err)
+				{
+
+					value, ok, err := store.Get(context.Background(), "k")
+					if !assert.Falsef(t, err != nil || ok || value != "",
+						"Get() after delete = (%q, %t, %v), want (\"\", false, nil)", value, ok, err) {
+						return
+					}
 				}
+
 			},
 		},
 	}
@@ -119,9 +157,11 @@ func TestStoreKeys(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if tt.got != tt.want {
-				t.Fatalf("key = %q, want %q", tt.got, tt.want)
+			if !assert.Equalf(t, tt.want, tt.got,
+				"key = %q, want %q", tt.got, tt.want) {
+				return
 			}
+
 		})
 	}
 }

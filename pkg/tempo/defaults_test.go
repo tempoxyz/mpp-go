@@ -3,6 +3,7 @@ package tempo
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
@@ -10,13 +11,16 @@ func TestDefaultCurrencyForChain(t *testing.T) {
 	t.Parallel()
 
 	if got := DefaultCurrencyForChain(tempotx.ChainIdMainnet); got != MainnetUSDCAddress {
-		t.Fatalf("DefaultCurrencyForChain(mainnet) = %q, want %q", got, MainnetUSDCAddress)
+		assert.Failf(t, "", "DefaultCurrencyForChain(mainnet) = %q, want %q", got, MainnetUSDCAddress)
+		return
 	}
 	if got := DefaultCurrencyForChain(tempotx.ChainIdModerato); got != tempotx.AlphaUSDAddress.Hex() {
-		t.Fatalf("DefaultCurrencyForChain(moderato) = %q, want %q", got, tempotx.AlphaUSDAddress.Hex())
+		assert.Failf(t, "", "DefaultCurrencyForChain(moderato) = %q, want %q", got, tempotx.AlphaUSDAddress.Hex())
+		return
 	}
 	if got := DefaultCurrencyForChain(999999); got != tempotx.AlphaUSDAddress.Hex() {
-		t.Fatalf("DefaultCurrencyForChain(unknown) = %q, want %q", got, tempotx.AlphaUSDAddress.Hex())
+		assert.Failf(t, "", "DefaultCurrencyForChain(unknown) = %q, want %q", got, tempotx.AlphaUSDAddress.Hex())
+		return
 	}
 }
 
@@ -40,10 +44,15 @@ func TestInferChainIDFromRPCURL(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			{
 
-			if got := InferChainIDFromRPCURL(tt.rpcURL); got != tt.want {
-				t.Fatalf("InferChainIDFromRPCURL(%q) = %d, want %d", tt.rpcURL, got, tt.want)
+				got := InferChainIDFromRPCURL(tt.rpcURL)
+				if !assert.Equalf(t, tt.want, got,
+					"InferChainIDFromRPCURL(%q) = %d, want %d", tt.rpcURL, got, tt.want) {
+					return
+				}
 			}
+
 		})
 	}
 }
@@ -70,17 +79,22 @@ func TestRPCURLForChain(t *testing.T) {
 
 			got, err := RPCURLForChain(tt.chainID)
 			if tt.wantErr != "" {
-				if err == nil || err.Error() != tt.wantErr {
-					t.Fatalf("RPCURLForChain(%d) error = %v, want %q", tt.chainID, err, tt.wantErr)
+				if !assert.Falsef(t, err == nil || err.Error() != tt.wantErr,
+					"RPCURLForChain(%d) error = %v, want %q", tt.chainID, err, tt.wantErr) {
+					return
 				}
+
 				return
 			}
-			if err != nil {
-				t.Fatalf("RPCURLForChain(%d) error = %v", tt.chainID, err)
+			if !assert.NoErrorf(t, err,
+				"RPCURLForChain(%d) error = %v", tt.chainID, err) {
+				return
 			}
-			if got != tt.want {
-				t.Fatalf("RPCURLForChain(%d) = %q, want %q", tt.chainID, got, tt.want)
+			if !assert.Equalf(t, tt.want, got,
+				"RPCURLForChain(%d) = %q, want %q", tt.chainID, got, tt.want) {
+				return
 			}
+
 		})
 	}
 }

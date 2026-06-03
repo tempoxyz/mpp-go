@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/stretchr/testify/assert"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
@@ -107,69 +108,98 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSigner(t *testing.T) {
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
+
 	raw := credential.Payload["signature"].(string)
 
 	feePayerSigner, err := temposigner.NewSigner(feePayerKey)
-	if err != nil {
-		t.Fatalf("NewSigner() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner() error = %v", err) {
+		return
 	}
+
 	feePayerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Method string   `json:"method"`
 			Params []string `json:"params"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("Decode(request) error = %v", err)
+		{
+			err := json.NewDecoder(r.Body).Decode(&body)
+			if !assert.NoErrorf(t, err,
+				"Decode(request) error = %v", err) {
+				return
+			}
 		}
-		if body.Method != "eth_signRawTransaction" {
-			t.Fatalf("method = %q, want eth_signRawTransaction", body.Method)
+		if !assert.Equalf(t, "eth_signRawTransaction", body.Method,
+			"method = %q, want eth_signRawTransaction", body.Method) {
+			return
 		}
-		if len(body.Params) != 1 || body.Params[0] != raw {
-			t.Fatalf("params = %#v, want original raw tx", body.Params)
+		if !assert.Falsef(t, len(body.Params) != 1 || body.Params[0] != raw,
+			"params = %#v, want original raw tx", body.Params) {
+			return
 		}
+
 		coSignedTx, err := tempotx.Deserialize(raw)
-		if err != nil {
-			t.Fatalf("Deserialize(raw) error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"Deserialize(raw) error = %v", err) {
+			return
 		}
+
 		sender, err := tempotx.VerifySignature(coSignedTx)
-		if err != nil {
-			t.Fatalf("VerifySignature() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"VerifySignature() error = %v", err) {
+			return
 		}
+
 		coSignedTx.From = sender
 		coSignedTx.FeeToken = common.HexToAddress(request.Currency)
 		coSignedTx.AwaitingFeePayer = false
-		if err := tempotx.AddFeePayerSignature(coSignedTx, feePayerSigner); err != nil {
-			t.Fatalf("AddFeePayerSignature() error = %v", err)
+		{
+			err := tempotx.AddFeePayerSignature(coSignedTx, feePayerSigner)
+			if !assert.NoErrorf(t, err,
+				"AddFeePayerSignature() error = %v", err) {
+				return
+			}
 		}
+
 		serialized, err := tempotx.Serialize(coSignedTx, nil)
-		if err != nil {
-			t.Fatalf("Serialize() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"Serialize() error = %v", err) {
+			return
 		}
+
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": serialized})
 	}))
 	defer feePayerServer.Close()
 	request.MethodDetails.FeePayerURL = feePayerServer.URL
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	receipt, err := intent.Verify(ctx, credential, request.Map())
-	if err != nil {
-		t.Fatalf("Verify() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Verify() error = %v", err) {
+		return
 	}
-	if receipt.Reference != testReceiptHash {
-		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, testReceiptHash)
+	if !assert.Equalf(t, testReceiptHash, receipt.Reference,
+		"receipt reference = %q, want %q", receipt.Reference, testReceiptHash) {
+		return
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected 1 broadcast, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected 1 broadcast, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
-	if strings.Contains(rpc.sentRawTxs[0], "feefeefeefee") {
-		t.Fatalf("broadcast transaction still contains fee payer marker: %q", rpc.sentRawTxs[0])
+	if !assert.NotContainsf(t, rpc.sentRawTxs[0], "feefeefeefee",
+		"broadcast transaction still contains fee payer marker: %q", rpc.sentRawTxs[0]) {
+		return
 	}
+
 }
 
 func TestChargeFlow_FeePayerTransactionViaRemoteSignerRejectsTamperedFeeToken(t *testing.T) {
@@ -180,49 +210,69 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSignerRejectsTamperedFeeToken(t 
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
+
 	raw := credential.Payload["signature"].(string)
 
 	feePayerSigner, err := temposigner.NewSigner(feePayerKey)
-	if err != nil {
-		t.Fatalf("NewSigner() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner() error = %v", err) {
+		return
 	}
+
 	feePayerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		coSignedTx, err := tempotx.Deserialize(raw)
-		if err != nil {
-			t.Fatalf("Deserialize(raw) error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"Deserialize(raw) error = %v", err) {
+			return
 		}
+
 		sender, err := tempotx.VerifySignature(coSignedTx)
-		if err != nil {
-			t.Fatalf("VerifySignature() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"VerifySignature() error = %v", err) {
+			return
 		}
+
 		coSignedTx.From = sender
 		coSignedTx.FeeToken = common.HexToAddress("0x20c0000000000000000000000000000000000002")
 		coSignedTx.AwaitingFeePayer = false
-		if err := tempotx.AddFeePayerSignature(coSignedTx, feePayerSigner); err != nil {
-			t.Fatalf("AddFeePayerSignature() error = %v", err)
+		{
+			err := tempotx.AddFeePayerSignature(coSignedTx, feePayerSigner)
+			if !assert.NoErrorf(t, err,
+				"AddFeePayerSignature() error = %v", err) {
+				return
+			}
 		}
+
 		serialized, err := tempotx.Serialize(coSignedTx, nil)
-		if err != nil {
-			t.Fatalf("Serialize() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"Serialize() error = %v", err) {
+			return
 		}
+
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": serialized})
 	}))
 	defer feePayerServer.Close()
 	request.MethodDetails.FeePayerURL = feePayerServer.URL
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "fee token") {
-		t.Fatalf("Verify() error = %v, want fee token rejection", err)
+		assert.Failf(t, "", "Verify() error = %v, want fee token rejection", err)
+		return
 	}
-	if len(rpc.sentRawTxs) != 0 {
-		t.Fatalf("expected tampered transaction to be rejected before broadcast, got %d broadcasts", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 0,
+		"expected tampered transaction to be rejected before broadcast, got %d broadcasts", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
@@ -234,32 +284,41 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 		Decimals:  6,
 		ChainID:   42431,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	challenge := buildChallenge(t, request)
 
 	rootSigner, err := temposigner.NewSigner(testPrivateKey)
-	if err != nil {
-		t.Fatalf("NewSigner(root) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner(root) error = %v", err) {
+		return
 	}
+
 	accessKey, err := temposigner.NewSigner(feePayerKey)
-	if err != nil {
-		t.Fatalf("NewSigner(access key) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner(access key) error = %v", err) {
+		return
 	}
 	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID, challenge.Realm)
-	if err != nil {
-		t.Fatalf("ProofTypedDataHash() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ProofTypedDataHash() error = %v", err) {
+		return
 	}
+
 	v2Payload := make([]byte, 0, 1+len(proofHash.Bytes())+common.AddressLength)
 	v2Payload = append(v2Payload, keychain.KeychainSignatureType)
 	v2Payload = append(v2Payload, proofHash.Bytes()...)
 	v2Payload = append(v2Payload, rootSigner.Address().Bytes()...)
 	innerSignature, err := accessKey.Sign(crypto.Keccak256Hash(v2Payload))
-	if err != nil {
-		t.Fatalf("accessKey.Sign() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"accessKey.Sign() error = %v", err) {
+		return
 	}
+
 	rpc.callResult = encodeActiveKeyInfo(accessKey.Address(), time.Now().Add(time.Hour).Unix())
 
 	credential := &mpp.Credential{
@@ -272,16 +331,21 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	receipt, err := intent.Verify(ctx, credential, request.Map())
-	if err != nil {
-		t.Fatalf("Verify() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Verify() error = %v", err) {
+		return
 	}
-	if receipt.Reference != challenge.ID {
-		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, challenge.ID)
+	if !assert.Equalf(t, challenge.ID, receipt.Reference,
+		"receipt reference = %q, want %q", receipt.Reference, challenge.ID) {
+		return
 	}
+
 }
 
 func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
@@ -293,32 +357,41 @@ func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
 		Decimals:  6,
 		ChainID:   42431,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	challenge := buildChallenge(t, request)
 
 	rootSigner, err := temposigner.NewSigner(testPrivateKey)
-	if err != nil {
-		t.Fatalf("NewSigner(root) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner(root) error = %v", err) {
+		return
 	}
+
 	accessKey, err := temposigner.NewSigner(feePayerKey)
-	if err != nil {
-		t.Fatalf("NewSigner(access key) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner(access key) error = %v", err) {
+		return
 	}
 	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID, challenge.Realm)
-	if err != nil {
-		t.Fatalf("ProofTypedDataHash() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ProofTypedDataHash() error = %v", err) {
+		return
 	}
+
 	v2Payload := make([]byte, 0, 1+len(proofHash.Bytes())+common.AddressLength)
 	v2Payload = append(v2Payload, keychain.KeychainSignatureType)
 	v2Payload = append(v2Payload, proofHash.Bytes()...)
 	v2Payload = append(v2Payload, rootSigner.Address().Bytes()...)
 	innerSignature, err := accessKey.Sign(crypto.Keccak256Hash(v2Payload))
-	if err != nil {
-		t.Fatalf("accessKey.Sign() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"accessKey.Sign() error = %v", err) {
+		return
 	}
+
 	rpc.callResult = encodeActiveKeyInfo(accessKey.Address(), 0)
 
 	credential := &mpp.Credential{
@@ -331,16 +404,21 @@ func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	receipt, err := intent.Verify(ctx, credential, request.Map())
-	if err != nil {
-		t.Fatalf("Verify() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Verify() error = %v", err) {
+		return
 	}
-	if receipt.Reference != challenge.ID {
-		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, challenge.ID)
+	if !assert.Equalf(t, challenge.ID, receipt.Reference,
+		"receipt reference = %q, want %q", receipt.Reference, challenge.ID) {
+		return
 	}
+
 }
 
 func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
@@ -357,9 +435,11 @@ func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
 			Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
 		}},
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
 		tx, err := tempotx.Deserialize(raw)
@@ -380,16 +460,20 @@ func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "does not satisfy") {
-		t.Fatalf("Verify() error = %v, want receipt mismatch", err)
+		assert.Failf(t, "", "Verify() error = %v, want receipt mismatch", err)
+		return
 	}
 }
 
@@ -403,9 +487,11 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 		ChainID:        42431,
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
 		tx, err := tempotx.Deserialize(raw)
@@ -426,16 +512,20 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
-		t.Fatalf("Verify() error = %v", err)
+		assert.Failf(t, "", "Verify() error = %v", err)
+		return
 	}
 }
 
@@ -450,13 +540,17 @@ func TestChargeFlow_HashCredentialRejectsExplicitPrimaryMemo(t *testing.T) {
 		Memo:           "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	signer, err := temposigner.NewSigner(testPrivateKey)
-	if err != nil {
-		t.Fatalf("NewSigner() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewSigner() error = %v", err) {
+		return
 	}
+
 	challenge := buildChallenge(t, request)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -468,11 +562,14 @@ func TestChargeFlow_HashCredentialRejectsExplicitPrimaryMemo(t *testing.T) {
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: newMockRPC(request)})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "explicit memo") {
-		t.Fatalf("Verify() error = %v, want explicit memo rejection", err)
+		assert.Failf(t, "", "Verify() error = %v, want explicit memo rejection", err)
+		return
 	}
 }
 
@@ -484,17 +581,22 @@ func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
+
 	credential.Source = "not-a-did"
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "credential source is invalid") {
-		t.Fatalf("Verify() error = %v, want invalid credential source", err)
+		assert.Failf(t, "", "Verify() error = %v, want invalid credential source", err)
+		return
 	}
 }
 
@@ -507,26 +609,37 @@ func TestChargeFlow_ProofCredentialRejectsDifferentRealm(t *testing.T) {
 		Decimals:  6,
 		ChainID:   42431,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeProof)
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
+
 	credential.Challenge.Realm = "other.example.com"
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "proof signature does not match source") {
-		t.Fatalf("Verify() error = %v, want proof signature mismatch", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "proof signature does not match source"),
+			"Verify() error = %v, want proof signature mismatch", err) {
+			return
+		}
 	}
+
 }
 
 func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.T) {
@@ -552,26 +665,41 @@ func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
-		t.Fatalf("first Verify() error = %v", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.NoErrorf(t, err,
+			"first Verify() error = %v", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected 1 broadcast after first Verify(), got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected 1 broadcast after first Verify(), got %d", len(rpc.sentRawTxs)) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
-		t.Fatalf("second Verify() error = %v", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.NoErrorf(t, err,
+			"second Verify() error = %v", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected no second broadcast, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected no second broadcast, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_TransactionCredentialRefetchesReservedHashAfterReceiptFailure(t *testing.T) {
@@ -605,26 +733,41 @@ func TestChargeFlow_TransactionCredentialRefetchesReservedHashAfterReceiptFailur
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "failed to fetch transaction receipt") {
-		t.Fatalf("first Verify() error = %v, want receipt fetch failure", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "failed to fetch transaction receipt"),
+			"first Verify() error = %v, want receipt fetch failure", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected first Verify() to broadcast once, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected first Verify() to broadcast once, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
-		t.Fatalf("second Verify() error = %v", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.NoErrorf(t, err,
+			"second Verify() error = %v", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected retry to refetch without rebroadcast, got %d broadcasts", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected retry to refetch without rebroadcast, got %d broadcasts", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailure(t *testing.T) {
@@ -638,19 +781,27 @@ func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailur
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "transaction submission failed") {
-		t.Fatalf("first Verify() error = %v, want submission failure", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "transaction submission failed"),
+			"first Verify() error = %v, want submission failure", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected first Verify() to broadcast once, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected first Verify() to broadcast once, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
 
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
@@ -664,12 +815,18 @@ func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailur
 		}
 		return testReceiptHash, buildReceipt(raw, request, sender), nil
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
-		t.Fatalf("second Verify() error = %v", err)
+	{
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.NoErrorf(t, err,
+			"second Verify() error = %v", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 2 {
-		t.Fatalf("expected second Verify() to broadcast after release, got %d broadcasts", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 2,
+		"expected second Verify() to broadcast after release, got %d broadcasts", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T) {
@@ -681,16 +838,20 @@ func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T)
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
+
 	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "sponsor policy") {
-		t.Fatalf("Verify() error = %v, want sponsor policy rejection", err)
+		assert.Failf(t, "", "Verify() error = %v, want sponsor policy rejection", err)
+		return
 	}
 }
 
@@ -705,26 +866,41 @@ func TestChargeFlow_FeePayerTransactionUsesChallengeOnceAfterRevert(t *testing.T
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "transaction reverted") {
-		t.Fatalf("first Verify() error = %v, want reverted transaction", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "transaction reverted"),
+			"first Verify() error = %v, want reverted transaction", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected 1 broadcast after first Verify(), got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected 1 broadcast after first Verify(), got %d", len(rpc.sentRawTxs)) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "challenge already used") {
-		t.Fatalf("second Verify() error = %v, want reused challenge rejection", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "challenge already used"),
+			"second Verify() error = %v, want reused challenge rejection", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected no second broadcast, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected no second broadcast, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.T) {
@@ -733,51 +909,78 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 	rpc := newMockRPC(request)
 	rpc.onEstimateGas = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
 		callObject, ok := params[0].(map[string]any)
-		if !ok {
-			t.Fatalf("estimateGas params[0] type = %T, want map[string]any", params[0])
+		if !assert.Truef(t, ok,
+			"estimateGas params[0] type = %T, want map[string]any", params[0]) {
+			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
+
 		if _, ok := callObject["calls"]; !ok {
 			return &temporpc.JSONRPCResponse{Result: rpc.estimateGas}, nil
 		}
-		if callObject["from"] == "" {
-			t.Fatal("estimateGas call object missing from")
+		if !assert.NotEqual(t, "", callObject["from"],
+			"estimateGas call object missing from") {
+			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
-		if callObject["feeToken"] != request.Currency {
-			t.Fatalf("estimateGas feeToken = %v, want %s", callObject["feeToken"], request.Currency)
+		if !assert.Equalf(t, request.Currency, callObject["feeToken"],
+			"estimateGas feeToken = %v, want %s", callObject["feeToken"], request.Currency) {
+			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
+
 		calls, ok := callObject["calls"].([]map[string]any)
-		if !ok || len(calls) == 0 {
-			t.Fatalf("estimateGas calls = %#v, want non-empty call batch", callObject["calls"])
+		if !assert.Falsef(t, !ok || len(calls) == 0,
+			"estimateGas calls = %#v, want non-empty call batch", callObject["calls"]) {
+			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
-		if _, ok := callObject["nonceKey"]; !ok {
-			t.Fatal("estimateGas call object missing nonceKey")
+		{
+
+			_, ok := callObject["nonceKey"]
+			if !assert.True(t, ok,
+				"estimateGas call object missing nonceKey") {
+				return *new(*temporpc.JSONRPCResponse), *new(error)
+			}
 		}
-		if _, ok := callObject["validBefore"]; !ok {
-			t.Fatal("estimateGas call object missing validBefore")
+		{
+
+			_, ok := callObject["validBefore"]
+			if !assert.True(t, ok,
+				"estimateGas call object missing validBefore") {
+				return *new(*temporpc.JSONRPCResponse), *new(error)
+			}
 		}
+
 		return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
 	}
 	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "transaction preflight failed") {
-		t.Fatalf("Verify() error = %v, want preflight failure", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "transaction preflight failed"),
+			"Verify() error = %v, want preflight failure", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 0 {
-		t.Fatalf("expected no broadcast after failed preflight, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 0,
+		"expected no broadcast after failed preflight, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
-	if len(rpc.estimateGasCalls) < 2 {
-		t.Fatalf("expected client estimate and server preflight calls, got %d", len(rpc.estimateGasCalls))
+	if !assert.Falsef(t, len(rpc.estimateGasCalls) < 2,
+		"expected client estimate and server preflight calls, got %d", len(rpc.estimateGasCalls)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
@@ -790,28 +993,39 @@ func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
 		ChainID:   42431,
 		FeePayer:  true,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("Verify() error = %v, want unsupported fee token rejection", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "not supported"),
+			"Verify() error = %v, want unsupported fee token rejection", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 0 {
-		t.Fatalf("expected unsupported fee token to be rejected before broadcast, got %d broadcasts", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 0,
+		"expected unsupported fee token to be rejected before broadcast, got %d broadcasts", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
@@ -824,16 +1038,19 @@ func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
 		ChainID:   42431,
 		FeePayer:  true,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
 	}
+
 	rpc := newMockRPC(request)
 	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
 	challenge := buildChallenge(t, request)
 
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if err != nil {
-		t.Fatalf("CreateCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
 	}
 
 	intent, err := NewIntent(IntentConfig{
@@ -847,15 +1064,23 @@ func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewIntent() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
 	}
-	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
-		t.Fatalf("Verify() error = %v", err)
+	{
+
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.NoErrorf(t, err,
+			"Verify() error = %v", err) {
+			return
+		}
 	}
-	if len(rpc.sentRawTxs) != 1 {
-		t.Fatalf("expected configured fee token to broadcast once, got %d", len(rpc.sentRawTxs))
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected configured fee token to broadcast once, got %d", len(rpc.sentRawTxs)) {
+		return
 	}
+
 }
 
 func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
@@ -865,11 +1090,14 @@ func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
 
 	started := time.Now()
 	_, err := fetchReceipt(ctx, rpc, testReceiptHash)
-	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
-		t.Fatalf("fetchReceipt() error = %v, want context cancellation", err)
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), context.Canceled.Error()),
+		"fetchReceipt() error = %v, want context cancellation", err) {
+		return
 	}
+
 	if elapsed := time.Since(started); elapsed >= receiptRetryDelay/2 {
-		t.Fatalf("fetchReceipt() took %s, want early cancellation before retry delay %s", elapsed, receiptRetryDelay)
+		assert.Failf(t, "", "fetchReceipt() took %s, want early cancellation before retry delay %s", elapsed, receiptRetryDelay)
+		return
 	}
 }
 
@@ -881,9 +1109,11 @@ func newClientMethod(t *testing.T, rpc tempo.RPCClient, credentialType tempo.Cre
 		ChainID:        42431,
 		CredentialType: credentialType,
 	})
-	if err != nil {
-		t.Fatalf("tempo/client.New() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"tempo/client.New() error = %v", err) {
+		return *new(*chargeclient.Method)
 	}
+
 	return method
 }
 
@@ -898,9 +1128,11 @@ func buildRequest(t *testing.T, feePayer bool, modes []tempo.ChargeMode) tempo.C
 		FeePayer:       feePayer,
 		SupportedModes: modes,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return *new(tempo.ChargeRequest)
 	}
+
 	return request
 }
 

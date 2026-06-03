@@ -54,12 +54,16 @@ func composeTestServer(t *testing.T, configs ...ComposeConfig) *httptest.Server 
 func getChallenge(t *testing.T, url string) *http.Response {
 	t.Helper()
 	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("http.Get() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.Get() error = %v", err) {
+		return *new(*http.Response)
 	}
+
 	if resp.StatusCode != http.StatusPaymentRequired {
 		resp.Body.Close()
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusPaymentRequired)
+		assert.Failf(t, "", "status = %d, want %d", resp.StatusCode, http.StatusPaymentRequired)
+		return *new(*http.Response)
+
 	}
 	return resp
 }
@@ -69,15 +73,17 @@ func findChallenge(t *testing.T, resp *http.Response, methodName string) *mpp.Ch
 	t.Helper()
 	for _, h := range resp.Header.Values("WWW-Authenticate") {
 		c, err := mpp.ParseChallenge(h)
-		if err != nil {
-			t.Fatalf("ParseChallenge() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"ParseChallenge() error = %v", err) {
+			return *new(*mpp.Challenge)
 		}
+
 		if c.Method == methodName {
 			return c
 		}
 	}
-	t.Fatalf("did not find challenge for method %q", methodName)
-	return nil
+	assert.Failf(t, "", "did not find challenge for method %q", methodName)
+	return *new(*mpp.Challenge)
 }
 
 // payWith sends a credential and returns the response.
@@ -89,14 +95,18 @@ func payWith(t *testing.T, url string, challenge *mpp.Challenge) *http.Response 
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc"},
 	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.NewRequest() error = %v", err) {
+		return *new(*http.Response)
 	}
+
 	req.Header.Set("Authorization", credential.ToAuthorization())
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Do() error = %v", err) {
+		return *new(*http.Response)
 	}
+
 	return resp
 }
 
@@ -116,15 +126,18 @@ func TestComposeMiddleware_FansOutChallenges(t *testing.T) {
 	defer resp.Body.Close()
 
 	wwwAuth := resp.Header.Values("WWW-Authenticate")
-	if len(wwwAuth) != 2 {
-		t.Fatalf("got %d WWW-Authenticate headers, want 2", len(wwwAuth))
+	if !assert.Lenf(t, wwwAuth, 2,
+		"got %d WWW-Authenticate headers, want 2", len(wwwAuth)) {
+		return
 	}
 
 	challenge0, _ := mpp.ParseChallenge(wwwAuth[0])
 	challenge1, _ := mpp.ParseChallenge(wwwAuth[1])
-	if challenge0.Method == challenge1.Method {
-		t.Fatalf("expected different methods, both are %q", challenge0.Method)
+	if !assert.NotEqualf(t, challenge1.Method, challenge0.Method,
+		"expected different methods, both are %q", challenge0.Method) {
+		return
 	}
+
 }
 
 func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
@@ -146,21 +159,26 @@ func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
 
 	if paid.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(paid.Body)
-		t.Fatalf("paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		assert.Failf(t, "", "paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		return
 	}
 
 	body, _ := io.ReadAll(paid.Body)
 	if got := string(body); got != "beta:0xreceipt-beta" {
-		t.Fatalf("body = %q, want %q", got, "beta:0xreceipt-beta")
+		assert.Failf(t, "", "body = %q, want %q", got, "beta:0xreceipt-beta")
+		return
 	}
 
 	receipt, err := mpp.ParsePaymentReceipt(paid.Header.Get("Payment-Receipt"))
-	if err != nil {
-		t.Fatalf("ParsePaymentReceipt() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParsePaymentReceipt() error = %v", err) {
+		return
 	}
-	if receipt.Reference != "0xreceipt-beta" {
-		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, "0xreceipt-beta")
+	if !assert.Equalf(t, "0xreceipt-beta", receipt.Reference,
+		"receipt reference = %q, want %q", receipt.Reference, "0xreceipt-beta") {
+		return
 	}
+
 }
 
 func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
@@ -179,24 +197,29 @@ func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
 	defer resp.Body.Close()
 
 	wwwAuth := resp.Header.Values("WWW-Authenticate")
-	if len(wwwAuth) != 2 {
-		t.Fatalf("got %d WWW-Authenticate headers, want 2", len(wwwAuth))
+	if !assert.Lenf(t, wwwAuth, 2,
+		"got %d WWW-Authenticate headers, want 2", len(wwwAuth)) {
+		return
+
+		// Pick the second (expensive) challenge by parsing and checking the request amount.
 	}
 
-	// Pick the second (expensive) challenge by parsing and checking the request amount.
 	var expensiveChallenge *mpp.Challenge
 	for _, h := range wwwAuth {
 		c, err := mpp.ParseChallenge(h)
-		if err != nil {
-			t.Fatalf("ParseChallenge() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"ParseChallenge() error = %v", err) {
+			return
 		}
+
 		if amt, ok := c.Request["amount"]; ok && amt == "10.00" {
 			expensiveChallenge = c
 			break
 		}
 	}
-	if expensiveChallenge == nil {
-		t.Fatal("did not find the 10.00 amount challenge")
+	if !assert.NotNil(t, expensiveChallenge,
+		"did not find the 10.00 amount challenge") {
+		return
 	}
 
 	paid := payWith(t, srv.URL, expensiveChallenge)
@@ -204,7 +227,8 @@ func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
 
 	if paid.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(paid.Body)
-		t.Fatalf("paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		assert.Failf(t, "", "paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		return
 	}
 }
 
@@ -224,16 +248,19 @@ func TestComposeMiddleware_SameRequestDifferentMetaSelectsMatchingConfig(t *test
 	var proChallenge *mpp.Challenge
 	for _, h := range resp.Header.Values("WWW-Authenticate") {
 		c, err := mpp.ParseChallenge(h)
-		if err != nil {
-			t.Fatalf("ParseChallenge() error = %v", err)
+		if !assert.NoErrorf(t, err,
+			"ParseChallenge() error = %v", err) {
+			return
 		}
+
 		if c.Opaque["plan"] == "pro" {
 			proChallenge = c
 			break
 		}
 	}
-	if proChallenge == nil {
-		t.Fatal("did not find the pro challenge")
+	if !assert.NotNil(t, proChallenge,
+		"did not find the pro challenge") {
+		return
 	}
 
 	paid := payWith(t, srv.URL, proChallenge)
@@ -241,7 +268,8 @@ func TestComposeMiddleware_SameRequestDifferentMetaSelectsMatchingConfig(t *test
 
 	if paid.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(paid.Body)
-		t.Fatalf("paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		assert.Failf(t, "", "paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		return
 	}
 }
 
@@ -256,10 +284,11 @@ func TestComposeMiddleware_RejectsUnknownMethod(t *testing.T) {
 	fakeChallenge := mpp.NewChallenge(composeSecret, composeRealm, "unknown", "charge", map[string]any{"amount": "1.00"})
 	resp := payWith(t, srv.URL, fakeChallenge)
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	if !assert.Equalf(t, http.StatusBadRequest, resp.StatusCode,
+		"status = %d, want %d", resp.StatusCode, http.StatusBadRequest) {
+		return
 	}
+
 }
 
 func TestComposeMiddleware_CrossMethodCredentialRejected(t *testing.T) {
@@ -288,14 +317,17 @@ func TestComposeMiddleware_CrossMethodCredentialRejected(t *testing.T) {
 	req.Header.Set("Authorization", credential.ToAuthorization())
 
 	paid, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Do() error = %v", err) {
+		return
 	}
-	defer paid.Body.Close()
 
-	if paid.StatusCode == http.StatusOK {
-		t.Fatal("expected credential to be rejected, but got 200")
+	defer paid.Body.Close()
+	if !assert.NotEqual(t, http.StatusOK, paid.StatusCode,
+		"expected credential to be rejected, but got 200") {
+		return
 	}
+
 }
 
 func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing.T) {
@@ -318,20 +350,25 @@ func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc"},
 	}
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.NewRequest() error = %v", err) {
+		return
 	}
+
 	req.Header.Set("Authorization", "Bearer test-token, "+credential.ToAuthorization())
 
 	paid, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Do() error = %v", err) {
+		return
 	}
+
 	defer paid.Body.Close()
 
 	if paid.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(paid.Body)
-		t.Fatalf("paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		assert.Failf(t, "", "paid status = %d, want 200; body = %s", paid.StatusCode, body)
+		return
 	}
 }
 
@@ -354,31 +391,39 @@ func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *
 	credential.Challenge.Request = "%%%"
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.NewRequest() error = %v", err) {
+		return
 	}
+
 	req.Header.Set("Authorization", credential.ToAuthorization())
 
 	paid, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Do() error = %v", err) {
+		return
 	}
+
 	defer paid.Body.Close()
 
 	if paid.StatusCode != http.StatusBadRequest {
 		body, _ := io.ReadAll(paid.Body)
-		t.Fatalf("status = %d, want %d; body = %s", paid.StatusCode, http.StatusBadRequest, body)
+		assert.Failf(t, "", "status = %d, want %d; body = %s", paid.StatusCode, http.StatusBadRequest, body)
+		return
 	}
 
 	var problem struct {
 		Type string `json:"type"`
 	}
 	if err := json.NewDecoder(paid.Body).Decode(&problem); err != nil {
-		t.Fatalf("Decode(problem) error = %v", err)
+		assert.Failf(t, "", "Decode(problem) error = %v", err)
+		return
 	}
-	if problem.Type != string(mpp.ErrorTypeMalformedCredential) {
-		t.Fatalf("problem type = %q, want %q", problem.Type, mpp.ErrorTypeMalformedCredential)
+	if !assert.Equalf(t, string(mpp.ErrorTypeMalformedCredential), problem.Type,
+		"problem type = %q, want %q", problem.Type, mpp.ErrorTypeMalformedCredential) {
+		return
 	}
+
 }
 
 func TestComposeMiddleware_SingleMethod(t *testing.T) {
@@ -393,8 +438,9 @@ func TestComposeMiddleware_SingleMethod(t *testing.T) {
 	defer resp.Body.Close()
 
 	wwwAuth := resp.Header.Values("WWW-Authenticate")
-	if len(wwwAuth) != 1 {
-		t.Fatalf("got %d WWW-Authenticate headers, want 1", len(wwwAuth))
+	if !assert.Lenf(t, wwwAuth, 1,
+		"got %d WWW-Authenticate headers, want 1", len(wwwAuth)) {
+		return
 	}
 
 	challenge, _ := mpp.ParseChallenge(wwwAuth[0])
@@ -403,12 +449,14 @@ func TestComposeMiddleware_SingleMethod(t *testing.T) {
 
 	if paid.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(paid.Body)
-		t.Fatalf("status = %d, want 200; body = %s", paid.StatusCode, body)
+		assert.Failf(t, "", "status = %d, want 200; body = %s", paid.StatusCode, body)
+		return
 	}
 
 	body, _ := io.ReadAll(paid.Body)
 	if got := string(body); got != "alpha:0xreceipt-alpha" {
-		t.Fatalf("body = %q, want %q", got, "alpha:0xreceipt-alpha")
+		assert.Failf(t, "", "body = %q, want %q", got, "alpha:0xreceipt-alpha")
+		return
 	}
 }
 
@@ -427,9 +475,11 @@ func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("http.Get() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.Get() error = %v", err) {
+		return
 	}
+
 	defer resp.Body.Close()
 
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -444,18 +494,28 @@ func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 
 func TestComposeMiddleware_PanicsOnEmptyConfigs(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for empty configs")
+		{
+			r := recover()
+			if !assert.NotNil(t, r,
+				"expected panic for empty configs") {
+				return
+			}
 		}
+
 	}()
 	ComposeMiddleware()
 }
 
 func TestComposeMiddleware_PanicsOnNilMpp(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for nil Mpp")
+		{
+			r := recover()
+			if !assert.NotNil(t, r,
+				"expected panic for nil Mpp") {
+				return
+			}
 		}
+
 	}()
 	ComposeMiddleware(ComposeConfig{Mpp: nil, Params: ChargeParams{Amount: "1.00"}})
 }
@@ -465,9 +525,14 @@ func TestComposeMiddleware_PanicsOnMixedRealms(t *testing.T) {
 	b := New(composeTestMethod{name: "beta"}, "realm-b.example.com", composeSecret)
 
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for mixed realms")
+		{
+			r := recover()
+			if !assert.NotNil(t, r,
+				"expected panic for mixed realms") {
+				return
+			}
 		}
+
 	}()
 	ComposeMiddleware(
 		ComposeConfig{Mpp: a, Params: ChargeParams{Amount: "1.00"}},

@@ -29,18 +29,21 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	defer server.Close()
 
 	challengeResponse, err := http.Get(server.URL)
-	if err != nil {
-		t.Fatalf("http.Get() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.Get() error = %v", err) {
+		return
 	}
-	defer challengeResponse.Body.Close()
 
-	if challengeResponse.StatusCode != http.StatusPaymentRequired {
-		t.Fatalf("challenge status = %d, want %d", challengeResponse.StatusCode, http.StatusPaymentRequired)
+	defer challengeResponse.Body.Close()
+	if !assert.Equalf(t, http.StatusPaymentRequired, challengeResponse.StatusCode,
+		"challenge status = %d, want %d", challengeResponse.StatusCode, http.StatusPaymentRequired) {
+		return
 	}
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
-	if err != nil {
-		t.Fatalf("ParseChallenge() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseChallenge() error = %v", err) {
+		return
 	}
 
 	credential := &mpp.Credential{
@@ -50,35 +53,44 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 
 	retry, err := http.NewRequest(http.MethodGet, server.URL, nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"http.NewRequest() error = %v", err) {
+		return
 	}
+
 	retry.Header.Set("Authorization", credential.ToAuthorization())
 
 	paidResponse, err := http.DefaultClient.Do(retry)
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"Do() error = %v", err) {
+		return
 	}
-	defer paidResponse.Body.Close()
 
-	if paidResponse.StatusCode != http.StatusOK {
-		t.Fatalf("paid status = %d, want %d", paidResponse.StatusCode, http.StatusOK)
+	defer paidResponse.Body.Close()
+	if !assert.Equalf(t, http.StatusOK, paidResponse.StatusCode,
+		"paid status = %d, want %d", paidResponse.StatusCode, http.StatusOK) {
+		return
 	}
 
 	receipt, err := mpp.ParsePaymentReceipt(paidResponse.Header.Get("Payment-Receipt"))
-	if err != nil {
-		t.Fatalf("ParsePaymentReceipt() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParsePaymentReceipt() error = %v", err) {
+		return
 	}
-	if receipt.Reference != "0xreceipt" {
-		t.Fatalf("receipt reference = %q, want %q", receipt.Reference, "0xreceipt")
+	if !assert.Equalf(t, "0xreceipt", receipt.Reference,
+		"receipt reference = %q, want %q", receipt.Reference, "0xreceipt") {
+		return
 	}
 
 	body, err := io.ReadAll(paidResponse.Body)
-	if err != nil {
-		t.Fatalf("io.ReadAll() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"io.ReadAll() error = %v", err) {
+		return
 	}
+
 	if got := string(body); got != "did:key:z6Mkrdemo:0xreceipt" {
-		t.Fatalf("response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
+		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
+		return
 	}
 }
 
@@ -88,7 +100,8 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 		Amount:      "0.50",
 		Description: "Line one\r\nLine two",
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("handler should not be called")
+		assert.Fail(t, "handler should not be called")
+		return
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/paid", nil)

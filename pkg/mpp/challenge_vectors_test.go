@@ -1,7 +1,7 @@
 package mpp
 
 import (
-	"strings"
+	"github.com/stretchr/testify/assert"
 	"testing"
 )
 
@@ -146,10 +146,15 @@ func TestGenerateChallengeIDCrossSDKCompatibilityVectors(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			{
 
-			if got := GenerateChallengeID(tt.in); got != tt.want {
-				t.Fatalf("GenerateChallengeID() = %q, want %q", got, tt.want)
+				got := GenerateChallengeID(tt.in)
+				if !assert.Equalf(t, tt.want, got,
+					"GenerateChallengeID() = %q, want %q", got, tt.want) {
+					return
+				}
 			}
+
 		})
 	}
 }
@@ -238,10 +243,15 @@ func TestGenerateChallengeIDGoldenVectors(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			{
 
-			if got := GenerateChallengeID(tt.in); got != tt.want {
-				t.Fatalf("GenerateChallengeID() = %q, want %q", got, tt.want)
+				got := GenerateChallengeID(tt.in)
+				if !assert.Equalf(t, tt.want, got,
+					"GenerateChallengeID() = %q, want %q", got, tt.want) {
+					return
+				}
 			}
+
 		})
 	}
 }
@@ -285,10 +295,15 @@ func TestGenerateChallengeIDOpaqueGoldenVectors(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			{
 
-			if got := GenerateChallengeID(tt.in); got != tt.want {
-				t.Fatalf("GenerateChallengeID() = %q, want %q", got, tt.want)
+				got := GenerateChallengeID(tt.in)
+				if !assert.Equalf(t, tt.want, got,
+					"GenerateChallengeID() = %q, want %q", got, tt.want) {
+					return
+				}
 			}
+
 		})
 	}
 }
@@ -306,17 +321,21 @@ func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 	)
 
 	header := challenge.ToAuthenticate("api.example.com")
-	if !strings.Contains(header, `opaque="`) {
-		t.Fatalf("challenge header = %q, want opaque field", header)
+	if !assert.Containsf(t, header, `opaque="`,
+		"challenge header = %q, want opaque field", header) {
+		return
 	}
 
 	parsed, err := ParseChallenge(header)
-	if err != nil {
-		t.Fatalf("ParseChallenge() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseChallenge() error = %v", err) {
+		return
 	}
-	if parsed.Opaque == nil {
-		t.Fatal("parsed.Opaque = nil, want empty map")
+	if !assert.NotNil(t, parsed.Opaque,
+		"parsed.Opaque = nil, want empty map") {
+		return
 	}
+
 	if got := GenerateChallengeID(GenerateChallengeIDInput{
 		SecretKey: "test-vector-secret",
 		Realm:     "api.example.com",
@@ -325,19 +344,25 @@ func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 		Request:   map[string]any{"amount": "1000000"},
 		Opaque:    parsed.Opaque,
 	}); got != challenge.ID {
-		t.Fatalf("GenerateChallengeID(parsed opaque) = %q, want %q", got, challenge.ID)
+		assert.Failf(t, "", "GenerateChallengeID(parsed opaque) = %q, want %q", got, challenge.ID)
+		return
 	}
 
 	credential := &Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": "0xabc123"}}
 	authorization := credential.ToAuthorization()
-	if !strings.Contains(authorization, "ey") {
-		t.Fatalf("credential authorization = %q, want base64 payload", authorization)
+	if !assert.Containsf(t, authorization, "ey",
+		"credential authorization = %q, want base64 payload", authorization) {
+		return
 	}
+
 	parsedCredential, err := ParseCredential(authorization)
-	if err != nil {
-		t.Fatalf("ParseCredential() error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"ParseCredential() error = %v", err) {
+		return
 	}
-	if parsedCredential.Challenge.Opaque == nil {
-		t.Fatal("parsedCredential.Challenge.Opaque = nil, want empty map")
+	if !assert.NotNil(t, parsedCredential.Challenge.Opaque,
+		"parsedCredential.Challenge.Opaque = nil, want empty map") {
+		return
 	}
+
 }

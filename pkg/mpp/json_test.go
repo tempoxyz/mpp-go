@@ -2,6 +2,7 @@ package mpp
 
 import (
 	"encoding/json"
+	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
 )
@@ -18,25 +19,31 @@ func TestChallengeJSONMarshalUsesDecodedRequest(t *testing.T) {
 	}
 
 	encoded, err := json.Marshal(challenge)
-	if err != nil {
-		t.Fatalf("json.Marshal(challenge) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"json.Marshal(challenge) error = %v", err) {
+		return
 	}
 
 	var decoded map[string]any
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
+		assert.Failf(t, "", "json.Unmarshal(encoded) error = %v", err)
+		return
 	}
 
 	if _, ok := decoded["requestB64"]; ok {
-		t.Fatal("challenge JSON unexpectedly included requestB64")
+		assert.Fail(t, "challenge JSON unexpectedly included requestB64")
+		return
 	}
 	request, ok := decoded["request"].(map[string]any)
-	if !ok {
-		t.Fatalf("challenge JSON request = %#v, want object", decoded["request"])
+	if !assert.Truef(t, ok,
+		"challenge JSON request = %#v, want object", decoded["request"]) {
+		return
 	}
-	if request["amount"] != "100" {
-		t.Fatalf("challenge JSON request[amount] = %#v, want %q", request["amount"], "100")
+	if !assert.Equalf(t, "100", request["amount"],
+		"challenge JSON request[amount] = %#v, want %q", request["amount"], "100") {
+		return
 	}
+
 }
 
 func TestChallengeJSONOpaqueRoundTrip(t *testing.T) {
@@ -53,30 +60,37 @@ func TestChallengeJSONOpaqueRoundTrip(t *testing.T) {
 	}
 
 	encoded, err := json.Marshal(challenge)
-	if err != nil {
-		t.Fatalf("json.Marshal(challenge) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"json.Marshal(challenge) error = %v", err) {
+		return
 	}
 
 	var decoded map[string]any
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
+		assert.Failf(t, "", "json.Unmarshal(encoded) error = %v", err)
+		return
 	}
 
 	opaque, ok := decoded["opaque"].(map[string]any)
-	if !ok {
-		t.Fatalf("challenge JSON opaque = %#v, want object", decoded["opaque"])
+	if !assert.Truef(t, ok,
+		"challenge JSON opaque = %#v, want object", decoded["opaque"]) {
+		return
 	}
-	if opaque["trace"] != "123" {
-		t.Fatalf("challenge JSON opaque[trace] = %#v, want %q", opaque["trace"], "123")
+	if !assert.Equalf(t, "123", opaque["trace"],
+		"challenge JSON opaque[trace] = %#v, want %q", opaque["trace"], "123") {
+		return
 	}
 
 	var roundTripped Challenge
 	if err := json.Unmarshal([]byte(`{"id":"challenge-id","realm":"api.example.com","method":"tempo","intent":"charge","request":{"amount":"100"},"opaque":"`+rawOpaque+`"}`), &roundTripped); err != nil {
-		t.Fatalf("json.Unmarshal(challenge) error = %v", err)
+		assert.Failf(t, "", "json.Unmarshal(challenge) error = %v", err)
+		return
 	}
-	if roundTripped.Opaque["trace"] != "123" {
-		t.Fatalf("challenge.Opaque[trace] = %q, want %q", roundTripped.Opaque["trace"], "123")
+	if !assert.Equalf(t, "123", roundTripped.Opaque["trace"],
+		"challenge.Opaque[trace] = %q, want %q", roundTripped.Opaque["trace"], "123") {
+		return
 	}
+
 }
 
 func TestChallengeJSONUnmarshalNormalizesRequest(t *testing.T) {
@@ -123,25 +137,32 @@ func TestChallengeJSONUnmarshalNormalizesRequest(t *testing.T) {
 			var challenge Challenge
 			err := json.Unmarshal([]byte(tt.input), &challenge)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("json.Unmarshal(challenge) error = %v, want substring %q", err, tt.wantErr)
+				if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), tt.wantErr),
+					"json.Unmarshal(challenge) error = %v, want substring %q", err, tt.wantErr) {
+					return
 				}
+
 				return
 			}
-			if err != nil {
-				t.Fatalf("json.Unmarshal(challenge) error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"json.Unmarshal(challenge) error = %v", err) {
+				return
+			}
+			if !assert.Equalf(t, tt.wantB64, challenge.RequestB64,
+				"challenge.RequestB64 = %q, want %q", challenge.RequestB64, tt.wantB64) {
+				return
 			}
 
-			if challenge.RequestB64 != tt.wantB64 {
-				t.Fatalf("challenge.RequestB64 = %q, want %q", challenge.RequestB64, tt.wantB64)
-			}
 			decoded, err := B64Decode(challenge.RequestB64)
-			if err != nil {
-				t.Fatalf("B64Decode(challenge.RequestB64) error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"B64Decode(challenge.RequestB64) error = %v", err) {
+				return
 			}
-			if !JSONEqual(challenge.Request, decoded) {
-				t.Fatalf("challenge.Request = %#v, want %#v", challenge.Request, decoded)
+			if !assert.Truef(t, JSONEqual(challenge.Request, decoded),
+				"challenge.Request = %#v, want %#v", challenge.Request, decoded) {
+				return
 			}
+
 		})
 	}
 }
@@ -163,35 +184,45 @@ func TestCredentialJSONMarshalUsesDecodedChallengeRequest(t *testing.T) {
 	}
 
 	encoded, err := json.Marshal(credential)
-	if err != nil {
-		t.Fatalf("json.Marshal(credential) error = %v", err)
+	if !assert.NoErrorf(t, err,
+		"json.Marshal(credential) error = %v", err) {
+		return
 	}
 
 	var decoded map[string]any
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
+		assert.Failf(t, "", "json.Unmarshal(encoded) error = %v", err)
+		return
 	}
 
 	challenge, ok := decoded["challenge"].(map[string]any)
-	if !ok {
-		t.Fatalf("credential JSON challenge = %#v, want object", decoded["challenge"])
+	if !assert.Truef(t, ok,
+		"credential JSON challenge = %#v, want object", decoded["challenge"]) {
+		return
 	}
+
 	if _, ok := challenge["requestB64"]; ok {
-		t.Fatal("credential JSON challenge unexpectedly included requestB64")
+		assert.Fail(t, "credential JSON challenge unexpectedly included requestB64")
+		return
 	}
 	if _, ok := challenge["description"]; ok {
-		t.Fatal("credential JSON challenge unexpectedly included description")
+		assert.Fail(t, "credential JSON challenge unexpectedly included description")
+		return
 	}
 	request, ok := challenge["request"].(map[string]any)
-	if !ok {
-		t.Fatalf("credential JSON challenge.request = %#v, want object", challenge["request"])
+	if !assert.Truef(t, ok,
+		"credential JSON challenge.request = %#v, want object", challenge["request"]) {
+		return
 	}
-	if request["amount"] != "100" {
-		t.Fatalf("credential JSON challenge.request[amount] = %#v, want %q", request["amount"], "100")
+	if !assert.Equalf(t, "100", request["amount"],
+		"credential JSON challenge.request[amount] = %#v, want %q", request["amount"], "100") {
+		return
 	}
-	if decoded["source"] != credential.Source {
-		t.Fatalf("credential JSON source = %#v, want %q", decoded["source"], credential.Source)
+	if !assert.Equalf(t, credential.Source, decoded["source"],
+		"credential JSON source = %#v, want %q", decoded["source"], credential.Source) {
+		return
 	}
+
 }
 
 func TestCredentialJSONUnmarshalNormalizesChallengeOpaque(t *testing.T) {
@@ -202,12 +233,14 @@ func TestCredentialJSONUnmarshalNormalizesChallengeOpaque(t *testing.T) {
 
 	var credential Credential
 	if err := json.Unmarshal([]byte(input), &credential); err != nil {
-		t.Fatalf("json.Unmarshal(credential) error = %v", err)
+		assert.Failf(t, "", "json.Unmarshal(credential) error = %v", err)
+		return
+	}
+	if !assert.Equalf(t, "123", credential.Challenge.Opaque["trace"],
+		"credential.Challenge.Opaque[trace] = %q, want %q", credential.Challenge.Opaque["trace"], "123") {
+		return
 	}
 
-	if credential.Challenge.Opaque["trace"] != "123" {
-		t.Fatalf("credential.Challenge.Opaque[trace] = %q, want %q", credential.Challenge.Opaque["trace"], "123")
-	}
 }
 
 func TestCredentialJSONUnmarshalNormalizesChallengeRequest(t *testing.T) {
@@ -244,25 +277,32 @@ func TestCredentialJSONUnmarshalNormalizesChallengeRequest(t *testing.T) {
 			var credential Credential
 			err := json.Unmarshal([]byte(tt.input), &credential)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("json.Unmarshal(credential) error = %v, want substring %q", err, tt.wantErr)
+				if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), tt.wantErr),
+					"json.Unmarshal(credential) error = %v, want substring %q", err, tt.wantErr) {
+					return
 				}
+
 				return
 			}
-			if err != nil {
-				t.Fatalf("json.Unmarshal(credential) error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"json.Unmarshal(credential) error = %v", err) {
+				return
+			}
+			if !assert.Equalf(t, tt.wantB64, credential.Challenge.Request,
+				"credential.Challenge.Request = %q, want %q", credential.Challenge.Request, tt.wantB64) {
+				return
 			}
 
-			if credential.Challenge.Request != tt.wantB64 {
-				t.Fatalf("credential.Challenge.Request = %q, want %q", credential.Challenge.Request, tt.wantB64)
-			}
 			decoded, err := B64Decode(credential.Challenge.Request)
-			if err != nil {
-				t.Fatalf("B64Decode(credential.Challenge.Request) error = %v", err)
+			if !assert.NoErrorf(t, err,
+				"B64Decode(credential.Challenge.Request) error = %v", err) {
+				return
 			}
-			if decoded["amount"] != "100" {
-				t.Fatalf("decoded request[amount] = %#v, want %q", decoded["amount"], "100")
+			if !assert.Equalf(t, "100", decoded["amount"],
+				"decoded request[amount] = %#v, want %q", decoded["amount"], "100") {
+				return
 			}
+
 		})
 	}
 }
