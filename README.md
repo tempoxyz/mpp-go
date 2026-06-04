@@ -132,6 +132,39 @@ func main() {
 | [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential, available in both one-command and separate-process layouts |
 | [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer, available in both one-command and separate-process layouts |
 
+## Idempotent POST Charges
+
+For paid POST routes or agent tool calls, bind each logical operation to a
+stable `ExternalID`. The value is included in the MPP charge request and echoed
+back in the `Payment-Receipt`, so servers can distinguish a safe retry from a
+different paid operation. `ExternalID` is receipt metadata; it does not by
+itself persist or reject duplicate operations. Your application must keep its
+own idempotency record or response cache keyed by the client idempotency value
+before running the paid side effect.
+
+If your API already accepts an `Idempotency-Key` header, pass that value through
+as `ChargeParams.ExternalID` when constructing the charge:
+
+```go
+externalID := r.Header.Get("Idempotency-Key")
+if externalID == "" {
+	http.Error(w, "missing Idempotency-Key", http.StatusBadRequest)
+	return
+}
+
+result, err := payment.Charge(r.Context(), server.ChargeParams{
+	Authorization: r.Header.Get("Authorization"),
+	Amount:        "0.50",
+	Description:   "Create report",
+	ExternalID:    externalID,
+})
+```
+
+Use the same `ExternalID` for retries of the same operation. Do not generate a
+new value for each retry, and avoid reusing one value across different paid
+operations. On retry, check the stored idempotency result first and return the
+cached response or receipt instead of executing the POST operation again.
+
 ## Web Frameworks
 
 The most common Go HTTP stacks today are `net/http`, Gin, Echo, Chi, and Fiber.
