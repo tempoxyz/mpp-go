@@ -10,7 +10,7 @@ require (
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/labstack/echo/v4 v4.15.2
-	github.com/redis/go-redis/v9 v9.19.0
+	github.com/redis/go-redis/v9 v9.20.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tempoxyz/tempo-go v0.4.1
 )
