@@ -1,5 +1,12 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.1.3`
+
+### Patch Changes
+
+- Convert Go tests to use testify assertions. (by @BrendanRyan, [#48](https://github.com/tempoxyz/mpp-go/pull/48))
+- Reject credentials that omit `expires` when verifying challenges with the default expiry policy. (by @EfeBaranDurmaz, [#39](https://github.com/tempoxyz/mpp-go/pull/39))
+
 ## `github.com/tempoxyz/mpp-go@0.1.2`
 
 ### Patch Changes
