@@ -1083,6 +1083,165 @@ func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
 
 }
 
+// TestChargeFlow_TransactionCredentialKeychain covers the new branch in
+// verifyTransaction that accepts Keychain (Account Abstraction) envelopes.
+// Without the fix every keychain-signed payment fails with
+// "transaction signature is invalid" before it can ever reach RPC submission.
+//
+// The "legacy YParity" subtest covers tempo-cli ≤ 1.6 emitting the inner
+// secp256k1 V in the {27, 28} EIP-155 form rather than the {0, 1} EIP-2 form
+// that tempo-go's RecoverAddress requires; the byte-mutation must happen on
+// a copy so the original raw envelope reaches SendRawTransaction unchanged.
+//
+// Strategy: borrow a clientMethod-built secp256k1 credential to get a tx with
+// validly-encoded transfer Calls, then re-sign that tx with
+// keychain.SignWithAccessKey before submitting it as the credential payload.
+// The result is structurally indistinguishable from what tempo-cli sends.
+func TestChargeFlow_TransactionCredentialKeychain(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutateRawV bool // flip inner-V from {0,1} → {27,28} after signing
+	}{
+		{name: "canonical YParity {0,1}", mutateRawV: false},
+		{name: "legacy YParity {27,28}", mutateRawV: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			challenge := buildChallenge(t, request)
+
+			rootSigner, err := temposigner.NewSigner(testPrivateKey)
+			if err != nil {
+				t.Fatalf("NewSigner(root) error = %v", err)
+			}
+			accessSigner, err := temposigner.NewSigner(feePayerKey)
+			if err != nil {
+				t.Fatalf("NewSigner(access) error = %v", err)
+			}
+
+			clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+			seedCred, err := clientMethod.CreateCredential(ctx, challenge)
+			if err != nil {
+				t.Fatalf("CreateCredential(seed) error = %v", err)
+			}
+			seedRaw := seedCred.Payload["signature"].(string)
+			tx, err := tempotx.Deserialize(seedRaw)
+			if err != nil {
+				t.Fatalf("Deserialize(seed) error = %v", err)
+			}
+			if err := keychain.SignWithAccessKey(tx, accessSigner, rootSigner.Address()); err != nil {
+				t.Fatalf("SignWithAccessKey() error = %v", err)
+			}
+			if tc.mutateRawV {
+				if tx.Signature.Raw[85] >= 2 {
+					t.Fatalf("expected canonical YParity {0,1}, got 0x%02x", tx.Signature.Raw[85])
+				}
+				tx.Signature.Raw[85] += 27
+			}
+			originalByte85 := tx.Signature.Raw[85]
+			serialized, err := tempotx.Serialize(tx, nil)
+			if err != nil {
+				t.Fatalf("Serialize() error = %v", err)
+			}
+
+			// The default mockRPC.onSend recovers the sender via off-chain
+			// ecrecover, which doesn't speak keychain. Use the known root
+			// address directly (the chain doesn't off-chain-verify either)
+			// and assert the broadcast envelope is byte-identical to what
+			// verifyTransaction received — i.e. our YParity normalisation
+			// didn't mutate the original bytes en route to the broadcast.
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				broadcast, err := tempotx.Deserialize(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				if broadcast.Signature == nil || broadcast.Signature.Type != "keychain" {
+					return "", nil, fmt.Errorf("expected broadcast keychain signature, got %#v", broadcast.Signature)
+				}
+				if broadcast.Signature.Raw[85] != originalByte85 {
+					return "", nil, fmt.Errorf("broadcast YParity = 0x%02x, want unmodified 0x%02x — verifier mutated the envelope bytes", broadcast.Signature.Raw[85], originalByte85)
+				}
+				return testReceiptHash, buildReceipt(raw, request, rootSigner.Address()), nil
+			}
+
+			credential := &mpp.Credential{
+				Challenge: challenge.ToEcho(),
+				Payload: tempo.ChargeCredentialPayload{
+					Type:      tempo.CredentialTypeTransaction,
+					Signature: serialized,
+				}.Map(),
+			}
+
+			intent, err := NewIntent(IntentConfig{RPC: rpc})
+			if err != nil {
+				t.Fatalf("NewIntent() error = %v", err)
+			}
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			if err != nil {
+				t.Fatalf("Verify() error = %v", err)
+			}
+			if receipt.Reference != testReceiptHash {
+				t.Fatalf("receipt reference = %q, want %q", receipt.Reference, testReceiptHash)
+			}
+		})
+	}
+}
+
+// TestTransactionMatches_AllowsKeyAuthorization covers AA wallet payments:
+// tempo-cli's smart-account flow always populates tx.KeyAuthorization to scope
+// which session key may execute the transaction, but the field is orthogonal
+// to payment correctness — that's established by walking tx.Calls. The earlier
+// `tx.KeyAuthorization != nil` reject made every keychain-signed payment fail
+// transactionMatches before signature verification could even run.
+func TestTransactionMatches_AllowsKeyAuthorization(t *testing.T) {
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChargeRequest() error = %v", err)
+	}
+	challenge := buildChallenge(t, request)
+
+	rootSigner, err := temposigner.NewSigner(testPrivateKey)
+	if err != nil {
+		t.Fatalf("NewSigner() error = %v", err)
+	}
+	clientMethod := newClientMethod(t, newMockRPC(request), tempo.CredentialTypeTransaction)
+	credential, err := clientMethod.CreateCredential(context.Background(), challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	raw := credential.Payload["signature"].(string)
+	tx, err := tempotx.Deserialize(raw)
+	if err != nil {
+		t.Fatalf("Deserialize() error = %v", err)
+	}
+
+	// Sanity: without KeyAuthorization the payment matches.
+	if !transactionMatches(tx, request, challenge.Realm, challenge.ID) {
+		t.Fatal("transactionMatches = false on baseline tx, want true")
+	}
+
+	// Now mark the tx as AA-style: authorize the same key that signed it.
+	tx.KeyAuthorization = []interface{}{rootSigner.Address(), uint8(0)}
+	if !transactionMatches(tx, request, challenge.Realm, challenge.ID) {
+		t.Fatal("transactionMatches = false with KeyAuthorization set, want true (payment correctness comes from tx.Calls, not from the auth tuple)")
+	}
+
+	// And AccessList still rejects (separate concern, not relaxed).
+	tx.KeyAuthorization = nil
+	tx.AccessList = tempotx.AccessList{{Address: common.HexToAddress(testRecipient)}}
+	if transactionMatches(tx, request, challenge.Realm, challenge.ID) {
+		t.Fatal("transactionMatches = true with non-empty AccessList, want false")
+	}
+}
+
 func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
 	rpc := &mockRPC{receipts: map[string]map[string]any{}}
 	ctx, cancel := context.WithCancel(context.Background())
