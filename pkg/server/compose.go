@@ -66,10 +66,15 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			paymentAuth := mpp.FindPaymentAuthorization(auth)
+			body, err := ReadRequestBody(r)
+			if err != nil {
+				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
+				return
+			}
 
 			// No credential — fan out and merge all challenges.
 			if paymentAuth == "" {
-				composeChallenges(w, r, entries, realm)
+				composeChallenges(w, r, entries, realm, body)
 				return
 			}
 
@@ -92,6 +97,9 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 
 			params := entry.params
 			params.Authorization = paymentAuth
+			if len(body) > 0 {
+				params.Body = body
+			}
 
 			result, err := entry.mpp.Charge(r.Context(), params)
 			if err != nil {
@@ -110,11 +118,14 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 
 // composeChallenges issues a 402 with all configured challenges merged into
 // separate WWW-Authenticate header values.
-func composeChallenges(w http.ResponseWriter, r *http.Request, entries []composedEntry, realm string) {
+func composeChallenges(w http.ResponseWriter, r *http.Request, entries []composedEntry, realm string, body []byte) {
 	var challenges []*mpp.Challenge
 	for _, entry := range entries {
 		params := entry.params
 		params.Authorization = ""
+		if len(body) > 0 {
+			params.Body = body
+		}
 
 		result, err := entry.mpp.Charge(r.Context(), params)
 		if err != nil {

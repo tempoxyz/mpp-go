@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -110,6 +111,29 @@ func payWith(t *testing.T, url string, challenge *mpp.Challenge) *http.Response 
 	return resp
 }
 
+func payWithBody(t *testing.T, url string, challenge *mpp.Challenge, body string) *http.Response {
+	t.Helper()
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mktest",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc"},
+	}
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if !assert.NoErrorf(t, err,
+		"http.NewRequest() error = %v", err) {
+		return *new(*http.Response)
+	}
+
+	req.Header.Set("Authorization", credential.ToAuthorization())
+	resp, err := http.DefaultClient.Do(req)
+	if !assert.NoErrorf(t, err,
+		"Do() error = %v", err) {
+		return *new(*http.Response)
+	}
+
+	return resp
+}
+
 // --- tests ---
 
 func TestComposeMiddleware_FansOutChallenges(t *testing.T) {
@@ -179,6 +203,62 @@ func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
 		return
 	}
 
+}
+
+func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
+		ComposeConfig{Mpp: methodB, Params: ChargeParams{Amount: "2.00"}},
+	)
+	defer srv.Close()
+
+	const originalBody = `{"query":"paid"}`
+	challengeReq, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(originalBody))
+	require.NoError(t, err)
+	challengeResp, err := http.DefaultClient.Do(challengeReq)
+	require.NoError(t, err)
+	defer challengeResp.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResp.StatusCode)
+
+	betaChallenge := findChallenge(t, challengeResp, "beta")
+	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), betaChallenge.Digest)
+
+	paid := payWithBody(t, srv.URL, betaChallenge, `{"query":"tampered"}`)
+	defer paid.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, paid.StatusCode)
+}
+
+func TestComposeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	handler := ComposeMiddleware(ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			_, _ = io.WriteString(w, string(body))
+		}),
+	)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	const originalBody = `{"query":"paid"}`
+	challengeReq, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(originalBody))
+	require.NoError(t, err)
+	challengeResp, err := http.DefaultClient.Do(challengeReq)
+	require.NoError(t, err)
+	defer challengeResp.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResp.StatusCode)
+
+	challenge := findChallenge(t, challengeResp, "alpha")
+	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+
+	paid := payWithBody(t, srv.URL, challenge, originalBody)
+	defer paid.Body.Close()
+	require.Equal(t, http.StatusOK, paid.StatusCode)
+	body, err := io.ReadAll(paid.Body)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(body))
 }
 
 func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
