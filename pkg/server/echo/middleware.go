@@ -31,6 +31,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 		return func(c echofw.Context) error {
 			chargeParams := params
 			chargeParams.Authorization = c.Request().Header.Get("Authorization")
+			chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
 			body, err := server.ReadRequestBody(c.Request())
 			if err != nil {
 				server.WritePaymentError(c.Response(), mpp.ErrBadRequest("failed to read request body"))

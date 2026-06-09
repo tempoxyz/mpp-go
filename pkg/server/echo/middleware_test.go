@@ -119,6 +119,42 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
+	t.Parallel()
+
+	e := echofw.New()
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	e.GET("/paid/:id", func(c echofw.Context) error {
+		return c.String(http.StatusOK, "paid")
+	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
+
+	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid/one?view=full", nil)
+	challengeResponse := httptest.NewRecorder()
+	e.ServeHTTP(challengeResponse, challengeRequest)
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	scope, ok := challenge.Request["_mppx_scope"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/paid/:id", scope["route"])
+	assert.Equal(t, "/paid/one", scope["resource"])
+	assert.Equal(t, "view=full", scope["query"])
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodGet, "/paid/two?view=full", nil)
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse := httptest.NewRecorder()
+	e.ServeHTTP(paidResponse, paidRequest)
+
+	assert.NotEqual(t, http.StatusOK, paidResponse.Code)
+	assert.Empty(t, paidResponse.Header().Get("Payment-Receipt"))
+}
+
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	t.Parallel()
 
