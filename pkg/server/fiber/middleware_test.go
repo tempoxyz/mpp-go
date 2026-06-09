@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	fiberfw "github.com/gofiber/fiber/v2"
@@ -114,6 +115,77 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		}
 	}
 
+}
+
+func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
+	t.Parallel()
+
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	app := fiberfw.New()
+
+	app.Post("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
+		return c.SendString("paid")
+	})
+
+	const originalBody = `{"query":"paid"}`
+	challengeRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+	challengeResponse, err := app.Test(challengeRequest)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(`{"query":"tampered"}`))
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse, err := app.Test(paidRequest)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+
+	assert.Equal(t, http.StatusBadRequest, paidResponse.StatusCode)
+}
+
+func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
+	t.Parallel()
+
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	app := fiberfw.New()
+
+	app.Post("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
+		return c.SendString(string(c.Body()))
+	})
+
+	const originalBody = `{"query":"paid"}`
+	challengeRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+	challengeResponse, err := app.Test(challengeRequest)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse, err := app.Test(paidRequest)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	require.Equal(t, http.StatusOK, paidResponse.StatusCode)
+
+	body, err := io.ReadAll(paidResponse.Body)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(body))
 }
 
 func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {

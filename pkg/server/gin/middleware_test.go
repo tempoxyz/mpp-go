@@ -2,12 +2,15 @@ package ginadapter
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	ginfw "github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -95,4 +98,71 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
 		return
 	}
+}
+
+func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
+	t.Parallel()
+
+	ginfw.SetMode(ginfw.TestMode)
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	router := ginfw.New()
+	router.POST("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		c.String(http.StatusOK, "paid")
+	})
+
+	const originalBody = `{"query":"paid"}`
+	challengeRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+	challengeResponse := httptest.NewRecorder()
+	router.ServeHTTP(challengeResponse, challengeRequest)
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(`{"query":"tampered"}`))
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse := httptest.NewRecorder()
+	router.ServeHTTP(paidResponse, paidRequest)
+
+	assert.Equal(t, http.StatusBadRequest, paidResponse.Code)
+}
+
+func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
+	t.Parallel()
+
+	ginfw.SetMode(ginfw.TestMode)
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	router := ginfw.New()
+	router.POST("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
+		body, _ := io.ReadAll(c.Request.Body)
+		c.String(http.StatusOK, string(body))
+	})
+
+	const originalBody = `{"query":"paid"}`
+	challengeRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+	challengeResponse := httptest.NewRecorder()
+	router.ServeHTTP(challengeResponse, challengeRequest)
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse := httptest.NewRecorder()
+	router.ServeHTTP(paidResponse, paidRequest)
+
+	require.Equal(t, http.StatusOK, paidResponse.Code)
+	assert.Equal(t, originalBody, paidResponse.Body.String())
 }

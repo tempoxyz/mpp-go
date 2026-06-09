@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -196,6 +197,41 @@ func TestVerifyOrChallenge_RejectsMismatchedBodyDigest(t *testing.T) {
 		"VerifyOrChallenge() error = %v, want body digest mismatch", err) {
 		return
 	}
+}
+
+func TestVerifyOrChallenge_ExpiredDigestCredentialReturnsPaymentExpired(t *testing.T) {
+	request := map[string]any{"amount": "100"}
+	challenge := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+		mpp.WithDigest(mpp.BodyDigest.Compute([]byte(`{"query":"paid"}`))),
+		mpp.WithExpires("2020-01-01T00:00:00Z"),
+	)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request:       request,
+		Body:          []byte(`{"query":"tampered"}`),
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+		Expires:       challenge.Expires,
+	})
+
+	paymentErr, ok := err.(*mpp.PaymentError)
+	if !assert.Truef(t, ok, "VerifyOrChallenge() error = %T %v, want PaymentError", err, err) {
+		return
+	}
+	assert.Equal(t, mpp.ErrorTypePaymentExpired, paymentErr.Type)
+	assert.Equal(t, http.StatusPaymentRequired, paymentErr.Status)
 }
 
 func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {

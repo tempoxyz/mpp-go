@@ -56,8 +56,9 @@ type VerifyResult struct {
 //  5. Constant-time compare IDs
 //  6. Verify echoed fields match (realm, method, intent name, request)
 //  7. Check expiry
-//  8. Call intent.Verify
-//  9. Return result
+//  8. Verify body digest, if present
+//  9. Call intent.Verify
+//  10. Return result
 func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult, error) {
 	expires := params.Expires
 	if expires == "" {
@@ -150,17 +151,8 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if echoed.Expires == "" {
 		return nil, mpp.ErrInvalidChallenge(echoed.ID, "missing required expires")
 	}
-	if !reflect.DeepEqual(echoed.Opaque, challenge.Opaque) {
-		return nil, mpp.ErrInvalidChallenge(
-			echoed.ID,
-			"credential opaque metadata does not match this route's requirements",
-		)
-	}
-	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
-		return nil, err
-	}
-
-	// 7. Check expiry.
+	// 7. Check expiry before body-digest validation so expired credentials
+	// consistently return the payment-expired 402 path.
 	if echoed.Expires != "" {
 		expiresTime, err := time.Parse(time.RFC3339, echoed.Expires)
 		if err != nil {
@@ -174,8 +166,17 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			return nil, mpp.ErrPaymentExpired(echoed.Expires)
 		}
 	}
+	if !reflect.DeepEqual(echoed.Opaque, challenge.Opaque) {
+		return nil, mpp.ErrInvalidChallenge(
+			echoed.ID,
+			"credential opaque metadata does not match this route's requirements",
+		)
+	}
+	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
+		return nil, err
+	}
 
-	// 8. Call intent.Verify.
+	// 9. Call intent.Verify.
 	receipt, err := params.Intent.Verify(ctx, credential, params.Request)
 	if err != nil {
 		if pe, ok := err.(*mpp.PaymentError); ok {
