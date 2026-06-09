@@ -66,6 +66,8 @@ type ChargeParams struct {
 	Recipient string
 	// ExternalID is copied into the request and echoed back in the Receipt.
 	ExternalID string
+	// Body is the actual request body to bind via the challenge digest.
+	Body any
 	// Expires overrides the default Challenge expiry.
 	Expires string
 	// Description is exposed in the server-generated Challenge.
@@ -144,6 +146,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		Authorization: params.Authorization,
 		Intent:        intent,
 		Request:       request,
+		Body:          params.Body,
 		Realm:         m.realm,
 		SecretKey:     m.secretKey,
 		Method:        m.method.Name(),

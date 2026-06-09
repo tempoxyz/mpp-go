@@ -17,6 +17,10 @@ type VerifyParams struct {
 	Intent Intent
 	// Request is the canonical request shape the Challenge binds to.
 	Request map[string]any
+	// Body is the actual request body bytes/string/object the digest binds to.
+	// When set, issued challenges include a body digest and submitted
+	// credentials must echo a digest matching this value.
+	Body any
 	// Realm is the expected server realm.
 	Realm string
 	// SecretKey signs and verifies Challenge IDs.
@@ -71,6 +75,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 	if params.Meta != nil {
 		opts = append(opts, mpp.WithMeta(params.Meta))
+	}
+	if params.Body != nil {
+		opts = append(opts, mpp.WithDigest(mpp.BodyDigest.Compute(params.Body)))
 	}
 
 	challenge := mpp.NewChallenge(
@@ -149,6 +156,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			"credential opaque metadata does not match this route's requirements",
 		)
 	}
+	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
+		return nil, err
+	}
 
 	// 7. Check expiry.
 	if echoed.Expires != "" {
@@ -179,6 +189,25 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		Credential: credential,
 		Receipt:    receipt,
 	}, nil
+}
+
+func verifyBodyDigest(challengeID, digest string, body any) error {
+	if body == nil {
+		if digest != "" {
+			return mpp.ErrInvalidChallenge(
+				challengeID,
+				"body digest present but request body was not provided",
+			)
+		}
+		return nil
+	}
+	if digest == "" {
+		return mpp.ErrInvalidChallenge(challengeID, "missing body digest")
+	}
+	if !mpp.BodyDigest.Verify(digest, body) {
+		return mpp.ErrInvalidChallenge(challengeID, "body digest mismatch")
+	}
+	return nil
 }
 
 // echoedRequestMap decodes the echoed request from a credential's challenge echo.

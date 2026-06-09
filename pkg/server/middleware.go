@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -45,6 +47,14 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			chargeParams := params
 			chargeParams.Authorization = r.Header.Get("Authorization")
+			body, err := ReadRequestBody(r)
+			if err != nil {
+				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
+				return
+			}
+			if len(body) > 0 {
+				chargeParams.Body = body
+			}
 
 			result, err := m.Charge(r.Context(), chargeParams)
 			if err != nil {
@@ -60,6 +70,20 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			serveVerified(next, w, r, result.Credential, result.Receipt)
 		})
 	}
+}
+
+// ReadRequestBody reads and restores r.Body so middleware can verify body digests
+// without consuming the body before the protected handler runs.
+func ReadRequestBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
 }
 
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {

@@ -32,6 +32,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 	return func(c *fiberfw.Ctx) error {
 		chargeParams := params
 		chargeParams.Authorization = c.Get("Authorization")
+		if body := c.Body(); len(body) > 0 {
+			chargeParams.Body = append([]byte(nil), body...)
+		}
 
 		result, err := m.Charge(c.UserContext(), chargeParams)
 		if err != nil {
