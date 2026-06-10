@@ -109,6 +109,9 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		"receipt reference = %q, want %q", receipt.Reference, "0xreceipt") {
 		return
 	}
+	if got := paidResponse.Header().Get("Cache-Control"); got != "private" {
+		t.Fatalf("Cache-Control = %q, want private", got)
+	}
 
 	if got := paidResponse.Body.String(); got != "did:key:z6Mkrdemo:0xreceipt" {
 		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")

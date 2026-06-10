@@ -49,6 +49,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.Locals(credentialKey, result.Credential)
 		c.Locals(receiptKey, result.Receipt)
 		c.Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		c.Set("Cache-Control", "private")
 		return c.Next()
 	}
 }

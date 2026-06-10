@@ -48,6 +48,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			c.Set(credentialKey, result.Credential)
 			c.Set(receiptKey, result.Receipt)
 			c.Response().Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+			c.Response().Header().Set("Cache-Control", "private")
 			return next(c)
 		}
 	}

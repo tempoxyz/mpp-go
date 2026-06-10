@@ -49,6 +49,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		c.Set(credentialKey, result.Credential)
 		c.Set(receiptKey, result.Receipt)
 		c.Writer.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		c.Header("Cache-Control", "private")
 		c.Next()
 	}
 }
