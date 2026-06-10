@@ -2,7 +2,6 @@ package fiberadapter
 
 import (
 	"encoding/json"
-	"strings"
 
 	fiberfw "github.com/gofiber/fiber/v2"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -50,18 +49,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.Locals(credentialKey, result.Credential)
 		c.Locals(receiptKey, result.Receipt)
 		c.Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
-		appendVary(c, "Authorization")
+		c.Set("Cache-Control", "private")
 		return c.Next()
 	}
-}
-
-func appendVary(c *fiberfw.Ctx, value string) {
-	for _, part := range strings.Split(c.GetRespHeader("Vary"), ",") {
-		if strings.EqualFold(strings.TrimSpace(part), value) {
-			return
-		}
-	}
-	c.Append("Vary", value)
 }
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
