@@ -65,6 +65,10 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {
 	ctx := ContextWithPayment(r.Context(), credential, receipt)
 
+	// Mark the paid response as private so shared caches never serve a
+	// Payment-Receipt to a different client. This mirrors the MPP spec
+	// (mpp.dev/protocol) and the rust reference implementation.
+	w.Header().Set("Cache-Control", "private")
 	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
 
 	next.ServeHTTP(w, r.WithContext(ctx))
