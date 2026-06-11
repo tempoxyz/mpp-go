@@ -36,27 +36,34 @@ func TestProofHelpers(t *testing.T) {
 		return
 	}
 
-	hash1, err := ProofTypedDataHash(42431, "challenge-1", "api.example.com")
+	hash1, err := ProofTypedDataHash(42431, address, "challenge-1", "api.example.com")
 	if !assert.NoErrorf(t, err,
 		"ProofTypedDataHash() error = %v", err) {
 		return
 	}
 
-	hash2, err := ProofTypedDataHash(42431, "challenge-1", "api.example.com")
+	hash2, err := ProofTypedDataHash(42431, address, "challenge-1", "api.example.com")
 	if !assert.NoErrorf(t, err,
 		"ProofTypedDataHash() repeat error = %v", err) {
 		return
 	}
 
-	hash3, err := ProofTypedDataHash(42431, "challenge-2", "api.example.com")
+	hash3, err := ProofTypedDataHash(42431, address, "challenge-2", "api.example.com")
 	if !assert.NoErrorf(t, err,
 		"ProofTypedDataHash() different challenge error = %v", err) {
 		return
 	}
 
-	hash4, err := ProofTypedDataHash(42431, "challenge-1", "other.example.com")
+	hash4, err := ProofTypedDataHash(42431, address, "challenge-1", "other.example.com")
 	if !assert.NoErrorf(t, err,
 		"ProofTypedDataHash() different realm error = %v", err) {
+		return
+	}
+
+	otherAccount := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	hash5, err := ProofTypedDataHash(42431, otherAccount, "challenge-1", "api.example.com")
+	if !assert.NoErrorf(t, err,
+		"ProofTypedDataHash() different account error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, hash2, hash1,
@@ -72,7 +79,11 @@ func TestProofHelpers(t *testing.T) {
 		"hash1 = %s, want different hash from hash4 %s", hash1.Hex(), hash4.Hex()) {
 		return
 	}
-
+	// Wallet binding: a different payer account yields a different digest.
+	if !assert.NotEqualf(t, hash5, hash1,
+		"hash1 = %s, want different hash from hash5 %s", hash1.Hex(), hash5.Hex()) {
+		return
+	}
 }
 
 func TestParseHexHelpersAndClientConstruction(t *testing.T) {
