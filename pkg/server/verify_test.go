@@ -199,6 +199,44 @@ func TestVerifyOrChallenge_RejectsMismatchedBodyDigest(t *testing.T) {
 	}
 }
 
+func TestVerifyOrChallenge_ReissuesChallengeForLegacyCredentialOnBodyRequest(t *testing.T) {
+	request := map[string]any{"amount": "100"}
+	body := []byte(`{"query":"paid"}`)
+	challenge := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+		mpp.WithExpires(mpp.Expires.Minutes(5)),
+	)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request:       request,
+		Body:          body,
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+		Expires:       challenge.Expires,
+	})
+	if !assert.NoErrorf(t, err,
+		"VerifyOrChallenge() error = %v", err) {
+		return
+	}
+	if !assert.NotNilf(t, result.Challenge,
+		"expected fresh body-digest challenge, got %#v", result) {
+		return
+	}
+	assert.Nil(t, result.Receipt)
+	assert.Equal(t, mpp.BodyDigest.Compute(body), result.Challenge.Digest)
+}
+
 func TestVerifyOrChallenge_ExpiredDigestCredentialReturnsPaymentExpired(t *testing.T) {
 	request := map[string]any{"amount": "100"}
 	challenge := mpp.NewChallenge(

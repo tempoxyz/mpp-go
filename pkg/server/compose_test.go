@@ -205,6 +205,28 @@ func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
 
 }
 
+func TestComposeMiddlewareAutoScopesResourceAndQuery(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL+"/cart/123?view=full")
+	challenge := findChallenge(t, resp, "alpha")
+	resp.Body.Close()
+
+	scope, ok := challenge.Request["_mppx_scope"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/cart/123", scope["resource"])
+	assert.Equal(t, "view=full", scope["query"])
+
+	paid := payWith(t, srv.URL+"/cart/456?view=full", challenge)
+	defer paid.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, paid.StatusCode)
+}
+
 func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)

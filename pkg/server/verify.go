@@ -172,6 +172,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			"credential opaque metadata does not match this route's requirements",
 		)
 	}
+	if params.Body != nil && echoed.Digest == "" {
+		return &VerifyResult{Challenge: challenge}, nil
+	}
 	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
 		return nil, err
 	}
