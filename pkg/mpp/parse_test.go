@@ -307,6 +307,16 @@ func TestParseChallenge(t *testing.T) {
 			wantErr: `invalid challenge method`,
 		},
 		{
+			name:    "invalid underscore method",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo_pay", intent="charge", request="e30"`,
+			wantErr: `invalid challenge method`,
+		},
+		{
+			name:    "invalid dotted method",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo.pay", intent="charge", request="e30"`,
+			wantErr: `invalid challenge method`,
+		},
+		{
 			name:    "duplicate auth params",
 			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", intent="session", request="e30"`,
 			wantErr: `duplicate auth-param`,
@@ -440,6 +450,16 @@ func TestParseCredential(t *testing.T) {
 		{
 			name:    "invalid punctuated method",
 			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo-pay", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
+			wantErr: `invalid credential challenge method`,
+		},
+		{
+			name:    "invalid underscore method",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo_pay", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
+			wantErr: `invalid credential challenge method`,
+		},
+		{
+			name:    "invalid dotted method",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo.pay", "intent": "charge", "request": "e30"}, "payload": map[string]any{}}),
 			wantErr: `invalid credential challenge method`,
 		},
 		{

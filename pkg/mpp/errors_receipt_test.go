@@ -2,11 +2,12 @@ package mpp
 
 import (
 	"errors"
-	"github.com/stretchr/testify/assert"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPaymentErrorConstructors(t *testing.T) {
@@ -202,50 +203,29 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 		"timestamp": "2026-01-01T00:00:00Z",
 		"reference": "ref-123",
 	}))
-	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt status"),
-		"ParseReceipt() error = %v, want invalid status error", err) {
-		return
-	}
+	require.ErrorContains(t, err, "invalid receipt status")
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{
 		"status": "success",
 	}))
-	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "receipt missing reference"),
-		"ParseReceipt() error = %v, want missing reference error", err) {
-		return
-	}
+	require.ErrorContains(t, err, "receipt missing reference")
 
-	_, err = ParseReceipt(b64EncodeAny(map[string]any{
-		"status":    "success",
-		"method":    "Tempo",
-		"timestamp": "2026-01-01T00:00:00Z",
-		"reference": "ref-123",
-	}))
-	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt method"),
-		"ParseReceipt() error = %v, want invalid method error", err) {
-		return
-	}
-
-	_, err = ParseReceipt(b64EncodeAny(map[string]any{
-		"status":    "success",
-		"method":    "tempo2",
-		"timestamp": "2026-01-01T00:00:00Z",
-		"reference": "ref-123",
-	}))
-	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt method"),
-		"ParseReceipt() error = %v, want invalid method error", err) {
-		return
-	}
-
-	_, err = ParseReceipt(b64EncodeAny(map[string]any{
-		"status":    "success",
-		"method":    "tempo.pay",
-		"timestamp": "2026-01-01T00:00:00Z",
-		"reference": "ref-123",
-	}))
-	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "invalid receipt method"),
-		"ParseReceipt() error = %v, want invalid method error", err) {
-		return
+	for _, method := range []string{
+		"Tempo",
+		"tempo2",
+		"tempo-pay",
+		"tempo_pay",
+		"tempo.pay",
+	} {
+		t.Run(method, func(t *testing.T) {
+			_, err := ParseReceipt(b64EncodeAny(map[string]any{
+				"status":    "success",
+				"method":    method,
+				"timestamp": "2026-01-01T00:00:00Z",
+				"reference": "ref-123",
+			}))
+			require.ErrorContains(t, err, "invalid receipt method")
+		})
 	}
 
 }
