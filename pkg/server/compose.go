@@ -19,9 +19,8 @@ type ComposeConfig struct {
 
 // composedEntry is a frozen, pre-resolved config entry used at request time.
 type composedEntry struct {
-	mpp     *Mpp
-	params  ChargeParams
-	request map[string]any
+	mpp    *Mpp
+	params ChargeParams
 }
 
 // ComposeMiddleware creates an http.Handler middleware that supports multiple
@@ -51,14 +50,12 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 		if cfg.Mpp.realm != realm {
 			panic(fmt.Sprintf("server: ComposeConfig[%d] realm %q differs from [0] realm %q", i, cfg.Mpp.realm, realm))
 		}
-		request, err := cfg.Mpp.buildChargeRequest(cfg.Params)
-		if err != nil {
+		if _, err := cfg.Mpp.buildChargeRequest(cfg.Params); err != nil {
 			panic(fmt.Sprintf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err))
 		}
 		entries[i] = composedEntry{
-			mpp:     cfg.Mpp,
-			params:  cfg.Params,
-			request: request,
+			mpp:    cfg.Mpp,
+			params: cfg.Params,
 		}
 	}
 
@@ -66,10 +63,16 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			paymentAuth := mpp.FindPaymentAuthorization(auth)
+			body, err := ReadRequestBody(r)
+			if err != nil {
+				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
+				return
+			}
+			scope := ScopeFromHTTPRequest(r, "")
 
 			// No credential — fan out and merge all challenges.
 			if paymentAuth == "" {
-				composeChallenges(w, r, entries, realm)
+				composeChallenges(w, r, entries, realm, body, scope)
 				return
 			}
 
@@ -80,7 +83,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 				return
 			}
 
-			entry, ok, err := findMatchingEntry(entries, cred)
+			entry, ok, err := findMatchingEntry(entries, cred, scope)
 			if err != nil {
 				WritePaymentError(w, err)
 				return
@@ -92,6 +95,12 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 
 			params := entry.params
 			params.Authorization = paymentAuth
+			if len(scope) > 0 {
+				params.MppxScope = scope
+			}
+			if len(body) > 0 {
+				params.Body = body
+			}
 
 			result, err := entry.mpp.Charge(r.Context(), params)
 			if err != nil {
@@ -110,11 +119,17 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 
 // composeChallenges issues a 402 with all configured challenges merged into
 // separate WWW-Authenticate header values.
-func composeChallenges(w http.ResponseWriter, r *http.Request, entries []composedEntry, realm string) {
+func composeChallenges(w http.ResponseWriter, r *http.Request, entries []composedEntry, realm string, body []byte, scope map[string]string) {
 	var challenges []*mpp.Challenge
 	for _, entry := range entries {
 		params := entry.params
 		params.Authorization = ""
+		if len(scope) > 0 {
+			params.MppxScope = scope
+		}
+		if len(body) > 0 {
+			params.Body = body
+		}
 
 		result, err := entry.mpp.Charge(r.Context(), params)
 		if err != nil {
@@ -155,7 +170,7 @@ func composeChallenges(w http.ResponseWriter, r *http.Request, entries []compose
 // findMatchingEntry selects the entry whose method, intent, and canonical
 // request match the credential. This allows multiple entries with the same
 // method+intent but different amounts, currencies, or opaque metadata.
-func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedEntry, bool, error) {
+func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[string]string) (composedEntry, bool, error) {
 	echoedRequest, err := echoedRequestMap(cred)
 	if err != nil {
 		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err))
@@ -170,7 +185,11 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedE
 		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
 			continue
 		}
-		if mpp.JSONEqual(echoedRequest, entry.request) && reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
+		request, err := entry.scopedRequest(scope)
+		if err != nil {
+			return composedEntry{}, false, err
+		}
+		if mpp.JSONEqual(echoedRequest, request) && reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
 			return entry, true, nil
 		}
 	}
@@ -188,4 +207,12 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential) (composedE
 	}
 
 	return composedEntry{}, false, nil
+}
+
+func (entry composedEntry) scopedRequest(scope map[string]string) (map[string]any, error) {
+	params := entry.params
+	if len(scope) > 0 {
+		params.MppxScope = scope
+	}
+	return entry.mpp.buildChargeRequest(params)
 }

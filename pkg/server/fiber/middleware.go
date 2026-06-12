@@ -32,6 +32,10 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 	return func(c *fiberfw.Ctx) error {
 		chargeParams := params
 		chargeParams.Authorization = c.Get("Authorization")
+		chargeParams.MppxScope = fiberScope(c)
+		if body := c.Body(); len(body) > 0 {
+			chargeParams.Body = append([]byte(nil), body...)
+		}
 
 		result, err := m.Charge(c.UserContext(), chargeParams)
 		if err != nil {
@@ -51,6 +55,23 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
 		return c.Next()
 	}
+}
+
+func fiberScope(c *fiberfw.Ctx) map[string]string {
+	scope := map[string]string{}
+	if route := c.Route(); route != nil && route.Path != "" {
+		scope["route"] = route.Path
+	}
+	if path := c.Path(); path != "" {
+		scope["resource"] = path
+	}
+	if query := string(c.Request().URI().QueryString()); query != "" {
+		scope["query"] = query
+	}
+	if len(scope) == 0 {
+		return nil
+	}
+	return scope
 }
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.

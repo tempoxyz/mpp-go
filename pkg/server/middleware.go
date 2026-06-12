@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -14,6 +17,32 @@ const (
 	credentialKey contextKey = iota
 	receiptKey
 )
+
+// ScopeFromHTTPRequest returns the framework scope bound into charge requests.
+func ScopeFromHTTPRequest(r *http.Request, route string) map[string]string {
+	scope := map[string]string{}
+	if route == "" {
+		route = r.Pattern
+	}
+	if method, path, ok := strings.Cut(route, " "); ok && method != "" && path != "" {
+		route = path
+	}
+	if route != "" {
+		scope["route"] = route
+	}
+	if r.URL != nil {
+		if r.URL.Path != "" {
+			scope["resource"] = r.URL.Path
+		}
+		if r.URL.RawQuery != "" {
+			scope["query"] = r.URL.RawQuery
+		}
+	}
+	if len(scope) == 0 {
+		return nil
+	}
+	return scope
+}
 
 // ContextWithPayment stores the verified payment objects on a request context.
 func ContextWithPayment(ctx context.Context, credential *mpp.Credential, receipt *mpp.Receipt) context.Context {
@@ -45,6 +74,15 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			chargeParams := params
 			chargeParams.Authorization = r.Header.Get("Authorization")
+			chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
+			body, err := ReadRequestBody(r)
+			if err != nil {
+				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
+				return
+			}
+			if len(body) > 0 {
+				chargeParams.Body = body
+			}
 
 			result, err := m.Charge(r.Context(), chargeParams)
 			if err != nil {
@@ -60,6 +98,20 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			serveVerified(next, w, r, result.Credential, result.Receipt)
 		})
 	}
+}
+
+// ReadRequestBody reads and restores r.Body so middleware can verify body digests
+// without consuming the body before the protected handler runs.
+func ReadRequestBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
 }
 
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {

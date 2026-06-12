@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,6 +93,120 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
 		return
 	}
+}
+
+func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
+	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "paid")
+	}))
+	mux := http.NewServeMux()
+	mux.Handle("GET /paid/{id}", handler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	challengeResponse, err := http.Get(server.URL + "/paid/one?view=full")
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	scope, ok := challenge.Request["_mppx_scope"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/paid/{id}", scope["route"])
+	assert.Equal(t, "/paid/one", scope["resource"])
+	assert.Equal(t, "view=full", scope["query"])
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	paidRequest, err := http.NewRequest(http.MethodGet, server.URL+"/paid/two?view=full", nil)
+	require.NoError(t, err)
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse, err := http.DefaultClient.Do(paidRequest)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	assert.NotEqual(t, http.StatusOK, paidResponse.StatusCode)
+	assert.Empty(t, paidResponse.Header.Get("Payment-Receipt"))
+}
+
+func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
+	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, "paid")
+	}))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	const originalBody = `{"query":"paid"}`
+	challengeRequest, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(originalBody))
+	require.NoError(t, err)
+
+	challengeResponse, err := http.DefaultClient.Do(challengeRequest)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	retry, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{"query":"tampered"}`))
+	require.NoError(t, err)
+	retry.Header.Set("Authorization", credential.ToAuthorization())
+
+	paidResponse, err := http.DefaultClient.Do(retry)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, paidResponse.StatusCode)
+}
+
+func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
+	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, string(body))
+	}))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	const originalBody = `{"query":"paid"}`
+	challengeRequest, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(originalBody))
+	require.NoError(t, err)
+
+	challengeResponse, err := http.DefaultClient.Do(challengeRequest)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	retry, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(originalBody))
+	require.NoError(t, err)
+	retry.Header.Set("Authorization", credential.ToAuthorization())
+
+	paidResponse, err := http.DefaultClient.Do(retry)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	require.Equal(t, http.StatusOK, paidResponse.StatusCode)
+	body, err := io.ReadAll(paidResponse.Body)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(body))
 }
 
 func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
