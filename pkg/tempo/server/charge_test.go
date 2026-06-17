@@ -303,7 +303,7 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 		"NewSigner(access key) error = %v", err) {
 		return
 	}
-	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID, challenge.Realm)
+	proofHash, err := tempo.ProofTypedDataHash(42431, rootSigner.Address(), challenge.ID, challenge.Realm)
 	if !assert.NoErrorf(t, err,
 		"ProofTypedDataHash() error = %v", err) {
 		return
@@ -376,7 +376,7 @@ func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
 		"NewSigner(access key) error = %v", err) {
 		return
 	}
-	proofHash, err := tempo.ProofTypedDataHash(42431, challenge.ID, challenge.Realm)
+	proofHash, err := tempo.ProofTypedDataHash(42431, rootSigner.Address(), challenge.ID, challenge.Realm)
 	if !assert.NoErrorf(t, err,
 		"ProofTypedDataHash() error = %v", err) {
 		return

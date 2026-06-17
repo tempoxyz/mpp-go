@@ -216,7 +216,9 @@ func (i *Intent) verifyProof(
 	if source.chainID != chainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	proofHash, err := tempo.ProofTypedDataHash(chainID, credential.Challenge.ID, credential.Challenge.Realm)
+	// Bind the digest to the claimed payer so a proof cannot be replayed
+	// against a different account (e.g. via a shared access key).
+	proofHash, err := tempo.ProofTypedDataHash(chainID, common.HexToAddress(source.address), credential.Challenge.ID, credential.Challenge.Realm)
 	if err != nil {
 		return nil, mpp.ErrVerificationFailed("failed to construct proof payload")
 	}
@@ -741,6 +743,14 @@ func recoverProofSigner(proofHash common.Hash, encoded string, source common.Add
 		}
 		if rootAccount != source {
 			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
+		}
+		// Normalize the inner recovery id to 0/1, as RecoverAddress requires
+		// (the encoded byte may be a legacy 27/28 v value).
+		if innerSignature.YParity >= 27 {
+			innerSignature.YParity -= 27
+		}
+		if innerSignature.YParity > 1 {
+			return common.Address{}, fmt.Errorf("invalid recovery id")
 		}
 		payload := make([]byte, 0, 1+len(proofHash.Bytes())+len(rootAccount.Bytes()))
 		payload = append(payload, keychain.KeychainSignatureType)

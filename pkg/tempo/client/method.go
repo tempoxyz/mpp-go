@@ -246,7 +246,8 @@ func (m *Method) buildTransfer(
 }
 
 func (m *Method) signProof(chainID int64, challengeID, realm string) (string, error) {
-	hash, err := tempo.ProofTypedDataHash(chainID, challengeID, realm)
+	// Bind the proof to the signing wallet, echoed as the credential source.
+	hash, err := tempo.ProofTypedDataHash(chainID, m.signer.Address(), challengeID, realm)
 	if err != nil {
 		return "", fmt.Errorf("tempo client: build proof payload: %w", err)
 	}
