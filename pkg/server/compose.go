@@ -135,7 +135,7 @@ func composeChallenges(w http.ResponseWriter, r *http.Request, entries []compose
 	for _, challenge := range challenges {
 		header, err := challenge.ToAuthenticateStrict(realm)
 		if err != nil {
-			WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, err.Error()))
+			WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
 			return
 		}
 		headers = append(headers, header)

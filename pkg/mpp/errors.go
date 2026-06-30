@@ -13,15 +13,15 @@ var ErrVerification = errors.New("payment verification failed")
 type ErrorType string
 
 const (
-	ErrorTypePaymentRequired     ErrorType = "https://mpp.dev/errors/payment-required"
-	ErrorTypeMalformedCredential ErrorType = "https://mpp.dev/errors/malformed-credential"
-	ErrorTypeInvalidChallenge    ErrorType = "https://mpp.dev/errors/invalid-challenge"
-	ErrorTypeVerificationFailed  ErrorType = "https://mpp.dev/errors/verification-failed"
-	ErrorTypePaymentExpired      ErrorType = "https://mpp.dev/errors/payment-expired"
+	ErrorTypePaymentRequired     ErrorType = "https://paymentauth.org/problems/payment-required"
+	ErrorTypeMalformedCredential ErrorType = "https://paymentauth.org/problems/malformed-credential"
+	ErrorTypeInvalidChallenge    ErrorType = "https://paymentauth.org/problems/invalid-challenge"
+	ErrorTypeVerificationFailed  ErrorType = "https://paymentauth.org/problems/verification-failed"
+	ErrorTypePaymentExpired      ErrorType = "https://paymentauth.org/problems/payment-expired"
 	ErrorTypeInvalidPayload      ErrorType = "https://mpp.dev/errors/invalid-payload"
 	ErrorTypeBadRequest          ErrorType = "https://mpp.dev/errors/bad-request"
-	ErrorTypePaymentInsufficient ErrorType = "https://mpp.dev/errors/payment-insufficient"
-	ErrorTypeMethodUnsupported   ErrorType = "https://mpp.dev/errors/method-unsupported"
+	ErrorTypePaymentInsufficient ErrorType = "https://paymentauth.org/problems/payment-insufficient"
+	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
 )
 
 // Title returns the default RFC 9457 title for the error type.
@@ -53,7 +53,7 @@ func (t ErrorType) Title() string {
 // Status returns the default HTTP status for the error type.
 func (t ErrorType) Status() int {
 	switch t {
-	case ErrorTypePaymentRequired, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypePaymentInsufficient:
+	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypePaymentInsufficient:
 		return http.StatusPaymentRequired
 	default:
 		return http.StatusBadRequest
@@ -113,12 +113,12 @@ func ErrPaymentRequired(realm, description string) *PaymentError {
 	return newPaymentError(ErrorTypePaymentRequired, detail)
 }
 
-// ErrMalformedCredential returns a 400 error for unparseable credentials.
+// ErrMalformedCredential returns a 402 error for unparseable credentials.
 func ErrMalformedCredential(reason string) *PaymentError {
 	return newPaymentError(ErrorTypeMalformedCredential, reason)
 }
 
-// ErrInvalidChallenge returns a 400 error for invalid or tampered challenges.
+// ErrInvalidChallenge returns a 402 error for invalid or tampered challenges.
 func ErrInvalidChallenge(challengeID, reason string) *PaymentError {
 	return newPaymentError(ErrorTypeInvalidChallenge, fmt.Sprintf("challenge %s: %s", challengeID, reason))
 }

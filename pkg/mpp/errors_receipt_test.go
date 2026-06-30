@@ -37,14 +37,14 @@ func TestPaymentErrorConstructors(t *testing.T) {
 			name:   "malformed credential",
 			err:    ErrMalformedCredential("bad credential"),
 			want:   ErrorTypeMalformedCredential,
-			status: http.StatusBadRequest,
+			status: http.StatusPaymentRequired,
 			detail: "bad credential",
 		},
 		{
 			name:   "invalid challenge",
 			err:    ErrInvalidChallenge("challenge-1", "tampered"),
 			want:   ErrorTypeInvalidChallenge,
-			status: http.StatusBadRequest,
+			status: http.StatusPaymentRequired,
 			detail: "challenge challenge-1: tampered",
 		},
 		{
@@ -109,6 +109,30 @@ func TestPaymentErrorConstructors(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestProblemTypeURIsUseCanonicalBase(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		got  ErrorType
+		want string
+	}{
+		{got: ErrorTypePaymentRequired, want: "https://paymentauth.org/problems/payment-required"},
+		{got: ErrorTypeMalformedCredential, want: "https://paymentauth.org/problems/malformed-credential"},
+		{got: ErrorTypeInvalidChallenge, want: "https://paymentauth.org/problems/invalid-challenge"},
+		{got: ErrorTypeVerificationFailed, want: "https://paymentauth.org/problems/verification-failed"},
+		{got: ErrorTypePaymentExpired, want: "https://paymentauth.org/problems/payment-expired"},
+		{got: ErrorTypePaymentInsufficient, want: "https://paymentauth.org/problems/payment-insufficient"},
+		{got: ErrorTypeMethodUnsupported, want: "https://paymentauth.org/problems/method-unsupported"},
+	}
+
+	for _, tt := range tests {
+		if !assert.Equalf(t, tt.want, string(tt.got),
+			"problem type URI = %q, want %q", tt.got, tt.want) {
+			return
+		}
 	}
 }
 

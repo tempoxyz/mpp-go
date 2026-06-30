@@ -74,7 +74,7 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
 	header, err := challenge.ToAuthenticateStrict(realm)
 	if err != nil {
-		WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, err.Error()))
+		WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
 		return
 	}
 

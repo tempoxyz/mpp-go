@@ -406,9 +406,9 @@ func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *
 
 	defer paid.Body.Close()
 
-	if paid.StatusCode != http.StatusBadRequest {
+	if paid.StatusCode != http.StatusPaymentRequired {
 		body, _ := io.ReadAll(paid.Body)
-		assert.Failf(t, "", "status = %d, want %d; body = %s", paid.StatusCode, http.StatusBadRequest, body)
+		assert.Failf(t, "", "status = %d, want %d; body = %s", paid.StatusCode, http.StatusPaymentRequired, body)
 		return
 	}
 
@@ -489,7 +489,7 @@ func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeInvalidChallenge), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
 }
 
 func TestComposeMiddleware_PanicsOnEmptyConfigs(t *testing.T) {

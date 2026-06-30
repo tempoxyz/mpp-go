@@ -146,5 +146,5 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(challengeResponse.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeInvalidChallenge), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
 }
