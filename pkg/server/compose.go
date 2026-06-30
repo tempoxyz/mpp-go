@@ -62,7 +62,11 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
-			paymentAuth := mpp.FindPaymentAuthorization(auth)
+			paymentAuth, err := mpp.FindPaymentAuthorizationStrict(auth)
+			if err != nil {
+				WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
+				return
+			}
 			body, err := ReadRequestBody(r)
 			if err != nil {
 				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))

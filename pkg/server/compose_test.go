@@ -474,6 +474,42 @@ func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing
 	}
 }
 
+func TestComposeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
+	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
+		ComposeConfig{Mpp: methodB, Params: ChargeParams{Amount: "2.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	betaChallenge := findChallenge(t, resp, "beta")
+	resp.Body.Close()
+
+	credential := &mpp.Credential{
+		Challenge: betaChallenge.ToEcho(),
+		Source:    "did:key:z6Mktest",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc"},
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", credential.ToAuthorization()+", "+credential.ToAuthorization())
+
+	paid, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer paid.Body.Close()
+
+	assert.Equal(t, http.StatusBadRequest, paid.StatusCode)
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(paid.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+}
+
 func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *testing.T) {
 	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 

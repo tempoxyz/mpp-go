@@ -144,6 +144,16 @@ func TestFindPaymentAuthorization(t *testing.T) {
 	}
 }
 
+func TestFindPaymentAuthorizationStrictRejectsMultiplePaymentCredentials(t *testing.T) {
+	t.Parallel()
+
+	_, err := FindPaymentAuthorizationStrict("Bearer token, Payment abc123, Payment def456")
+	if !assert.Error(t, err) {
+		return
+	}
+	assert.Contains(t, err.Error(), "multiple Payment credentials")
+}
+
 func TestIsMethodName(t *testing.T) {
 	t.Parallel()
 
@@ -401,6 +411,11 @@ func TestParseCredential(t *testing.T) {
 			name:   "merged authorization header",
 			header: `Digest realm="alpha,beta", nonce="123", ` + credential.ToAuthorization(),
 			want:   credential,
+		},
+		{
+			name:    "multiple payment credentials",
+			header:  credential.ToAuthorization() + ", " + credential.ToAuthorization(),
+			wantErr: `multiple Payment credentials`,
 		},
 		{
 			name:    "missing payment scheme",

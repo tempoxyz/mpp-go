@@ -325,7 +325,10 @@ func ParseCredential(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 
-	header = FindPaymentAuthorization(header)
+	header, err := FindPaymentAuthorizationStrict(header)
+	if err != nil {
+		return nil, err
+	}
 	if header == "" {
 		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}

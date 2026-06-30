@@ -96,7 +96,10 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 
 	// 2. Extract the Payment credential from Authorization.
-	authHeader := mpp.FindPaymentAuthorization(params.Authorization)
+	authHeader, err := mpp.FindPaymentAuthorizationStrict(params.Authorization)
+	if err != nil {
+		return nil, mpp.ErrBadRequest(err.Error())
+	}
 	if authHeader == "" {
 		return &VerifyResult{Challenge: challenge}, nil
 	}
