@@ -615,20 +615,30 @@ func expectedTransfers(request tempo.ChargeRequest) []expectedTransfer {
 
 func decodeCallTransfer(data []byte) (decodedTransfer, bool) {
 	dataHex := strings.TrimPrefix(strings.ToLower(common.Bytes2Hex(data)), "0x")
-	if len(dataHex) < 8+64+64 {
+	if len(dataHex) < 8 {
+		return decodedTransfer{}, false
+	}
+	selector := dataHex[:8]
+	switch selector {
+	case tempo.TransferSelector:
+		if len(dataHex) != tempo.TransferCalldataLength*2 {
+			return decodedTransfer{}, false
+		}
+	case tempo.TransferWithMemoSelector:
+		if len(dataHex) != tempo.TransferWithMemoCalldataLength*2 {
+			return decodedTransfer{}, false
+		}
+	default:
 		return decodedTransfer{}, false
 	}
 	decoded := decodedTransfer{
 		recipient: common.HexToAddress("0x" + dataHex[8+24:8+64]).Hex(),
 		amount:    new(big.Int).SetBytes(common.FromHex("0x" + dataHex[72:136])).String(),
 	}
-	switch dataHex[:8] {
+	switch selector {
 	case tempo.TransferSelector:
 		return decoded, true
 	case tempo.TransferWithMemoSelector:
-		if len(dataHex) < 8+64+64+64 {
-			return decodedTransfer{}, false
-		}
 		decoded.hasMemo = true
 		decoded.memo = "0x" + dataHex[136:200]
 		return decoded, true

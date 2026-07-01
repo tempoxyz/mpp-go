@@ -35,6 +35,37 @@ const (
 	testReceiptHash = "0xabc123"
 )
 
+func TestDecodeCallTransferRejectsPaddedCalldata(t *testing.T) {
+	t.Parallel()
+
+	amount := big.NewInt(1000000)
+	transferData := common.FromHex(tempo.EncodeTransfer(testRecipient, amount))
+	if _, ok := decodeCallTransfer(transferData); !assert.True(t, ok,
+		"decodeCallTransfer() = false, want true for exact transfer calldata") {
+		return
+	}
+	if _, ok := decodeCallTransfer(append(append([]byte(nil), transferData...), 0x01)); !assert.False(t, ok,
+		"decodeCallTransfer() = true, want false for padded transfer calldata") {
+		return
+	}
+
+	memo := "0x" + strings.Repeat("ab", 32)
+	transferWithMemo, err := tempo.EncodeTransferWithMemo(testRecipient, amount, memo)
+	if !assert.NoError(t, err,
+		"EncodeTransferWithMemo() returned an unexpected error") {
+		return
+	}
+	transferWithMemoData := common.FromHex(transferWithMemo)
+	if _, ok := decodeCallTransfer(transferWithMemoData); !assert.True(t, ok,
+		"decodeCallTransfer() = false, want true for exact transferWithMemo calldata") {
+		return
+	}
+	if _, ok := decodeCallTransfer(append(append([]byte(nil), transferWithMemoData...), 0x01)); !assert.False(t, ok,
+		"decodeCallTransfer() = true, want false for padded transferWithMemo calldata") {
+		return
+	}
+}
+
 type mockRPC struct {
 	chainID          uint64
 	nonce            uint64

@@ -37,10 +37,13 @@ func EncodeTransferWithMemo(recipient string, amount *big.Int, memo string) (str
 // MatchTransferCalldata reports whether calldata satisfies the canonical Tempo charge transfer.
 func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challengeID string) bool {
 	dataHex = strings.TrimPrefix(strings.ToLower(dataHex), "0x")
-	if len(dataHex) < 8+64+64 {
+	if len(dataHex) < 8 {
 		return false
 	}
 	selector := dataHex[:8]
+	if selector != TransferWithMemoSelector || len(dataHex) != TransferWithMemoCalldataLength*2 {
+		return false
+	}
 	toAddress := "0x" + dataHex[8+24:8+64]
 	amount := new(big.Int)
 	amount.SetString(dataHex[72:136], 16)
@@ -48,21 +51,11 @@ func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challen
 		return false
 	}
 	expectedMemo := request.MethodDetails.Memo
-	switch selector {
-	case TransferSelector:
-		return false
-	case TransferWithMemoSelector:
-		if len(dataHex) < 8+64+64+64 {
-			return false
-		}
-		memo := "0x" + dataHex[136:200]
-		if expectedMemo != "" {
-			return strings.EqualFold(memo, expectedMemo)
-		}
-		return VerifyAttributionServer(memo, realm) && VerifyAttributionChallenge(memo, challengeID)
-	default:
-		return false
+	memo := "0x" + dataHex[136:200]
+	if expectedMemo != "" {
+		return strings.EqualFold(memo, expectedMemo)
 	}
+	return VerifyAttributionServer(memo, realm) && VerifyAttributionChallenge(memo, challengeID)
 }
 
 func padAddress(value string) string {
