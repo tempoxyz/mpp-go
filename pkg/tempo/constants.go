@@ -22,6 +22,10 @@ const (
 	TransferSelector = "a9059cbb"
 	// TransferWithMemoSelector is the Tempo transfer-with-memo selector.
 	TransferWithMemoSelector = "95777d59"
+	// TransferCalldataLength is the exact byte length of transfer(address,uint256).
+	TransferCalldataLength = 4 + 32 + 32
+	// TransferWithMemoCalldataLength is the exact byte length of transferWithMemo(address,uint256,bytes32).
+	TransferWithMemoCalldataLength = 4 + 32 + 32 + 32
 	// MainnetUSDCAddress is Circle's USDC contract on Tempo mainnet.
 	MainnetUSDCAddress = "0x20C000000000000000000000b9537d11c60E8b50"
 )

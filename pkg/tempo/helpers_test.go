@@ -191,6 +191,10 @@ func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
 		"MatchTransferCalldata() = false, want true for explicit memo") {
 		return
 	}
+	if !assert.False(t, MatchTransferCalldata(calldata+"01", explicitRequest, "ignored.example.com", "ignored-challenge"),
+		"MatchTransferCalldata() = true, want false for padded explicit memo calldata") {
+		return
+	}
 
 	implicitRequest := explicitRequest
 	implicitRequest.MethodDetails.Memo = ""
@@ -202,6 +206,10 @@ func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
 	}
 	if !assert.True(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-1"),
 		"MatchTransferCalldata() = false, want true for attribution memo") {
+		return
+	}
+	if !assert.False(t, MatchTransferCalldata(attributedCalldata+"01", implicitRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = true, want false for padded attribution memo calldata") {
 		return
 	}
 	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "other.example.com", "challenge-1"),
