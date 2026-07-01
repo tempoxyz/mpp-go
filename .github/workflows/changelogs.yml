@@ -4,12 +4,12 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+permissions:
+  contents: read
+
 jobs:
   changelogs:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       # fetch-depth: 0 is required so the action can `git diff origin/main...HEAD`
       # against the base branch.
@@ -17,11 +17,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      # NOTE: `ai: 'amp -x'` and the `AMP_API_KEY` env are still intentionally
-      # omitted. The check action's AI path runs
-      # `curl -sSL https://changelogs.sh | sh`, which installs the upstream
-      # `wevm/changelogs-rs` binary — that binary does not yet ship Go
-      # ecosystem support, so the AI generation step would error out with
-      # `could not detect workspace`. Re-enable AI suggestions once a
-      # Go-aware binary is published to `wevm/changelogs-rs/releases`.
-      - uses: tempoxyz/changelogs/check@master
+      - name: Require changelog
+        shell: bash
+        run: |
+          changelogs=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- '.changelog/*.md' \
+            | grep -vE '(^|/)README\.md$' \
+            || true)
+
+          if [ -z "$changelogs" ]; then
+            echo "::error::Missing changelog entry under .changelog/*.md"
+            exit 1
+          fi
+
+          {
+            echo "Found changelog entries:"
+            echo "$changelogs"
+          } >> "$GITHUB_STEP_SUMMARY"
