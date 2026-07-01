@@ -1,5 +1,24 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.2.0`
+
+### Minor Changes
+
+- Bind server charge challenges to request bodies and framework route scope. (by @figtracer, [#55](https://github.com/tempoxyz/mpp-go/pull/55))
+
+### Patch Changes
+
+- Convert Go tests to use testify assertions. (by @BrendanRyan, [#48](https://github.com/tempoxyz/mpp-go/pull/48))
+- Run the pull request changelog check with read-only permissions so forked PRs can pass after adding a changelog. (by @BrendanRyan, [#71](https://github.com/tempoxyz/mpp-go/pull/71))
+- Reject credentials that omit `expires` when verifying challenges with the default expiry policy. (by @EfeBaranDurmaz, [#39](https://github.com/tempoxyz/mpp-go/pull/39))
+- Reject padded Tempo transfer calldata by requiring exact TIP-20 ABI lengths during shared calldata matching and server-side transaction validation. (by @BrendanRyan, [#70](https://github.com/tempoxyz/mpp-go/pull/70))
+- Align middleware invalid-challenge test expectations with the core problem details status code. (by @BrendanRyan, [#72](https://github.com/tempoxyz/mpp-go/pull/72))
+- Align spec-listed MPP Problem Details type URIs with the canonical `https://paymentauth.org/problems/` base URI, and return 402 for malformed credentials and invalid challenges. (by @PranjalPaliwal, [#67](https://github.com/tempoxyz/mpp-go/pull/67))
+- Reject requests that include multiple `Authorization: Payment` credentials instead of silently selecting the first credential. (by @PranjalPaliwal, [#66](https://github.com/tempoxyz/mpp-go/pull/66))
+- Mark paid server responses that include `Payment-Receipt` as `Cache-Control: private`. (by @EfeBaranDurmaz, [#37](https://github.com/tempoxyz/mpp-go/pull/37))
+- Wallet-bind Tempo zero-amount proofs to close cross-account replay. The EIP-712 `Proof` message now leads with the payer `account` address (then `challengeId`, `realm`) and the MPP domain version is `"3"`. Verifiers rebuild the digest from the credential `source`, so client and server must both use v3. `ProofTypedDataHash` now takes an `account common.Address`; `ProofTypedData` exposes the typed data.
+- Note: v3 is not yet interoperable with the mppx (TypeScript) SDK, which still uses v2 (`Proof = [challengeId, realm]`, no `account`). (by @stevencartavia, [#57](https://github.com/tempoxyz/mpp-go/pull/57))
+
 ## `github.com/tempoxyz/mpp-go@0.1.2`
 
 ### Patch Changes
