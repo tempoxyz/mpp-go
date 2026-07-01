@@ -66,6 +66,8 @@ type ChargeParams struct {
 	Recipient string
 	// ExternalID is copied into the request and echoed back in the Receipt.
 	ExternalID string
+	// Body is the actual request body to bind via the challenge digest.
+	Body any
 	// Expires overrides the default Challenge expiry.
 	Expires string
 	// Description is exposed in the server-generated Challenge.
@@ -84,6 +86,8 @@ type ChargeParams struct {
 	ChainID int
 	// Meta stores opaque Challenge metadata.
 	Meta map[string]string
+	// MppxScope binds framework route/resource/query context into the request.
+	MppxScope map[string]string
 }
 
 // ChargeResult is either a Challenge or a verified (Credential, Receipt) pair.
@@ -104,7 +108,12 @@ func (r *ChargeResult) IsChallenge() bool {
 // buildChargeRequest produces the canonical request map for a charge operation.
 func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
 	if builder, ok := m.method.(ChargeRequestBuilder); ok {
-		return builder.BuildChargeRequest(params)
+		request, err := builder.BuildChargeRequest(params)
+		if err != nil {
+			return nil, err
+		}
+		applyMppxScope(request, params.MppxScope)
+		return request, nil
 	}
 	request := map[string]any{
 		"amount":   params.Amount,
@@ -125,7 +134,15 @@ func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
 	if params.Memo != "" {
 		request["memo"] = params.Memo
 	}
+	applyMppxScope(request, params.MppxScope)
 	return request, nil
+}
+
+func applyMppxScope(request map[string]any, scope map[string]string) {
+	if len(scope) == 0 {
+		return
+	}
+	request["_mppx_scope"] = scope
 }
 
 // Charge handles a charge intent with human-readable amounts.
@@ -144,6 +161,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		Authorization: params.Authorization,
 		Intent:        intent,
 		Request:       request,
+		Body:          params.Body,
 		Realm:         m.realm,
 		SecretKey:     m.secretKey,
 		Method:        m.method.Name(),
