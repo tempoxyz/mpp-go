@@ -81,7 +81,7 @@ func fiberScope(c *fiberfw.Ctx) map[string]string {
 func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
 	header, err := challenge.ToAuthenticateStrict(realm)
 	if err != nil {
-		WritePaymentError(c, mpp.ErrInvalidChallenge(challenge.ID, err.Error()))
+		WritePaymentError(c, mpp.ErrBadRequest(err.Error()))
 		return
 	}
 
