@@ -187,7 +187,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	require.NoError(t, err)
 	defer paidResponse.Body.Close()
 
-	assert.Equal(t, http.StatusBadRequest, paidResponse.StatusCode)
+	assert.Equal(t, http.StatusPaymentRequired, paidResponse.StatusCode)
 }
 
 func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {

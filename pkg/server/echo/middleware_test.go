@@ -185,7 +185,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	paidResponse := httptest.NewRecorder()
 	e.ServeHTTP(paidResponse, paidRequest)
 
-	assert.Equal(t, http.StatusBadRequest, paidResponse.Code)
+	assert.Equal(t, http.StatusPaymentRequired, paidResponse.Code)
 }
 
 func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
