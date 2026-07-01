@@ -224,7 +224,7 @@ func TestComposeMiddlewareAutoScopesResourceAndQuery(t *testing.T) {
 
 	paid := payWith(t, srv.URL+"/cart/456?view=full", challenge)
 	defer paid.Body.Close()
-	assert.Equal(t, http.StatusBadRequest, paid.StatusCode)
+	assert.Equal(t, http.StatusPaymentRequired, paid.StatusCode)
 }
 
 func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
@@ -250,7 +250,7 @@ func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 
 	paid := payWithBody(t, srv.URL, betaChallenge, `{"query":"tampered"}`)
 	defer paid.Body.Close()
-	assert.Equal(t, http.StatusBadRequest, paid.StatusCode)
+	assert.Equal(t, http.StatusPaymentRequired, paid.StatusCode)
 }
 
 func TestComposeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
