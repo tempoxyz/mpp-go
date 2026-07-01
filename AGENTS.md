@@ -137,3 +137,15 @@ go run ./examples/charge-basic                       # Run charge-basic example
 TEMPO_RPC_URL=http://localhost:8545 make integration  # Run integration tests
 ```
 
+## Changelogs
+
+Add release notes as new files under `.changelog/`; do not edit `CHANGELOG.md`
+directly. Use the full Go module path in frontmatter:
+
+```markdown
+---
+github.com/tempoxyz/mpp-go: patch
+---
+
+Description of the change.
+```
