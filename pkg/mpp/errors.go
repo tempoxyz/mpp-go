@@ -11,9 +11,9 @@ var ErrVerification = errors.New("payment verification failed")
 
 // Default hints for error types that support them.
 const (
-	HintPaymentRequired    = "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md"
+	HintPaymentRequired     = "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md"
 	HintMalformedCredential = "Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md"
-	HintMethodUnsupported  = HintPaymentRequired
+	HintMethodUnsupported   = HintPaymentRequired
 )
 
 // ErrorType identifies a machine-readable MPP problem type.
