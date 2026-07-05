@@ -43,6 +43,10 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 
 			result, err := m.Charge(c.Request().Context(), chargeParams)
 			if err != nil {
+				if result != nil && result.Challenge != nil {
+					server.WritePaymentErrorWithChallenge(c.Response(), err, result.Challenge, m.Realm())
+					return nil
+				}
 				server.WritePaymentError(c.Response(), err)
 				return nil
 			}

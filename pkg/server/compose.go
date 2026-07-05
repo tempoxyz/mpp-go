@@ -108,6 +108,10 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 
 			result, err := entry.mpp.Charge(r.Context(), params)
 			if err != nil {
+				if result != nil && result.Challenge != nil {
+					WritePaymentErrorWithChallenge(w, err, result.Challenge, realm)
+					return
+				}
 				WritePaymentError(w, err)
 				return
 			}

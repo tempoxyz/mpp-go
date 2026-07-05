@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -22,6 +23,22 @@ func (middlewareTestMethod) Name() string { return "tempo" }
 
 func (middlewareTestMethod) Intents() map[string]Intent {
 	return map[string]Intent{"charge": verifyTestIntent{}}
+}
+
+type verificationFailedMethod struct{}
+
+func (verificationFailedMethod) Name() string { return "tempo" }
+
+func (verificationFailedMethod) Intents() map[string]Intent {
+	return map[string]Intent{"charge": verificationFailedIntent{}}
+}
+
+type verificationFailedIntent struct{}
+
+func (verificationFailedIntent) Name() string { return "charge" }
+
+func (verificationFailedIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
+	return nil, mpp.ErrVerificationFailed("bad proof")
 }
 
 func TestChargeMiddleware_EndToEnd(t *testing.T) {
@@ -213,6 +230,44 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	body, err := io.ReadAll(paidResponse.Body)
 	require.NoError(t, err)
 	assert.Equal(t, originalBody, string(body))
+}
+
+func TestChargeMiddlewareReturnsFreshChallengeOnVerificationFailure(t *testing.T) {
+	payment := New(verificationFailedMethod{}, "api.example.com", "secret-key")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Fail(t, "handler should not be called")
+	}))
+
+	challengeReq := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	challengeResp := httptest.NewRecorder()
+	handler.ServeHTTP(challengeResp, challengeReq)
+	require.Equal(t, http.StatusPaymentRequired, challengeResp.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResp.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	req.Header.Set("Authorization", credential.ToAuthorization())
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	require.Equal(t, http.StatusPaymentRequired, resp.Code)
+	require.NotEmpty(t, resp.Header().Get("WWW-Authenticate"))
+	_, err = mpp.ParseChallenge(resp.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, "application/problem+json", resp.Header().Get("Content-Type"))
+	assert.Equal(t, "no-store", resp.Header().Get("Cache-Control"))
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeVerificationFailed), problem.Type)
 }
 
 func TestChargeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {

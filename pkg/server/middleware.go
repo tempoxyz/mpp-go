@@ -86,6 +86,10 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 
 			result, err := m.Charge(r.Context(), chargeParams)
 			if err != nil {
+				if result != nil && result.Challenge != nil {
+					WritePaymentErrorWithChallenge(w, err, result.Challenge, m.realm)
+					return
+				}
 				WritePaymentError(w, err)
 				return
 			}
@@ -124,6 +128,23 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
 
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry challenge.
+func WritePaymentErrorWithChallenge(w http.ResponseWriter, err error, challenge *mpp.Challenge, realm string) {
+	if challenge == nil {
+		WritePaymentError(w, err)
+		return
+	}
+
+	header, headerErr := challenge.ToAuthenticateStrict(realm)
+	if headerErr != nil {
+		WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, headerErr.Error()))
+		return
+	}
+
+	w.Header().Set("WWW-Authenticate", header)
+	WritePaymentError(w, err)
 }
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
