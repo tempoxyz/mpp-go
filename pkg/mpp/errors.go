@@ -9,6 +9,13 @@ import (
 // ErrVerification is a sentinel error for payment verification failures.
 var ErrVerification = errors.New("payment verification failed")
 
+// Default hints for error types that support them.
+const (
+	HintPaymentRequired     = "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md"
+	HintMalformedCredential = "Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md"
+	HintMethodUnsupported   = HintPaymentRequired
+)
+
 // ErrorType identifies a machine-readable MPP problem type.
 type ErrorType string
 
@@ -66,6 +73,7 @@ type PaymentError struct {
 	Title  string    `json:"title"`
 	Status int       `json:"status"`
 	Detail string    `json:"detail"`
+	Hint   string    `json:"hint,omitempty"`
 }
 
 func (e *PaymentError) Error() string {
@@ -101,6 +109,9 @@ func (e *PaymentError) ProblemDetails(challengeID string) map[string]any {
 	if challengeID != "" {
 		m["challengeId"] = challengeID
 	}
+	if e.Hint != "" {
+		m["hint"] = e.Hint
+	}
 	return m
 }
 
@@ -110,12 +121,16 @@ func ErrPaymentRequired(realm, description string) *PaymentError {
 	if description != "" {
 		detail = description
 	}
-	return newPaymentError(ErrorTypePaymentRequired, detail)
+	pe := newPaymentError(ErrorTypePaymentRequired, detail)
+	pe.Hint = HintPaymentRequired
+	return pe
 }
 
 // ErrMalformedCredential returns a 402 error for unparseable credentials.
 func ErrMalformedCredential(reason string) *PaymentError {
-	return newPaymentError(ErrorTypeMalformedCredential, reason)
+	pe := newPaymentError(ErrorTypeMalformedCredential, reason)
+	pe.Hint = HintMalformedCredential
+	return pe
 }
 
 // ErrInvalidChallenge returns a 402 error for invalid or tampered challenges.
@@ -150,5 +165,7 @@ func ErrPaymentInsufficient(reason string) *PaymentError {
 
 // ErrMethodUnsupported returns a 400 error for unsupported payment methods.
 func ErrMethodUnsupported(method string) *PaymentError {
-	return newPaymentError(ErrorTypeMethodUnsupported, fmt.Sprintf("payment method %q is not supported", method))
+	pe := newPaymentError(ErrorTypeMethodUnsupported, fmt.Sprintf("payment method %q is not supported", method))
+	pe.Hint = HintMethodUnsupported
+	return pe
 }

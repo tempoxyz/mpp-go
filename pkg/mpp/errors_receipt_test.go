@@ -171,6 +171,65 @@ func TestPaymentErrorHelpers(t *testing.T) {
 	}
 }
 
+func TestPaymentErrorHints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  *PaymentError
+		hint string
+	}{
+		{
+			name: "payment required has hint",
+			err:  ErrPaymentRequired("api.example.com", ""),
+			hint: HintPaymentRequired,
+		},
+		{
+			name: "malformed credential has hint",
+			err:  ErrMalformedCredential("bad"),
+			hint: HintMalformedCredential,
+		},
+		{
+			name: "method unsupported has hint",
+			err:  ErrMethodUnsupported("stripe"),
+			hint: HintMethodUnsupported,
+		},
+		{
+			name: "verification failed has no hint",
+			err:  ErrVerificationFailed("sig mismatch"),
+			hint: "",
+		},
+		{
+			name: "bad request has no hint",
+			err:  ErrBadRequest("invalid"),
+			hint: "",
+		},
+		{
+			name: "payment expired has no hint",
+			err:  ErrPaymentExpired("2026-01-01T00:00:00Z"),
+			hint: "",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equalf(t, tt.hint, tt.err.Hint,
+				"err.Hint = %q, want %q", tt.err.Hint, tt.hint)
+
+			problem := tt.err.ProblemDetails("")
+			if tt.hint != "" {
+				assert.Equalf(t, tt.hint, problem["hint"],
+					"problem[hint] = %q, want %q", problem["hint"], tt.hint)
+			} else {
+				assert.Nilf(t, problem["hint"],
+					"problem[hint] = %v, want nil", problem["hint"])
+			}
+		})
+	}
+}
+
 func TestReceiptRoundTrip(t *testing.T) {
 	t.Parallel()
 
