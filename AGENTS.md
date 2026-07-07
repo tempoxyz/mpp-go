@@ -139,8 +139,9 @@ TEMPO_RPC_URL=http://localhost:8545 make integration  # Run integration tests
 
 ## Changelogs
 
-Add release notes as new files under `.changelog/`; do not edit `CHANGELOG.md`
-directly. Use the full Go module path in frontmatter:
+Every PR should add a release note as a new Markdown file under `.changelog/`
+(singular); do not use `.changelogs/` or edit `CHANGELOG.md` directly. Use the
+full Go module path in frontmatter:
 
 ```markdown
 ---

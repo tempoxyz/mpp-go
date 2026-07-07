@@ -515,7 +515,10 @@ func receiptMatches(receipt map[string]any, credential *mpp.Credential, request 
 		}
 		actual = append(actual, decoded)
 	}
-	actual = canonicalReceiptTransfers(actual)
+	actual, ok = canonicalReceiptTransfers(actual)
+	if !ok {
+		return false
+	}
 	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
 }
 
@@ -534,15 +537,17 @@ func isFeeControllerTransfer(fromAddress, recipient, amount string, expected []e
 // Tempo TIP-20 emits a standard Transfer alongside TransferWithMemo for the same
 // logical payment. Collapse those paired logs so receipt matching counts the
 // payment once while still rejecting unrelated extra transfers.
-func canonicalReceiptTransfers(transfers []decodedTransfer) []decodedTransfer {
+func canonicalReceiptTransfers(transfers []decodedTransfer) ([]decodedTransfer, bool) {
 	canonical := append([]decodedTransfer(nil), transfers...)
 	skipped := make([]bool, len(canonical))
 	for index, transfer := range canonical {
 		if !transfer.hasMemo {
 			continue
 		}
-		if paired := pairedTransferIndex(canonical, index); paired >= 0 {
+		if paired := pairedTransferIndex(canonical, index, skipped); paired >= 0 {
 			skipped[paired] = true
+		} else {
+			return nil, false
 		}
 	}
 	result := make([]decodedTransfer, 0, len(canonical))
@@ -552,13 +557,13 @@ func canonicalReceiptTransfers(transfers []decodedTransfer) []decodedTransfer {
 		}
 		result = append(result, transfer)
 	}
-	return result
+	return result, true
 }
 
-func pairedTransferIndex(transfers []decodedTransfer, memoIndex int) int {
+func pairedTransferIndex(transfers []decodedTransfer, memoIndex int, skipped []bool) int {
 	withMemo := transfers[memoIndex]
 	for index, transfer := range transfers {
-		if index == memoIndex || transfer.hasMemo {
+		if index == memoIndex || transfer.hasMemo || skipped[index] {
 			continue
 		}
 		if transfer.amount == withMemo.amount && strings.EqualFold(transfer.recipient, withMemo.recipient) {

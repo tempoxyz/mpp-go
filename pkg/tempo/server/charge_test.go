@@ -1132,6 +1132,43 @@ func TestFetchReceipt_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestCanonicalReceiptTransfers_PairsDuplicateMemoTransfersWithDistinctBaseLogs(t *testing.T) {
+	t.Parallel()
+
+	transfers := []decodedTransfer{
+		{amount: "500000", recipient: testRecipient},
+		{amount: "500000", hasMemo: true, memo: "0x01", recipient: testRecipient},
+		{amount: "500000", recipient: testRecipient},
+		{amount: "500000", hasMemo: true, memo: "0x02", recipient: testRecipient},
+	}
+
+	got, ok := canonicalReceiptTransfers(transfers)
+	want := []decodedTransfer{
+		{amount: "500000", hasMemo: true, memo: "0x01", recipient: testRecipient},
+		{amount: "500000", hasMemo: true, memo: "0x02", recipient: testRecipient},
+	}
+
+	assert.True(t, ok)
+	assert.Equal(t, want, got)
+}
+
+func TestCanonicalReceiptTransfers_RejectsUnpairedMemoTransfers(t *testing.T) {
+	t.Parallel()
+
+	transfers := []decodedTransfer{
+		{amount: "500000", recipient: testRecipient},
+		{amount: "500000", hasMemo: true, memo: "0x01", recipient: testRecipient},
+		{amount: "500000", recipient: testRecipient},
+		{amount: "500000", hasMemo: true, memo: "0x02", recipient: testRecipient},
+		{amount: "500000", hasMemo: true, memo: "0x03", recipient: testRecipient},
+	}
+
+	got, ok := canonicalReceiptTransfers(transfers)
+
+	assert.False(t, ok)
+	assert.Nil(t, got)
+}
+
 func newClientMethod(t *testing.T, rpc tempo.RPCClient, credentialType tempo.CredentialType) *chargeclient.Method {
 	t.Helper()
 	method, err := chargeclient.New(chargeclient.Config{
