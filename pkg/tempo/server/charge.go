@@ -539,7 +539,7 @@ func canonicalReceiptTransfers(transfers []decodedTransfer) []decodedTransfer {
 		if !transfer.hasMemo {
 			continue
 		}
-		if paired := pairedTransferIndex(canonical, index); paired >= 0 {
+		if paired := pairedTransferIndex(canonical, index, skipped); paired >= 0 {
 			skipped[paired] = true
 		}
 	}
@@ -553,10 +553,10 @@ func canonicalReceiptTransfers(transfers []decodedTransfer) []decodedTransfer {
 	return result
 }
 
-func pairedTransferIndex(transfers []decodedTransfer, memoIndex int) int {
+func pairedTransferIndex(transfers []decodedTransfer, memoIndex int, skipped []bool) int {
 	withMemo := transfers[memoIndex]
 	for index, transfer := range transfers {
-		if index == memoIndex || transfer.hasMemo {
+		if index == memoIndex || transfer.hasMemo || skipped[index] {
 			continue
 		}
 		if transfer.amount == withMemo.amount && strings.EqualFold(transfer.recipient, withMemo.recipient) {
