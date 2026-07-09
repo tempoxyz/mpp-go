@@ -40,7 +40,10 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          body: ${{ steps.changelog.outputs.notes }}
-          generate_release_notes: false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          notes_file="$(mktemp)"
+          printf '%s\n' "$NOTES" > "$notes_file"
+          gh release create "$GITHUB_REF_NAME" --notes-file "$notes_file"
