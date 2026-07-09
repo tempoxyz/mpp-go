@@ -23,6 +23,13 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          non_ci_changes=$(echo "$changed" | grep -vE '^\.github/' || true)
+          if [ -z "$non_ci_changes" ]; then
+            echo "Only .github changes detected; skipping changelog requirement"
+            exit 0
+          fi
+
           changelogs=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- '.changelog/*.md' \
             | grep -vE '(^|/)README\.md$' \
             || true)
