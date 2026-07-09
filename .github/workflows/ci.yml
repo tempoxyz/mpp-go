@@ -85,7 +85,7 @@ jobs:
       - name: Resolve Tempo image digest
         id: tempo-digest
         run: |
-          digest=$(docker buildx imagetools inspect ghcr.io/tempoxyz/tempo:${TEMPO_TAG} --raw | sha256sum | cut -d' ' -f1)
+          digest=$(docker buildx imagetools inspect "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}" --raw | sha256sum | cut -d' ' -f1)
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Tempo Docker image
@@ -102,8 +102,8 @@ jobs:
       - name: Pull and cache Tempo image
         if: steps.docker-cache.outputs.cache-hit != 'true'
         run: |
-          docker pull ghcr.io/tempoxyz/tempo:${TEMPO_TAG}
-          docker save ghcr.io/tempoxyz/tempo:${TEMPO_TAG} -o /tmp/tempo-image.tar
+          docker pull "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}"
+          docker save "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}" -o /tmp/tempo-image.tar
 
       - name: Start Tempo devnet
         run: docker compose up -d
