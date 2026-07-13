@@ -5,12 +5,13 @@ import "time"
 // Receipt represents a server-issued payment receipt sent via the
 // Payment-Receipt header.
 type Receipt struct {
-	Status     string         `json:"status"`
-	Timestamp  time.Time      `json:"timestamp"`
-	Reference  string         `json:"reference"`
-	Method     string         `json:"method,omitempty"`
-	ExternalID string         `json:"externalId,omitempty"`
-	Extra      map[string]any `json:"extra,omitempty"`
+	Status         string         `json:"status"`
+	Timestamp      time.Time      `json:"timestamp"`
+	Reference      string         `json:"reference"`
+	Method         string         `json:"method,omitempty"`
+	ExternalID     string         `json:"externalId,omitempty"`
+	SubscriptionID string         `json:"subscriptionId,omitempty"`
+	Extra          map[string]any `json:"extra,omitempty"`
 }
 
 // ReceiptOption configures optional fields when creating a Receipt.
@@ -24,6 +25,11 @@ func WithReceiptMethod(method string) ReceiptOption {
 // WithExternalID sets the external transaction ID on a Receipt.
 func WithExternalID(id string) ReceiptOption {
 	return func(r *Receipt) { r.ExternalID = id }
+}
+
+// WithSubscriptionID sets the server-issued subscription ID on a Receipt.
+func WithSubscriptionID(id string) ReceiptOption {
+	return func(r *Receipt) { r.SubscriptionID = id }
 }
 
 // WithExtra sets extra metadata on a Receipt.

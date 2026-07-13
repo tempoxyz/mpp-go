@@ -237,6 +237,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		"ref-123",
 		WithReceiptMethod("tempo"),
 		WithExternalID("ext-123"),
+		WithSubscriptionID("sub-123"),
 		WithExtra(map[string]any{"settled": true}),
 	)
 	if !assert.Equalf(t, "success", receipt.Status,
@@ -266,6 +267,10 @@ func TestReceiptRoundTrip(t *testing.T) {
 		"parsed.ExternalID = %q, want %q", parsed.ExternalID, receipt.ExternalID) {
 		return
 	}
+	if !assert.Equalf(t, receipt.SubscriptionID, parsed.SubscriptionID,
+		"parsed.SubscriptionID = %q, want %q", parsed.SubscriptionID, receipt.SubscriptionID) {
+		return
+	}
 	if !assert.Equalf(t, true, parsed.Extra["settled"],
 		"parsed.Extra[settled] = %#v, want true", parsed.Extra["settled"]) {
 		return
@@ -273,6 +278,38 @@ func TestReceiptRoundTrip(t *testing.T) {
 
 	if got, want := parsed.Timestamp.Format("2006-01-02T15:04:05.000Z"), receipt.Timestamp.Format("2006-01-02T15:04:05.000Z"); got != want {
 		assert.Failf(t, "", "parsed.Timestamp = %q, want %q", got, want)
+		return
+	}
+}
+
+func TestParsePaymentReceiptPreservesForeignSubscriptionID(t *testing.T) {
+	t.Parallel()
+
+	header := b64EncodeAny(map[string]any{
+		"status":         "success",
+		"method":         "tempo",
+		"timestamp":      "2026-01-01T00:00:00Z",
+		"reference":      "ref-123",
+		"subscriptionId": "sub-123",
+	})
+
+	parsed, err := ParseReceipt(header)
+	if !assert.NoErrorf(t, err,
+		"ParseReceipt() error = %v", err) {
+		return
+	}
+	if !assert.Equalf(t, "sub-123", parsed.SubscriptionID,
+		"parsed.SubscriptionID = %q, want sub-123", parsed.SubscriptionID) {
+		return
+	}
+
+	roundtripped, err := ParseReceipt(FormatReceipt(parsed))
+	if !assert.NoErrorf(t, err,
+		"ParseReceipt(FormatReceipt(parsed)) error = %v", err) {
+		return
+	}
+	if !assert.Equalf(t, "sub-123", roundtripped.SubscriptionID,
+		"roundtripped.SubscriptionID = %q, want sub-123", roundtripped.SubscriptionID) {
 		return
 	}
 }
