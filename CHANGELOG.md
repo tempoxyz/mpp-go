@@ -1,5 +1,17 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.3.0`
+
+### Minor Changes
+
+- Add `Hint` field to `PaymentError` problem details. `PaymentRequired`, `MalformedCredential`, and `MethodUnsupported` errors now include a default hint pointing users to wallet documentation. (by @bensandler-stripe, [#73](https://github.com/tempoxyz/mpp-go/pull/73))
+
+### Patch Changes
+
+- Preserve `subscriptionId` when parsing and formatting payment receipts. (by @Osraka, [#81](https://github.com/tempoxyz/mpp-go/pull/81))
+- Use the shared Tempo workflow to publish pull request audit events. (by @Mablr, [#82](https://github.com/tempoxyz/mpp-go/pull/82))
+- Fix Tempo receipt verification so paired TransferWithMemo logs cannot reuse the same base Transfer log during deduplication. (by @BrendanRyan, [#77](https://github.com/tempoxyz/mpp-go/pull/77))
+
 ## `github.com/tempoxyz/mpp-go@0.2.0`
 
 ### Minor Changes
