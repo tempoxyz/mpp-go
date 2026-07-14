@@ -56,6 +56,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			c.SetRequest(c.Request().WithContext(ctx))
 			c.Set(credentialKey, result.Credential)
 			c.Set(receiptKey, result.Receipt)
+			// Mark the paid response as private so shared caches never serve a
+			// Payment-Receipt to a different client, mirroring server.serveVerified.
+			c.Response().Header().Set("Cache-Control", "private")
 			c.Response().Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
 			return next(c)
 		}
