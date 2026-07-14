@@ -1,6 +1,7 @@
 package fiberadapter
 
 import (
+	"context"
 	"encoding/json"
 
 	fiberfw "github.com/gofiber/fiber/v2"
@@ -37,7 +38,12 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 			chargeParams.Body = append([]byte(nil), body...)
 		}
 
-		result, err := m.Charge(c.UserContext(), chargeParams)
+		// Verify against the request-scoped context rather than the inert
+		// context.Background() that c.UserContext() defaults to. The fasthttp
+		// request context (c.Context()) cancels on server shutdown and carries
+		// request-scoped values into Intent.Verify's I/O; the net/http, echo,
+		// and gin adapters all pass the live request context, so mirror that.
+		result, err := m.Charge(chargeContext(c), chargeParams)
 		if err != nil {
 			WritePaymentError(c, err)
 			return nil
@@ -55,6 +61,19 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
 		return c.Next()
 	}
+}
+
+// chargeContext returns the context used for verification. It prefers a context
+// installed by earlier middleware via SetUserContext (so request-scoped values
+// still propagate), but otherwise uses the fasthttp request context, which —
+// unlike the default background UserContext — is cancelled when the request
+// ends. This keeps deadline/cancellation propagation consistent with the
+// net/http, echo, and gin adapters.
+func chargeContext(c *fiberfw.Ctx) context.Context {
+	if uc := c.UserContext(); uc != nil && uc != context.Background() {
+		return uc
+	}
+	return c.Context()
 }
 
 func fiberScope(c *fiberfw.Ctx) map[string]string {
