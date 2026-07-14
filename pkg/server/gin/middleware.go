@@ -58,6 +58,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		c.Request = c.Request.WithContext(ctx)
 		c.Set(credentialKey, result.Credential)
 		c.Set(receiptKey, result.Receipt)
+		// Mark the paid response as private so shared caches never serve a
+		// Payment-Receipt to a different client, mirroring server.serveVerified.
+		c.Writer.Header().Set("Cache-Control", "private")
 		c.Writer.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
 		c.Next()
 	}
