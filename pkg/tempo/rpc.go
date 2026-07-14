@@ -27,9 +27,15 @@ func NewRPCClient(rpcURL string) RPCClient {
 	return temporpc.New(rpcURL)
 }
 
-// ParseHexUint64 decodes a JSON-RPC hex integer into uint64.
+// ParseHexUint64 decodes a JSON-RPC hex integer into uint64. A bare "0x" (or an
+// empty string) decodes to 0, matching ParseHexBigInt; some JSON-RPC nodes
+// return "0x" for a zero-valued quantity.
 func ParseHexUint64(value string) (uint64, error) {
-	return strconv.ParseUint(strings.TrimPrefix(value, "0x"), 16, 64)
+	trimmed := strings.TrimPrefix(value, "0x")
+	if trimmed == "" {
+		return 0, nil
+	}
+	return strconv.ParseUint(trimmed, 16, 64)
 }
 
 // ParseHexBigInt decodes a JSON-RPC hex integer into a big.Int.
