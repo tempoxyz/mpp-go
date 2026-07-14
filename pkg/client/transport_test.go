@@ -354,6 +354,69 @@ func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
 
 }
 
+func TestTransport_RoundTrip_StandaloneRefusesRedirectedPayment(t *testing.T) {
+	// A standalone Transport (no Client.Do wrapper) plugged into a redirect
+	// following http.Client must not auto-pay an origin reached via redirect.
+	var challenge *mpp.Challenge
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer attacker.Close()
+	challenge = challengeForURL(t, attacker.URL, "tempo", nil)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	// The natural, unguarded way to use the exported Transport.
+	hc := &http.Client{Transport: tr}
+	req, _ := http.NewRequest(http.MethodGet, origin.URL, nil)
+	_, err := hc.Do(req)
+
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "refusing payment after redirect"),
+		"Do() error = %v, want redirect-payment refusal", err) {
+		return
+	}
+	if !assert.Equalf(t, 0, method.calls,
+		"CreateCredential() calls = %d, want 0", method.calls) {
+		return
+	}
+}
+
+func TestTransport_RoundTrip_StandaloneDirectRequestStillPays(t *testing.T) {
+	// A standalone Transport must keep working for a direct (non-redirected)
+	// request: the request URL is the origin the caller chose.
+	var challenge *mpp.Challenge
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	hc := &http.Client{Transport: tr}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := hc.Do(req)
+	if !assert.NoErrorf(t, err, "unexpected error: %v", err) {
+		return
+	}
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
+}
+
 func TestClient_Get(t *testing.T) {
 	var challenge *mpp.Challenge
 
