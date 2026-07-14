@@ -170,6 +170,16 @@ func sameOriginURL(requestURL *url.URL, origin string) bool {
 func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
 	origin := paymentOrigin(req.Context())
 	if origin == "" {
+		// Standalone Transport: no trusted origin was pinned into the context
+		// (that only happens when the Transport is driven through Client.Do).
+		// We cannot compare against the caller's intended origin, so fall back
+		// to the request URL — but first refuse if this request was produced by
+		// a redirect. net/http sets Request.Response only on redirect
+		// follow-ups, so its presence means the caller never chose this origin
+		// and we must not auto-pay it.
+		if req.Response != nil {
+			return fmt.Errorf("mpp: refusing payment after redirect to %q; drive the Transport through client.Client for redirect-safe payments", requestOrigin(req.URL))
+		}
 		origin = requestOrigin(req.URL)
 	}
 	if !sameOriginURL(req.URL, origin) {
