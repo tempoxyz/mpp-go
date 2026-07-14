@@ -52,6 +52,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.SetUserContext(ctx)
 		c.Locals(credentialKey, result.Credential)
 		c.Locals(receiptKey, result.Receipt)
+		// Mark the paid response as private so shared caches never serve a
+		// Payment-Receipt to a different client, mirroring server.serveVerified.
+		c.Set("Cache-Control", "private")
 		c.Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
 		return c.Next()
 	}
