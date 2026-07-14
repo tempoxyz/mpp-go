@@ -4,12 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
+
+// MaxRequestBodyBytes caps how many bytes ReadRequestBody buffers from a
+// request body. The middleware reads the body before payment is verified (to
+// compute/validate the body digest), so an unbounded read lets an
+// unauthenticated client exhaust server memory with a large body. Set to 0 to
+// disable the limit.
+var MaxRequestBodyBytes int64 = 1 << 20 // 1 MiB
 
 type contextKey int
 
@@ -101,14 +109,25 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 }
 
 // ReadRequestBody reads and restores r.Body so middleware can verify body digests
-// without consuming the body before the protected handler runs.
+// without consuming the body before the protected handler runs. The read is
+// bounded by MaxRequestBodyBytes; a larger body yields an error so callers can
+// reject it instead of buffering it into memory.
 func ReadRequestBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
-	body, err := io.ReadAll(r.Body)
+	var reader io.Reader = r.Body
+	if MaxRequestBodyBytes > 0 {
+		// Read one extra byte so we can distinguish "exactly at the limit" from
+		// "over the limit".
+		reader = io.LimitReader(r.Body, MaxRequestBodyBytes+1)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
+	}
+	if MaxRequestBodyBytes > 0 && int64(len(body)) > MaxRequestBodyBytes {
+		return nil, fmt.Errorf("mpp: request body exceeds %d bytes", MaxRequestBodyBytes)
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return body, nil
