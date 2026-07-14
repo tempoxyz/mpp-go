@@ -100,6 +100,40 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestChargeMiddlewareMarksPaidResponsePrivate(t *testing.T) {
+	t.Parallel()
+
+	ginfw.SetMode(ginfw.TestMode)
+	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	router := ginfw.New()
+	router.GET("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
+		c.String(http.StatusOK, "paid")
+	})
+
+	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	challengeResponse := httptest.NewRecorder()
+	router.ServeHTTP(challengeResponse, challengeRequest)
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse := httptest.NewRecorder()
+	router.ServeHTTP(paidResponse, paidRequest)
+
+	require.Equal(t, http.StatusOK, paidResponse.Code)
+	require.NotEmpty(t, paidResponse.Header().Get("Payment-Receipt"))
+	assert.Equal(t, "private", paidResponse.Header().Get("Cache-Control"),
+		"paid response with a Payment-Receipt must be marked Cache-Control: private")
+}
+
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	t.Parallel()
 
