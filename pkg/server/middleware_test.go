@@ -101,6 +101,48 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestReadRequestBodyEnforcesLimit(t *testing.T) {
+	prev := MaxRequestBodyBytes
+	MaxRequestBodyBytes = 16
+	defer func() { MaxRequestBodyBytes = prev }()
+
+	// At the limit: allowed and fully preserved.
+	exact := strings.Repeat("a", 16)
+	r := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(exact))
+	body, err := ReadRequestBody(r)
+	require.NoError(t, err)
+	assert.Equal(t, exact, string(body))
+	restored, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	assert.Equal(t, exact, string(restored), "body must be restored for the handler")
+
+	// Over the limit: rejected without buffering the whole body.
+	tooBig := strings.Repeat("a", 17)
+	r = httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(tooBig))
+	_, err = ReadRequestBody(r)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
+func TestChargeMiddlewareRejectsOversizedBody(t *testing.T) {
+	prev := MaxRequestBodyBytes
+	MaxRequestBodyBytes = 32
+	defer func() { MaxRequestBodyBytes = prev }()
+
+	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL, "application/json", strings.NewReader(strings.Repeat("x", 1024)))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
+		"oversized body must be rejected before verification")
+}
+
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
