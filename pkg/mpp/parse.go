@@ -36,7 +36,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 		if i >= len(s) || s[i] != '=' {
-			break
+			return nil, fmt.Errorf("mpp: malformed auth-param")
 		}
 		i++
 
@@ -53,6 +53,13 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 		params[key] = value
 		i = next
+
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i < len(s) && s[i] != ',' {
+			return nil, fmt.Errorf("mpp: malformed auth-param separator")
+		}
 	}
 	return params, nil
 }
@@ -499,11 +506,6 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 		externalID = anyStr(v)
 	}
 
-	var subscriptionID string
-	if v, ok := data["subscriptionId"]; ok {
-		subscriptionID = anyStr(v)
-	}
-
 	var extra map[string]any
 	if v, ok := data["extra"]; ok {
 		if m, ok := v.(map[string]any); ok {
@@ -512,13 +514,12 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 	}
 
 	return &Receipt{
-		Status:         status,
-		Timestamp:      ts,
-		Reference:      reference,
-		Method:         method,
-		ExternalID:     externalID,
-		SubscriptionID: subscriptionID,
-		Extra:          extra,
+		Status:     status,
+		Timestamp:  ts,
+		Reference:  reference,
+		Method:     method,
+		ExternalID: externalID,
+		Extra:      extra,
 	}, nil
 }
 
@@ -536,9 +537,6 @@ func FormatPaymentReceipt(r *Receipt) string {
 	}
 	if r.ExternalID != "" {
 		data["externalId"] = r.ExternalID
-	}
-	if r.SubscriptionID != "" {
-		data["subscriptionId"] = r.SubscriptionID
 	}
 	if len(r.Extra) > 0 {
 		data["extra"] = r.Extra
