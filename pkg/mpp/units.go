@@ -19,6 +19,9 @@ func ParseUnits(value string, decimals int) (int64, error) {
 	if strings.HasPrefix(value, "-") {
 		return 0, fmt.Errorf("mpp: negative value: %q", value)
 	}
+	if decimals < 0 {
+		return 0, fmt.Errorf("mpp: decimals must be non-negative")
+	}
 
 	// Split into integer and fractional parts via string manipulation
 	// to avoid floating-point precision issues.
