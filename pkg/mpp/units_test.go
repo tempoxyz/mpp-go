@@ -25,6 +25,7 @@ func TestParseUnits(t *testing.T) {
 		// Errors.
 		{"empty", "", 6, 0, true},
 		{"negative", "-1", 6, 0, true},
+		{"negative decimals", "1", -1, 0, true},
 		{"invalid", "abc", 6, 0, true},
 		{"fractional base units", "1.0000005", 6, 0, true},
 		{"too many decimals", "0.0000001", 6, 0, true},
