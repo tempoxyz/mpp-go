@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"reflect"
 	"time"
 
@@ -107,14 +108,17 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	// 3. Parse credential.
 	credential, err := mpp.ParseCredential(authHeader)
 	if err != nil {
-		return nil, mpp.ErrMalformedCredential(err.Error())
+		return challengeResultError(challenge, mpp.ErrMalformedCredential(err.Error()))
 	}
 
 	// 4-5. Recompute expected challenge ID and constant-time compare.
 	// Reconstruct the echoed challenge request from base64.
 	echoedRequest, err := echoedRequestMap(credential)
 	if err != nil {
-		return nil, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err))
+		return challengeResultError(
+			challenge,
+			mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err)),
+		)
 	}
 
 	echoedChallenge := mpp.NewChallenge(
@@ -127,32 +131,35 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	)
 
 	if !mpp.ConstantTimeEqual(credential.Challenge.ID, echoedChallenge.ID) {
-		return nil, mpp.ErrInvalidChallenge(
+		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
 			credential.Challenge.ID,
 			"challenge was not issued by this server",
-		)
+		))
 	}
 
 	// 6. Verify echoed fields match.
 	echoed := &credential.Challenge
 	if echoed.Realm != params.Realm {
-		return nil, mpp.ErrInvalidChallenge(echoed.ID, "realm mismatch")
+		return challengeResultError(challenge, mpp.ErrInvalidChallenge(echoed.ID, "realm mismatch"))
 	}
 	if echoed.Method != params.Method {
-		return nil, mpp.ErrInvalidChallenge(echoed.ID, "method mismatch")
+		return challengeResultError(challenge, mpp.ErrInvalidChallenge(echoed.ID, "method mismatch"))
 	}
 	if echoed.Intent != params.Intent.Name() {
-		return nil, mpp.ErrInvalidChallenge(echoed.ID, "intent mismatch")
+		return challengeResultError(challenge, mpp.ErrInvalidChallenge(echoed.ID, "intent mismatch"))
 	}
 
 	if !mpp.JSONEqual(echoedRequest, params.Request) {
-		return nil, mpp.ErrInvalidChallenge(
+		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential request does not match this route's requirements",
-		)
+		))
 	}
 	if echoed.Expires == "" {
-		return nil, mpp.ErrInvalidChallenge(echoed.ID, "missing required expires")
+		return challengeResultError(
+			challenge,
+			mpp.ErrInvalidChallenge(echoed.ID, "missing required expires"),
+		)
 	}
 	// 7. Check expiry before body-digest validation so expired credentials
 	// consistently return the payment-expired 402 path.
@@ -162,33 +169,39 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			// Try the millisecond format used by mpp.Expires helpers.
 			expiresTime, err = time.Parse("2006-01-02T15:04:05.000Z", echoed.Expires)
 			if err != nil {
-				return nil, mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format")
+				return challengeResultError(
+					challenge,
+					mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
+				)
 			}
 		}
 		if time.Now().UTC().After(expiresTime) {
-			return nil, mpp.ErrPaymentExpired(echoed.Expires)
+			return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 		}
 	}
 	if !reflect.DeepEqual(echoed.Opaque, challenge.Opaque) {
-		return nil, mpp.ErrInvalidChallenge(
+		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential opaque metadata does not match this route's requirements",
-		)
+		))
 	}
 	if params.Body != nil && echoed.Digest == "" {
 		return &VerifyResult{Challenge: challenge}, nil
 	}
 	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
-		return nil, err
+		return challengeResultError(challenge, err)
 	}
 
 	// 9. Call intent.Verify.
 	receipt, err := params.Intent.Verify(ctx, credential, params.Request)
 	if err != nil {
 		if pe, ok := err.(*mpp.PaymentError); ok {
-			return nil, pe
+			if pe.Status != http.StatusPaymentRequired {
+				return nil, pe
+			}
+			return challengeResultError(challenge, pe)
 		}
-		return nil, mpp.ErrVerificationFailed(err.Error())
+		return challengeResultError(challenge, mpp.ErrVerificationFailed(err.Error()))
 	}
 
 	// 9. Return result.
@@ -196,6 +209,10 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		Credential: credential,
 		Receipt:    receipt,
 	}, nil
+}
+
+func challengeResultError(challenge *mpp.Challenge, err error) (*VerifyResult, error) {
+	return &VerifyResult{Challenge: challenge}, err
 }
 
 func verifyBodyDigest(challengeID, digest string, body any) error {

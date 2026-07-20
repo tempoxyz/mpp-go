@@ -39,6 +39,10 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 
 		result, err := m.Charge(c.UserContext(), chargeParams)
 		if err != nil {
+			if result != nil && result.Challenge != nil {
+				WritePaymentErrorWithChallenge(c, err, result.Challenge, m.Realm())
+				return nil
+			}
 			WritePaymentError(c, err)
 			return nil
 		}
@@ -72,6 +76,23 @@ func fiberScope(c *fiberfw.Ctx) map[string]string {
 		return nil
 	}
 	return scope
+}
+
+// WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry challenge.
+func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Challenge, realm string) {
+	if challenge == nil {
+		WritePaymentError(c, err)
+		return
+	}
+
+	header, headerErr := challenge.ToAuthenticateStrict(realm)
+	if headerErr != nil {
+		WritePaymentError(c, mpp.ErrInvalidChallenge(challenge.ID, headerErr.Error()))
+		return
+	}
+
+	c.Set("WWW-Authenticate", header)
+	WritePaymentError(c, err)
 }
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.

@@ -43,6 +43,11 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 
 		result, err := m.Charge(c.Request.Context(), chargeParams)
 		if err != nil {
+			if result != nil && result.Challenge != nil {
+				server.WritePaymentErrorWithChallenge(c.Writer, err, result.Challenge, m.Realm())
+				c.Abort()
+				return
+			}
 			server.WritePaymentError(c.Writer, err)
 			c.Abort()
 			return

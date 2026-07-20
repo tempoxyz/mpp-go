@@ -170,6 +170,13 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		Expires:       params.Expires,
 	})
 	if err != nil {
+		if result != nil {
+			return &ChargeResult{
+				Challenge:  result.Challenge,
+				Credential: result.Credential,
+				Receipt:    result.Receipt,
+			}, err
+		}
 		return nil, err
 	}
 
