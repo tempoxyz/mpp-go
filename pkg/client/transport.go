@@ -57,16 +57,16 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for i := range challenges {
 		ch := &challenges[i]
 		if ch.Expires != "" {
-			expiry, err := time.Parse(time.RFC3339, ch.Expires)
-			if err == nil && expiry.Before(now) {
+			expiry, err := parseChallengeExpiry(ch.Expires)
+			if err != nil {
+				// Unparseable expiry: the issuing server rejects such a
+				// credential (server.VerifyOrChallenge returns "invalid expires
+				// format"), so don't waste a payment on a challenge it would
+				// refuse. Skip it.
 				continue
 			}
-			// Also try the millisecond format used by mpp.Expires helpers.
-			if err != nil {
-				expiry, err = time.Parse("2006-01-02T15:04:05.000Z", ch.Expires)
-				if err == nil && expiry.Before(now) {
-					continue
-				}
+			if expiry.Before(now) {
+				continue
 			}
 		}
 		if m, ok := t.methods[ch.Method]; ok {
@@ -104,6 +104,15 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	retry.Header.Set("Authorization", cred.ToAuthorization())
 
 	return t.inner.RoundTrip(retry)
+}
+
+// parseChallengeExpiry parses a challenge expiry using RFC 3339 and the
+// millisecond format emitted by the mpp.Expires helpers.
+func parseChallengeExpiry(value string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t, nil
+	}
+	return time.Parse("2006-01-02T15:04:05.000Z", value)
 }
 
 // cloneRequest creates a copy of the request suitable for retry.
