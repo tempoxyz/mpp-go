@@ -9,11 +9,17 @@ import (
 // ParseUnits converts a human-readable decimal string to base units.
 // For example, ParseUnits("1.5", 6) returns 1500000.
 // Returns an error if value is not a valid decimal, is negative,
-// or would produce fractional base units.
+// would produce fractional base units, or decimals is negative.
 func ParseUnits(value string, decimals int) (int64, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0, fmt.Errorf("mpp: empty value")
+	}
+
+	// Guard decimals before it is used to slice the fractional part: a negative
+	// value would panic on fracPart[decimals:].
+	if decimals < 0 {
+		return 0, fmt.Errorf("mpp: negative decimals: %d", decimals)
 	}
 
 	if strings.HasPrefix(value, "-") {
