@@ -12,7 +12,7 @@ require (
 	github.com/labstack/echo/v4 v4.15.4
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
-	github.com/tempoxyz/tempo-go v0.4.1
+	github.com/tempoxyz/tempo-go v0.5.0
 )
 
 require (
