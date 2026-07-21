@@ -312,6 +312,10 @@ func b64EncodeRequest(request map[string]any) string {
 }
 
 func escapeQuoted(value string) string {
+	// Strip CR and LF unconditionally so the non-strict FormatAuthenticate can
+	// never emit a header value that splits the HTTP response. FormatAuthenticateStrict
+	// rejects such values earlier with an error; this keeps the default path safe too.
+	value = strings.NewReplacer("\r", "", "\n", "").Replace(value)
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
 }
 

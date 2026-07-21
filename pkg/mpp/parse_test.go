@@ -258,6 +258,27 @@ func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
 	}
 }
 
+func TestFormatAuthenticateStripsCRLF(t *testing.T) {
+	t.Parallel()
+
+	challenge := NewChallenge("secret", "api.example.com", "tempo", "charge",
+		map[string]any{"amount": "100"},
+		WithDescription("Line one\r\nX-Injected: pwned"))
+
+	got := challenge.ToAuthenticate("api.example.com")
+
+	// The non-strict formatter must never emit CR or LF; otherwise the value
+	// could split the HTTP response when written to a header.
+	assert.NotContains(t, got, "\r", "header value must not contain CR")
+	assert.NotContains(t, got, "\n", "header value must not contain LF")
+
+	// The result must still be a well-formed, parseable challenge.
+	parsed, err := ParseChallenge(got)
+	require.NoError(t, err)
+	assert.NotContains(t, parsed.Description, "\r")
+	assert.NotContains(t, parsed.Description, "\n")
+}
+
 func TestParseChallenge(t *testing.T) {
 	t.Parallel()
 
