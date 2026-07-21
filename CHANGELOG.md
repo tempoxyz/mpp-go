@@ -1,5 +1,14 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.3.1`
+
+### Patch Changes
+
+- Return a fresh `WWW-Authenticate: Payment` challenge when payment credential verification fails, allowing clients to retry with the current challenge. (by @PranjalPaliwal, [#74](https://github.com/tempoxyz/mpp-go/pull/74))
+- Reject a negative `decimals` in `ParseUnits` (and thus `TransformUnits`) instead of panicking on the fractional-part slice. (by @Alex, [#87](https://github.com/tempoxyz/mpp-go/pull/87))
+- Strip CR and LF characters in the default `FormatAuthenticate` path so a `Challenge` field containing `\r\n` (e.g. `Description`, `Realm`) can no longer split the `WWW-Authenticate` header and inject a response. `FormatAuthenticateStrict` continues to reject such values with an error. (by @Tleao, [#86](https://github.com/tempoxyz/mpp-go/pull/86))
+- Refuse standalone `Transport` auto-pay after a redirect. A `Transport` used with a bare `http.Client` (no `CheckRedirect`) had none of `Client.Do`'s cross-origin redirect protection, so a redirect to an attacker origin could be auto-paid. The Transport now fails closed on any redirect-produced request when no trusted origin is pinned in the context. (by @Mattew, [#84](https://github.com/tempoxyz/mpp-go/pull/84))
+
 ## `github.com/tempoxyz/mpp-go@0.3.0`
 
 ### Minor Changes
