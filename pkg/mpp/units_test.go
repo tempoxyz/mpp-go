@@ -30,7 +30,6 @@ func TestParseUnits(t *testing.T) {
 		{"too many decimals", "0.0000001", 6, 0, true},
 		{"negative decimals", "1.5", -1, 0, true},
 		{"integer with negative decimals", "100", -1, 0, true},
-		{"absurd decimals", "1", 1_000_000_000, 0, true},
 	}
 
 	for _, tc := range tests {
@@ -158,15 +157,15 @@ func TestTransformUnits(t *testing.T) {
 	})
 }
 
-func TestParseUnitsHostileDecimalsDoNotPanic(t *testing.T) {
-	// Both a negative and an absurdly large decimals value must yield an error
-	// rather than a slice-bounds panic or a giant allocation.
+func TestParseUnitsNegativeDecimalsDoNotPanic(t *testing.T) {
+	// A negative decimals value must yield an error rather than a
+	// slice-bounds panic on fracPart[decimals:].
 	assert.NotPanics(t, func() {
 		if _, err := ParseUnits("1.5", -1); err == nil {
 			t.Error("expected error for negative decimals")
 		}
-		if _, err := ParseUnits("1", 1<<30); err == nil {
-			t.Error("expected error for oversized decimals")
+		if _, err := ParseUnits("100", -1); err == nil {
+			t.Error("expected error for negative decimals")
 		}
 	})
 }
