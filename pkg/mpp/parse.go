@@ -36,7 +36,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 		if i >= len(s) || s[i] != '=' {
-			break
+			return nil, fmt.Errorf("mpp: malformed auth-param")
 		}
 		i++
 
@@ -53,6 +53,13 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 		params[key] = value
 		i = next
+
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i < len(s) && s[i] != ',' {
+			return nil, fmt.Errorf("mpp: malformed auth-param separator")
+		}
 	}
 	return params, nil
 }

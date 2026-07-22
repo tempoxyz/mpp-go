@@ -353,6 +353,16 @@ func TestParseChallenge(t *testing.T) {
 			wantErr: `malformed auth-param`,
 		},
 		{
+			name:    "malformed trailing auth param",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", expires`,
+			wantErr: `malformed auth-param`,
+		},
+		{
+			name:    "missing comma between auth params",
+			header:  `Payment id="abc" realm="api.example.com", method="tempo", intent="charge", request="e30"`,
+			wantErr: `malformed auth-param separator`,
+		},
+		{
 			name:    "invalid request encoding",
 			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="not-base64"`,
 			wantErr: `invalid request field`,
