@@ -164,6 +164,10 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err != nil {
 		return ChargeRequest{}, err
 	}
+	supportedModes, err := validateChargeModes(params.SupportedModes)
+	if err != nil {
+		return ChargeRequest{}, err
+	}
 	request := ChargeRequest{
 		Amount:      amount,
 		Currency:    currency,
@@ -175,7 +179,7 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 			FeePayerURL:    params.FeePayerURL,
 			Memo:           memo,
 			Splits:         splits,
-			SupportedModes: append([]ChargeMode(nil), params.SupportedModes...),
+			SupportedModes: supportedModes,
 		},
 	}
 	if params.ChainID != 0 {
@@ -441,30 +445,36 @@ func asInt64(value any) (int64, bool, error) {
 func parseModes(value any) ([]ChargeMode, error) {
 	rawModes, ok := value.([]any)
 	if !ok {
-		if rawStrings, ok := value.([]string); ok {
-			modes := make([]ChargeMode, 0, len(rawStrings))
-			for _, mode := range rawStrings {
-				parsed := ChargeMode(mode)
-				if !isSupportedMode(parsed) {
-					return nil, fmt.Errorf("tempo: unsupported mode %q", mode)
-				}
-				modes = append(modes, parsed)
+		if strings, ok := value.([]string); ok {
+			modes := make([]ChargeMode, 0, len(strings))
+			for _, mode := range strings {
+				modes = append(modes, ChargeMode(mode))
 			}
-			return modes, nil
+			return validateChargeModes(modes)
 		}
 		return nil, nil
 	}
+
 	modes := make([]ChargeMode, 0, len(rawModes))
 	for _, mode := range rawModes {
 		if value := asString(mode); value != "" {
-			parsed := ChargeMode(value)
-			if !isSupportedMode(parsed) {
-				return nil, fmt.Errorf("tempo: unsupported mode %q", value)
-			}
-			modes = append(modes, parsed)
+			modes = append(modes, ChargeMode(value))
 		}
 	}
-	return modes, nil
+
+	return validateChargeModes(modes)
+}
+
+func validateChargeModes(modes []ChargeMode) ([]ChargeMode, error) {
+	for _, mode := range modes {
+		switch mode {
+		case ChargeModePull, ChargeModePush:
+		default:
+			return nil, fmt.Errorf("tempo: unsupported charge mode %q", mode)
+		}
+	}
+
+	return append([]ChargeMode(nil), modes...), nil
 }
 
 func isSupportedMode(mode ChargeMode) bool {
