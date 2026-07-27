@@ -1,6 +1,7 @@
 package tempo
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
@@ -31,7 +32,16 @@ func EncodeTransferWithMemo(recipient string, amount *big.Int, memo string) (str
 	if len(memo) != 64 {
 		return "", fmt.Errorf("tempo: memo must be exactly 32 bytes")
 	}
-	return fmt.Sprintf("0x%s%s%s%s", TransferWithMemoSelector, padAddress(recipient), padBigInt(amount), memo), nil
+	if _, err := hex.DecodeString(memo); err != nil {
+		return "", fmt.Errorf("tempo: memo must be hex encoded")
+	}
+	return fmt.Sprintf(
+		"0x%s%s%s%s",
+		TransferWithMemoSelector,
+		padAddress(recipient),
+		padBigInt(amount),
+		memo,
+	), nil
 }
 
 // MatchTransferCalldata reports whether calldata satisfies the canonical Tempo charge transfer.
