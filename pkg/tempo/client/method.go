@@ -53,33 +53,25 @@ var _ mppclient.Method = (*Method)(nil)
 
 // New constructs a Tempo charge client method.
 func New(config Config) (*Method, error) {
-	if config.RPC == nil && config.RPCURL == "" && config.ChainID != 0 && !tempo.IsKnownChainID(config.ChainID) {
-		return nil, fmt.Errorf("tempo client: unknown chain id %d; configure RPC or RPCURL explicitly", config.ChainID)
+	switch config.CredentialType {
+	case "",
+		tempo.CredentialTypeTransaction,
+		tempo.CredentialTypeHash,
+		tempo.CredentialTypeProof:
+	default:
+		return nil, fmt.Errorf(
+			"tempo client: unsupported credential type %q",
+			config.CredentialType,
+		)
 	}
-	signer := config.Signer
-	if signer == nil {
-		if config.PrivateKey == "" {
-			return nil, fmt.Errorf("tempo client: signer or private key is required")
-		}
-		resolved, err := temposigner.NewSigner(config.PrivateKey)
-		if err != nil {
-			return nil, err
-		}
-		signer = resolved
+
+	if config.RPC == nil && config.RPCURL == "" &&
+		config.ChainID != 0 && !tempo.IsKnownChainID(config.ChainID) {
+		return nil, fmt.Errorf(
+			"tempo client: unknown chain id %d; configure RPC or RPCURL explicitly",
+			config.ChainID,
+		)
 	}
-	chainID := config.ChainID
-	if chainID == 0 {
-		chainID = tempo.InferChainIDFromRPCURL(config.RPCURL)
-	}
-	return &Method{
-		signer:         signer,
-		rpc:            config.RPC,
-		rpcURL:         config.RPCURL,
-		chainID:        chainID,
-		clientID:       config.ClientID,
-		credentialType: config.CredentialType,
-	}, nil
-}
 
 // Name returns the method token used in Challenges and Credentials.
 func (m *Method) Name() string {

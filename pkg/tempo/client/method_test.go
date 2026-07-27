@@ -186,6 +186,21 @@ func TestNewInfersChainIDFromRPCURL(t *testing.T) {
 
 }
 
+func TestNewRejectsUnsupportedCredentialType(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(Config{
+		PrivateKey:     testPrivateKey,
+		CredentialType: tempo.CredentialType("invalid"),
+	})
+
+	assert.EqualError(
+		t,
+		err,
+		`tempo client: unsupported credential type "invalid"`,
+	)
+}
+
 func TestNewRejectsUnknownChainWithoutRPC(t *testing.T) {
 	t.Parallel()
 
