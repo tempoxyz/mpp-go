@@ -20,6 +20,6 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - uses: tempoxyz/changelogs@74f07b39c7c85773575e32472dfd5298ec6baaf4 # master
+      - uses: tempoxyz/changelogs@bd50cca508d81505924dfa3997b1696ac2b7b1aa # v0.9.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
