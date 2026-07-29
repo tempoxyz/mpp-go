@@ -1,4 +1,4 @@
-name: Changelogs
+name: Changelog
 
 on:
   pull_request:
@@ -6,35 +6,20 @@ on:
     paths-ignore:
       - ".github/**"
 
-permissions:
-  contents: read
-
 jobs:
-  changelogs:
+  changelog:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
-      # fetch-depth: 0 is required so the action can `git diff origin/main...HEAD`
-      # against the base branch.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-
-      - name: Require changelog
-        shell: bash
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          changelogs=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- '.changelog/*.md' \
-            | grep -vE '(^|/)README\.md$' \
-            || true)
-
-          if [ -z "$changelogs" ]; then
-            echo "::error::Missing changelog entry under .changelog/*.md"
-            exit 1
-          fi
-
-          {
-            echo "Found changelog entries:"
-            echo "$changelogs"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check changelog
+        uses: tempoxyz/changelogs/check@bd50cca508d81505924dfa3997b1696ac2b7b1aa # v0.9.0
+        with:
+          ecosystem: go
