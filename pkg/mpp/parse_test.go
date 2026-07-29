@@ -313,6 +313,20 @@ func TestParseChallenge(t *testing.T) {
 			want:   optional,
 		},
 		{
+			name: "unescaped quotes in description",
+			header: `Payment id="ch_special", realm="api.example.com", method="tempo", intent="charge", ` +
+				`request="eyJhbW91bnQiOiIxMDAifQ", description="Payment for "Premium" service — 50% off!"`,
+			want: &Challenge{
+				ID:          "ch_special",
+				Method:      "tempo",
+				Intent:      "charge",
+				Request:     map[string]any{"amount": "100"},
+				Realm:       "api.example.com",
+				RequestB64:  "eyJhbW91bnQiOiIxMDAifQ",
+				Description: "Payment for ",
+			},
+		},
+		{
 			name:    "invalid scheme",
 			header:  `Bearer realm="api.example.com"`,
 			wantErr: `expected Payment scheme`,

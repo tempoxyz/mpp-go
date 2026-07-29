@@ -58,6 +58,12 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 		if i < len(s) && s[i] != ',' {
+			// Legacy challenges may contain unescaped quotes in the optional
+			// description. Keep the value up to the quote and ignore the
+			// malformed, non-semantic suffix.
+			if key == "description" {
+				break
+			}
 			return nil, fmt.Errorf("mpp: malformed auth-param separator")
 		}
 	}
