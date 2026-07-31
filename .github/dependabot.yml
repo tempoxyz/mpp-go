@@ -13,8 +13,13 @@ updates:
     directory: /
     patterns: ["*"]
     multi-ecosystem-group: weekly-dependencies
+    cooldown:
+      default-days: 7
+      semver-major-days: 7
 
   - package-ecosystem: github-actions
     directory: /
     patterns: ["*"]
     multi-ecosystem-group: weekly-dependencies
+    cooldown:
+      default-days: 7

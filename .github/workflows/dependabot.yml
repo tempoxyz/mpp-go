@@ -1,14 +1,61 @@
 name: Dependabot
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Dependabot-only API automation; never executes PR code.
     types: [opened, reopened, synchronize, ready_for_review]
 
 permissions: {}
 
 jobs:
+  changelog:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      updated: ${{ steps.changelog.outputs.updated }}
+    steps:
+      - name: Add changelog for Go updates
+        id: changelog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "updated=false" >> "$GITHUB_OUTPUT"
+          files=$(gh api --paginate \
+            "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename')
+
+          if ! grep -Eq '^go\.(mod|sum)$' <<< "$files"; then
+            exit 0
+          fi
+
+          if grep -E '^\.changelog/[^/]+\.md$' <<< "$files" \
+            | grep -qv '^\.changelog/README\.md$'; then
+            exit 0
+          fi
+
+          changelog=$(printf '%s\n' \
+            '---' \
+            'github.com/tempoxyz/mpp-go: patch' \
+            '---' \
+            '' \
+            'Update Go dependencies in the weekly Dependabot batch.')
+          content=$(printf '%s\n' "$changelog" | base64 | tr -d '\n')
+
+          gh api --method PUT \
+            "/repos/${GITHUB_REPOSITORY}/contents/.changelog/dependabot-${PR_NUMBER}.md" \
+            -f message='chore: add dependency changelog' \
+            -f content="$content" \
+            -f branch="$HEAD_REF"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
   merge:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    needs: changelog
+    if: needs.changelog.outputs.updated != 'true'
     permissions:
       checks: read
       contents: write
