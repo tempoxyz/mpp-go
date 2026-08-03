@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -157,9 +156,6 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err != nil {
 		return ChargeRequest{}, err
 	}
-	if err := validateSupportedModes(params.SupportedModes); err != nil {
-		return ChargeRequest{}, err
-	}
 	splits, err := normalizeSplits(params.Splits, decimals, amount)
 	if err != nil {
 		return ChargeRequest{}, err
@@ -214,9 +210,7 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		return ChargeRequest{}, err
 	}
 	if raw, ok := input["methodDetails"].(map[string]any); ok {
-		if chainID, ok, err := asInt64(raw["chainId"]); err != nil {
-			return ChargeRequest{}, err
-		} else if ok {
+		if chainID, ok := asInt64(raw["chainId"]); ok {
 			request.MethodDetails.ChainID = &chainID
 		}
 		request.MethodDetails.FeePayer = asBool(raw["feePayer"])
@@ -417,28 +411,23 @@ func asBool(value any) bool {
 	}
 }
 
-func asInt64(value any) (int64, bool, error) {
+func asInt64(value any) (int64, bool) {
 	switch typed := value.(type) {
 	case int:
-		return int64(typed), true, nil
+		return int64(typed), true
 	case int64:
-		return typed, true, nil
+		return typed, true
 	case float64:
-		if typed != float64(int64(typed)) {
-			return 0, false, fmt.Errorf("tempo: chainId must be an integer")
-		}
-		return int64(typed), true, nil
+		return int64(typed), true
 	case string:
 		if typed == "" {
-			return 0, false, nil
+			return 0, false
 		}
-		result, err := strconv.ParseInt(typed, 10, 64)
-		if err != nil {
-			return 0, false, fmt.Errorf("tempo: invalid chainId %q", typed)
-		}
-		return result, true, nil
+		var result int64
+		_, err := fmt.Sscan(typed, &result)
+		return result, err == nil
 	default:
-		return 0, false, nil
+		return 0, false
 	}
 }
 
@@ -454,14 +443,12 @@ func parseModes(value any) ([]ChargeMode, error) {
 		}
 		return nil, nil
 	}
-
 	modes := make([]ChargeMode, 0, len(rawModes))
 	for _, mode := range rawModes {
 		if value := asString(mode); value != "" {
 			modes = append(modes, ChargeMode(value))
 		}
 	}
-
 	return validateChargeModes(modes)
 }
 
@@ -473,21 +460,7 @@ func validateChargeModes(modes []ChargeMode) ([]ChargeMode, error) {
 			return nil, fmt.Errorf("tempo: unsupported charge mode %q", mode)
 		}
 	}
-
 	return append([]ChargeMode(nil), modes...), nil
-}
-
-func isSupportedMode(mode ChargeMode) bool {
-	return mode == ChargeModePull || mode == ChargeModePush
-}
-
-func validateSupportedModes(modes []ChargeMode) error {
-	for _, mode := range modes {
-		if !isSupportedMode(mode) {
-			return fmt.Errorf("tempo: unsupported mode %q", mode)
-		}
-	}
-	return nil
 }
 
 func normalizeSplits(splits []SplitParams, decimals int, totalAmount string) ([]Split, error) {
