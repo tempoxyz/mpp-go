@@ -382,6 +382,12 @@ func TestParseChallenge(t *testing.T) {
 			wantErr: `invalid request field`,
 		},
 		{
+			name: "opaque value must be string",
+			header: `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", opaque="` +
+				b64EncodeAny(map[string]any{"trace": 123}) + `"`,
+			wantErr: `invalid opaque field: value for "trace" must be a string`,
+		},
+		{
 			name:    "header too large",
 			header:  "Payment " + strings.Repeat("a", maxHeaderPayload),
 			wantErr: `WWW-Authenticate header exceeds maximum size`,
@@ -506,6 +512,27 @@ func TestParseCredential(t *testing.T) {
 			name:    "invalid opaque encoding",
 			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo", "intent": "charge", "request": "e30", "opaque": "not-base64"}, "payload": map[string]any{}}),
 			wantErr: `invalid credential opaque field`,
+		},
+		{
+			name: "encoded opaque value must be string",
+			header: "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{
+				"id": "abc", "method": "tempo", "intent": "charge", "request": "e30",
+				"opaque": b64EncodeAny(map[string]any{"trace": true}),
+			}, "payload": map[string]any{}}),
+			wantErr: `invalid credential opaque field: value for "trace" must be a string`,
+		},
+		{
+			name: "object opaque value must be string",
+			header: "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{
+				"id": "abc", "method": "tempo", "intent": "charge", "request": "e30",
+				"opaque": map[string]any{"route": []any{"paid"}},
+			}, "payload": map[string]any{}}),
+			wantErr: `invalid credential opaque field: value for "route" must be a string`,
+		},
+		{
+			name:    "opaque must use supported representation",
+			header:  "Payment " + b64EncodeAny(map[string]any{"challenge": map[string]any{"id": "abc", "method": "tempo", "intent": "charge", "request": "e30", "opaque": true}, "payload": map[string]any{}}),
+			wantErr: `invalid credential opaque field: must be an encoded string or object`,
 		},
 		{
 			name:    "authorization header too large",
