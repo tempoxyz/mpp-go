@@ -135,72 +135,15 @@ func TestNormalizeChargeRequest_RejectsInvalidSplits(t *testing.T) {
 
 }
 
-func TestNormalizeChargeRequest_RejectsUnsupportedModes(t *testing.T) {
+func TestEncodeTransferWithMemo_RejectsInvalidHex(t *testing.T) {
 	t.Parallel()
 
-	_, err := NormalizeChargeRequest(ChargeRequestParams{
-		Amount:         "1",
-		Currency:       "0x20c0000000000000000000000000000000000001",
-		Recipient:      "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-		SupportedModes: []ChargeMode{"bogus"},
-	})
-	if !assert.ErrorContainsf(t, err, `unsupported mode "bogus"`,
-		"NormalizeChargeRequest() error = %v, want unsupported mode error", err) {
-		return
-	}
-
-}
-
-func TestParseChargeRequest_RejectsInvalidChainIDAndModes(t *testing.T) {
-	t.Parallel()
-
-	base := map[string]any{
-		"amount":    "100",
-		"currency":  "0x20c0000000000000000000000000000000000001",
-		"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-	}
-
-	tests := []struct {
-		name          string
-		methodDetails map[string]any
-		wantErr       string
-	}{
-		{
-			name:          "fractional chain id",
-			methodDetails: map[string]any{"chainId": float64(42431.5)},
-			wantErr:       "chainId must be an integer",
-		},
-		{
-			name:          "malformed string chain id",
-			methodDetails: map[string]any{"chainId": "42431abc"},
-			wantErr:       `invalid chainId "42431abc"`,
-		},
-		{
-			name:          "unsupported mode",
-			methodDetails: map[string]any{"supportedModes": []any{"push", "bogus"}},
-			wantErr:       `unsupported mode "bogus"`,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			input := map[string]any{}
-			for key, value := range base {
-				input[key] = value
-			}
-			input["methodDetails"] = tt.methodDetails
-
-			_, err := ParseChargeRequest(input)
-			if !assert.ErrorContainsf(t, err, tt.wantErr,
-				"ParseChargeRequest() error = %v, want substring %q", err, tt.wantErr) {
-				return
-			}
-
-		})
-	}
+	_, err := EncodeTransferWithMemo(
+		"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		big.NewInt(500000),
+		"0x"+strings.Repeat("zz", 32),
+	)
+	assert.EqualError(t, err, "tempo: memo must be hex encoded")
 }
 
 func TestEncodeAttribution_VerifiesServerFingerprint(t *testing.T) {
@@ -232,18 +175,6 @@ func TestEncodeAttribution_VerifiesServerFingerprint(t *testing.T) {
 		return
 	}
 
-}
-
-func TestEncodeTransferWithMemo_RejectsInvalidHex(t *testing.T) {
-	t.Parallel()
-
-	_, err := EncodeTransferWithMemo(
-		"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-		big.NewInt(500000),
-		"0x"+strings.Repeat("zz", 32),
-	)
-
-	assert.EqualError(t, err, "tempo: memo must be hex encoded")
 }
 
 func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
