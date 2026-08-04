@@ -28,6 +28,7 @@ Run any example directly from the repo root:
 go run ./examples/charge-basic
 go run ./examples/charge-hash
 go run ./examples/charge-fee-payer
+TEMPO_API_KEY=tempo:sk:... go run ./examples/charge-relay
 go run ./examples/basic/server
 go run ./examples/basic/client
 go run ./examples/chi/server
@@ -43,6 +44,9 @@ go run ./examples/charge-fee-payer/client
 
 Set `TEMPO_RPC_URL` to point at a different node if you are not using the
 local dockerized devnet.
+
+`charge-relay` is the exception: it runs against Tempo Moderato by default and
+requires a Tempo API key with the `mpp:write` scope.
 
 `server.ChargeMiddleware` already works with `net/http` and routers built on
 top of it, such as Chi. The Gin and Echo examples use the dedicated adapter

@@ -74,6 +74,8 @@ type PaymentError struct {
 	Status int       `json:"status"`
 	Detail string    `json:"detail"`
 	Hint   string    `json:"hint,omitempty"`
+	// Details contains safe machine-readable error metadata.
+	Details map[string]any `json:"details,omitempty"`
 }
 
 func (e *PaymentError) Error() string {
@@ -111,6 +113,9 @@ func (e *PaymentError) ProblemDetails(challengeID string) map[string]any {
 	}
 	if e.Hint != "" {
 		m["hint"] = e.Hint
+	}
+	if len(e.Details) > 0 {
+		m["details"] = e.Details
 	}
 	return m
 }

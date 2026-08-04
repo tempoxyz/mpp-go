@@ -20,6 +20,34 @@ type Intent interface {
 	Verify(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
 }
 
+// Validation describes a credential accepted without consuming or broadcasting it.
+type Validation struct {
+	// Challenge is the server-issued challenge echoed by the credential.
+	Challenge mpp.ChallengeEcho
+	// Credential is the accepted credential.
+	Credential *mpp.Credential
+	// Details contains method-specific validation metadata.
+	Details map[string]any
+	// Intent is the validated payment intent.
+	Intent string
+	// Method is the validated payment method.
+	Method string
+	// Request is the challenge request bound to the credential.
+	Request map[string]any
+	// Source is the optional payer identity.
+	Source string
+}
+
+// SplitIntent separates non-mutating credential validation from settlement.
+// Verify remains the backwards-compatible combined path.
+type SplitIntent interface {
+	Intent
+	// Validate performs an advisory check without mutating payment state.
+	Validate(ctx context.Context, credential *mpp.Credential, request map[string]any) (*Validation, error)
+	// Broadcast finalizes a credential after validation and may mutate payment state.
+	Broadcast(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
+}
+
 // Method is the interface for server-side payment methods.
 type Method interface {
 	Name() string
@@ -52,6 +80,29 @@ func New(method Method, realm, secretKey string) *Mpp {
 // Realm returns the WWW-Authenticate realm used by this payment handler.
 func (m *Mpp) Realm() string {
 	return m.realm
+}
+
+// ValidateCredential validates an issued credential without consuming or broadcasting it.
+func (m *Mpp) ValidateCredential(ctx context.Context, credential *mpp.Credential) (*Validation, error) {
+	intent, request, err := m.prepareCredential(credential)
+	if err != nil {
+		return nil, err
+	}
+	return validateCredential(ctx, intent, credential, request, m.method.Name())
+}
+
+// BroadcastCredential validates and settles an issued credential.
+func (m *Mpp) BroadcastCredential(ctx context.Context, credential *mpp.Credential) (*mpp.Receipt, error) {
+	intent, request, err := m.prepareCredential(credential)
+	if err != nil {
+		return nil, err
+	}
+	return validateAndBroadcastCredential(ctx, intent, credential, request)
+}
+
+// VerifyCredential is a backwards-compatible alias for BroadcastCredential.
+func (m *Mpp) VerifyCredential(ctx context.Context, credential *mpp.Credential) (*mpp.Receipt, error) {
+	return m.BroadcastCredential(ctx, credential)
 }
 
 // ChargeParams contains the parameters for a charge operation.

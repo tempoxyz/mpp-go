@@ -40,6 +40,8 @@ type Config struct {
 	FeePayerPolicies map[string]FeePayerPolicy
 	// Store persists replay-protection keys for hash and proof credentials.
 	Store tempo.Store
+	// Relay delegates credential validation and finalization to Tempo API or a compatible MPP relay.
+	Relay *RelayConfig
 }
 
 // MethodFromConfig constructs a Tempo charge method from one config struct.
@@ -69,6 +71,15 @@ func MethodFromConfig(config Config) (*Method, error) {
 			return nil, err
 		}
 		methodConfig.Intent = intent
+	}
+	if config.Relay != nil {
+		relay, err := newRelayClient(config.Relay)
+		if err != nil {
+			return nil, err
+		}
+		method := NewMethod(methodConfig)
+		method.intent = &relayIntent{base: method.intent, relay: relay}
+		return method, nil
 	}
 	return NewMethod(methodConfig), nil
 }

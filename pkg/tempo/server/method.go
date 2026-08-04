@@ -33,7 +33,7 @@ type MethodConfig struct {
 
 // Method adapts Tempo charge configuration to the generic server interfaces.
 type Method struct {
-	intent         *Intent
+	intent         mppserver.Intent
 	currency       string
 	recipient      string
 	decimals       int
@@ -59,7 +59,7 @@ func NewMethod(config MethodConfig) *Method {
 	}
 	chainID := config.ChainID
 	if chainID == 0 {
-		chainID = tempo.InferChainIDFromRPCURL(intent.rpcURL)
+		chainID = tempo.InferChainIDFromRPCURL(intentRPCURL(intent))
 	}
 	currency := config.Currency
 	if currency == "" {
@@ -108,7 +108,7 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	if chainID == 0 {
 		chainID = m.chainID
 	}
-	if chainID != 0 && m.intent.rpc == nil && m.intent.rpcURL == "" && !tempo.IsKnownChainID(chainID) {
+	if chainID != 0 && !intentSupportsChain(m.intent, chainID) {
 		return nil, fmt.Errorf("tempo server: unknown chain id %d; configure Intent.RPC or Intent.RPCURL explicitly", chainID)
 	}
 	memo := params.Memo
@@ -137,6 +137,31 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		return nil, err
 	}
 	return request.Map(), nil
+}
+
+func intentRPCURL(intent mppserver.Intent) string {
+	switch intent := intent.(type) {
+	case *Intent:
+		return intent.rpcURL
+	case *relayIntent:
+		return intentRPCURL(intent.base)
+	default:
+		return ""
+	}
+}
+
+func intentSupportsChain(intent mppserver.Intent, chainID int64) bool {
+	if tempo.IsKnownChainID(chainID) {
+		return true
+	}
+	switch intent := intent.(type) {
+	case *Intent:
+		return intent.rpc != nil || intent.rpcURL != ""
+	case *relayIntent:
+		return true
+	default:
+		return false
+	}
 }
 
 func resolvedModes(memo string, requestModes, defaultModes []tempo.ChargeMode) []tempo.ChargeMode {

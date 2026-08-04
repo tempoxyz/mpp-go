@@ -131,6 +131,7 @@ func main() {
 | [charge-basic](./examples/charge-basic/) | Generic Tempo charge flow using the high-level MPP client and server helpers, available in both one-command and separate-process layouts |
 | [charge-hash](./examples/charge-hash/) | Push-mode charge flow with a hash credential, available in both one-command and separate-process layouts |
 | [charge-fee-payer](./examples/charge-fee-payer/) | Sponsored Tempo charge flow where the server co-signs as a fee payer, available in both one-command and separate-process layouts |
+| [charge-relay](./examples/charge-relay/) | Moderato charge flow that delegates credential validation and broadcast to Tempo API's MPP relay |
 
 ## Idempotent POST Charges
 
@@ -164,6 +165,25 @@ Use the same `ExternalID` for retries of the same operation. Do not generate a
 new value for each retry, and avoid reusing one value across different paid
 operations. On retry, check the stored idempotency result first and return the
 cached response or receipt instead of executing the POST operation again.
+
+## Split Credential Lifecycle
+
+Server intents may implement `server.SplitIntent` to separate advisory,
+non-mutating validation from settlement:
+
+```go
+validation, err := payment.ValidateCredential(ctx, credential)
+receipt, err := payment.BroadcastCredential(ctx, credential)
+```
+
+`ValidateCredential` requires a split intent and must not consume replay state,
+sign fee-payer transactions, or broadcast. `BroadcastCredential` re-validates
+before settlement. `VerifyCredential` remains an alias for the mutating
+broadcast path, and legacy intents that only implement `Verify` continue to
+work for paid routes and broadcasts.
+
+Tempo relay methods implement the split lifecycle by delegating validation to
+`POST /v1/mpp/validate` and finalization to `POST /v1/mpp/broadcast`.
 
 ## Web Frameworks
 

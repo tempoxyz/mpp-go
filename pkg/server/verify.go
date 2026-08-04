@@ -58,7 +58,7 @@ type VerifyResult struct {
 //  6. Verify echoed fields match (realm, method, intent name, request)
 //  7. Check expiry
 //  8. Verify body digest, if present
-//  9. Call intent.Verify
+//  9. Validate then broadcast split intents, or call legacy intent.Verify
 //  10. Return result
 func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult, error) {
 	expires := params.Expires
@@ -164,16 +164,12 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	// 7. Check expiry before body-digest validation so expired credentials
 	// consistently return the payment-expired 402 path.
 	if echoed.Expires != "" {
-		expiresTime, err := time.Parse(time.RFC3339, echoed.Expires)
+		expiresTime, err := parseChallengeExpiry(echoed.Expires)
 		if err != nil {
-			// Try the millisecond format used by mpp.Expires helpers.
-			expiresTime, err = time.Parse("2006-01-02T15:04:05.000Z", echoed.Expires)
-			if err != nil {
-				return challengeResultError(
-					challenge,
-					mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
-				)
-			}
+			return challengeResultError(
+				challenge,
+				mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
+			)
 		}
 		if time.Now().UTC().After(expiresTime) {
 			return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
@@ -192,8 +188,8 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return challengeResultError(challenge, err)
 	}
 
-	// 9. Call intent.Verify.
-	receipt, err := params.Intent.Verify(ctx, credential, params.Request)
+	// 9. Validate and broadcast split intents; fall back to legacy Verify.
+	receipt, err := validateAndBroadcastCredential(ctx, params.Intent, credential, params.Request)
 	if err != nil {
 		if pe, ok := err.(*mpp.PaymentError); ok {
 			if pe.Status != http.StatusPaymentRequired {

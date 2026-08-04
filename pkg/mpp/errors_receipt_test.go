@@ -158,6 +158,12 @@ func TestPaymentErrorHelpers(t *testing.T) {
 		"problem[challengeId] = %#v, want %q", problem["challengeId"], "challenge-1") {
 		return
 	}
+	if !assert.Nil(t, problem["details"], "problem[details] = %#v, want nil", problem["details"]) {
+		return
+	}
+
+	err.Details = map[string]any{"code": "temporarily_unavailable", "retry": "same_credential"}
+	assert.Equal(t, err.Details, err.ProblemDetails("")["details"])
 
 	nonVerification := ErrBadRequest("invalid")
 	if !assert.False(t, errors.Is(nonVerification, ErrVerification),
