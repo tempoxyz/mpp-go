@@ -78,7 +78,12 @@ func MethodFromConfig(config Config) (*Method, error) {
 			return nil, err
 		}
 		method := NewMethod(methodConfig)
-		method.intent = &relayIntent{base: method.intent, relay: relay}
+		intent, err := relay.intent(method.intent.Name())
+		if err != nil {
+			return nil, err
+		}
+		method.intent = intent
+		method.supportsUnknownChain = true
 		return method, nil
 	}
 	return NewMethod(methodConfig), nil

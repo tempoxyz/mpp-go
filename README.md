@@ -168,19 +168,29 @@ cached response or receipt instead of executing the POST operation again.
 
 ## Split Credential Lifecycle
 
-Server intents may implement `server.SplitIntent` to separate advisory,
-non-mutating validation from settlement:
+Server intents can register separate advisory validation and settlement hooks:
+
+```go
+intent, err := server.NewIntent("charge", server.IntentHooks{
+	Validate:  validateCredential,
+	Broadcast: broadcastCredential,
+})
+```
+
+The constructed intent still satisfies the existing `server.Intent` interface;
+its `Verify` method calls `Validate` and then `Broadcast`. Servers can also run
+the phases independently:
 
 ```go
 validation, err := payment.ValidateCredential(ctx, credential)
 receipt, err := payment.BroadcastCredential(ctx, credential)
 ```
 
-`ValidateCredential` requires a split intent and must not consume replay state,
-sign fee-payer transactions, or broadcast. `BroadcastCredential` re-validates
-before settlement. `VerifyCredential` remains an alias for the mutating
-broadcast path, and legacy intents that only implement `Verify` continue to
-work for paid routes and broadcasts.
+`ValidateCredential` requires an intent constructed with split hooks and must
+not consume replay state, sign fee-payer transactions, or broadcast.
+`BroadcastCredential` re-validates before settlement. `VerifyCredential`
+remains an alias for the mutating broadcast path, and legacy intents that only
+implement `Verify` continue to work for paid routes and broadcasts.
 
 Tempo relay methods implement the split lifecycle by delegating validation to
 `POST /v1/mpp/validate` and finalization to `POST /v1/mpp/broadcast`.

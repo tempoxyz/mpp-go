@@ -46,11 +46,12 @@ method, err := charge.MethodFromConfig(charge.Config{
 })
 ```
 
-The adapter implements `server.SplitIntent`. `payment.ValidateCredential`
-calls only the relay validation endpoint, while `payment.BroadcastCredential`
-re-validates and then calls the broadcast endpoint. Paid HTTP routes use that
-same split lifecycle automatically. `payment.VerifyCredential` remains a
-backwards-compatible alias for the mutating broadcast path.
+The relay registers separate validation and broadcast hooks through
+`server.IntentHooks`. `payment.ValidateCredential` calls only the relay
+validation endpoint, while `payment.BroadcastCredential` re-validates and then
+calls the broadcast endpoint. Paid HTTP routes use that same split lifecycle
+automatically. `payment.VerifyCredential` remains a backwards-compatible alias
+for the mutating broadcast path.
 
 The relay broadcasts pull credentials and recognizes push credentials as
 already broadcast transactions, returning their receipts without sending them

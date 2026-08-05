@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
@@ -38,7 +39,7 @@ func relayTestCredential(payload map[string]any) *mpp.Credential {
 			"currency":  "0x20c0000000000000000000000000000000000001",
 			"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 		},
-		mpp.WithExpires("2026-08-03T12:00:00.000Z"),
+		mpp.WithExpires(mpp.Expires.Minutes(5)),
 	)
 	return challenge.NewCredential(payload, mpp.WithCredentialSource(
 		"did:pkh:eip155:42431:0x1234567890123456789012345678901234567890",
@@ -71,6 +72,13 @@ func newRelayForTest(t *testing.T, apiBaseURL string) *relayClient {
 	return relay
 }
 
+func newRelayIntentForTest(t *testing.T, apiBaseURL string) mppserver.Intent {
+	t.Helper()
+	intent, err := newRelayForTest(t, apiBaseURL).intent(tempo.IntentCharge)
+	require.NoError(t, err)
+	return intent
+}
+
 func TestRelayVerifyValidatesAndBroadcastsCredential(t *testing.T) {
 	t.Parallel()
 	server, calls := relayTestServer(t, func(path string) any {
@@ -92,7 +100,7 @@ func TestRelayVerifyValidatesAndBroadcastsCredential(t *testing.T) {
 		"signature": "0x1234",
 	})
 
-	receipt, err := newRelayForTest(t, server.URL+"/mpp").verify(context.Background(), credential)
+	receipt, err := newRelayIntentForTest(t, server.URL+"/mpp").Verify(context.Background(), credential, nil)
 	require.NoError(t, err)
 	assert.Equal(t, &mpp.Receipt{
 		Status:     "success",
@@ -135,7 +143,7 @@ func TestRelayFinalizesPushCredential(t *testing.T) {
 		"hash": "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890",
 	})
 
-	_, err := newRelayForTest(t, server.URL).verify(context.Background(), credential)
+	_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), credential, nil)
 	require.NoError(t, err)
 	validateCall := <-calls
 	broadcastCall := <-calls
@@ -148,7 +156,7 @@ func TestRelayFinalizesPushCredential(t *testing.T) {
 	assert.Equal(t, "mppx_0x"+hex.EncodeToString(digest[:]), broadcastCall.IdempotencyKey)
 }
 
-func TestRelayIntentExposesSplitLifecycle(t *testing.T) {
+func TestRelayIntentExposesCredentialHooks(t *testing.T) {
 	t.Parallel()
 	server, calls := relayTestServer(t, func(path string) any {
 		if path == "/v1/mpp/validate" {
@@ -163,26 +171,33 @@ func TestRelayIntentExposesSplitLifecycle(t *testing.T) {
 			},
 		}
 	})
-	base, err := NewIntent(IntentConfig{})
+	method, err := MethodFromConfig(Config{
+		ChainID:   42431,
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Relay:     &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: server.URL},
+	})
 	require.NoError(t, err)
-	intent := &relayIntent{base: base, relay: newRelayForTest(t, server.URL)}
+	payment := mppserver.New(method, "api.example.com", "test-secret-key")
 	credential := relayTestCredential(map[string]any{"type": "transaction", "signature": "0x1234"})
-	request := map[string]any{"amount": "1"}
 
-	validation, err := intent.Validate(context.Background(), credential, request)
+	validation, err := payment.ValidateCredential(context.Background(), credential)
 	require.NoError(t, err)
-	assert.Equal(t, request, validation.Request)
+	boundRequest, err := relayCredentialRequest(credential)
+	require.NoError(t, err)
+	assert.Equal(t, boundRequest, validation.Request)
 	assert.Equal(t, credential, validation.Credential)
 	assert.Equal(t, "/v1/mpp/validate", (<-calls).Path)
 	select {
 	case call := <-calls:
-		t.Fatalf("Validate() unexpectedly called %s", call.Path)
+		t.Fatalf("ValidateCredential() unexpectedly called %s", call.Path)
 	default:
 	}
 
-	receipt, err := intent.Broadcast(context.Background(), credential, request)
+	receipt, err := payment.BroadcastCredential(context.Background(), credential)
 	require.NoError(t, err)
 	assert.Equal(t, "0xabc", receipt.Reference)
+	assert.Equal(t, "/v1/mpp/validate", (<-calls).Path)
 	assert.Equal(t, "/v1/mpp/broadcast", (<-calls).Path)
 }
 
@@ -220,7 +235,7 @@ func TestRelayErrorMapping(t *testing.T) {
 			})
 			credential := relayTestCredential(map[string]any{"type": "proof", "signature": "0x1234"})
 
-			_, err := newRelayForTest(t, server.URL).verify(context.Background(), credential)
+			_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), credential, nil)
 			var paymentErr *mpp.PaymentError
 			require.ErrorAs(t, err, &paymentErr)
 			assert.Equal(t, tt.typeURI, paymentErr.Type)
@@ -254,7 +269,7 @@ func TestRelayBoundaryFailuresAreGeneric(t *testing.T) {
 				return tt.broadcast
 			})
 
-			_, err := newRelayForTest(t, server.URL).verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}))
+			_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}), nil)
 			var paymentErr *mpp.PaymentError
 			require.ErrorAs(t, err, &paymentErr)
 			assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
@@ -270,7 +285,7 @@ func TestRelayHTTPFailureIsGeneric(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	_, err := newRelayForTest(t, server.URL).verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}))
+	_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}), nil)
 	var paymentErr *mpp.PaymentError
 	require.ErrorAs(t, err, &paymentErr)
 	assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
@@ -291,9 +306,10 @@ func TestRelayDoesNotFollowRedirects(t *testing.T) {
 	}))
 	t.Cleanup(redirect.Close)
 
-	_, err := newRelayForTest(t, redirect.URL).verify(
+	_, err := newRelayIntentForTest(t, redirect.URL).Verify(
 		context.Background(),
 		relayTestCredential(map[string]any{"type": "proof"}),
+		nil,
 	)
 	require.Error(t, err)
 	select {
@@ -354,7 +370,18 @@ func TestMethodFromConfigAppliesRelayToCustomIntent(t *testing.T) {
 	var paymentErr *mpp.PaymentError
 	require.ErrorAs(t, err, &paymentErr)
 	assert.Equal(t, map[string]any{"code": string(RelayErrorUnsupported)}, paymentErr.Details)
-	configuredRelay, ok := configured.(*relayIntent)
-	require.True(t, ok)
-	assert.Same(t, localIntent, configuredRelay.base)
+}
+
+func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
+	t.Parallel()
+	method, err := MethodFromConfig(Config{
+		ChainID:   999999,
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Relay:     &RelayConfig{APIKey: relayTestAPIKey},
+	})
+	require.NoError(t, err)
+
+	_, err = method.BuildChargeRequest(mppserver.ChargeParams{Amount: "1"})
+	require.NoError(t, err)
 }

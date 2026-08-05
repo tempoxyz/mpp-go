@@ -38,14 +38,83 @@ type Validation struct {
 	Source string
 }
 
-// SplitIntent separates non-mutating credential validation from settlement.
-// Verify remains the backwards-compatible combined path.
-type SplitIntent interface {
-	Intent
-	// Validate performs an advisory check without mutating payment state.
-	Validate(ctx context.Context, credential *mpp.Credential, request map[string]any) (*Validation, error)
-	// Broadcast finalizes a credential after validation and may mutate payment state.
-	Broadcast(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
+// VerifyFunc is the legacy combined credential verification hook.
+type VerifyFunc func(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error)
+
+// ValidateFunc performs an advisory credential check without mutating payment state.
+type ValidateFunc func(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*Validation, error)
+
+// BroadcastFunc finalizes a validated credential and may mutate payment state.
+type BroadcastFunc func(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error)
+
+// IntentHooks configures either a legacy Verify hook or split Validate and Broadcast hooks.
+type IntentHooks struct {
+	// Verify configures the legacy combined verification path.
+	Verify VerifyFunc
+	// Validate configures the advisory phase of a split verification path.
+	Validate ValidateFunc
+	// Broadcast configures the settlement phase of a split verification path.
+	Broadcast BroadcastFunc
+}
+
+type verifyHookIntent struct {
+	name   string
+	verify VerifyFunc
+}
+
+type splitHookIntent struct {
+	name      string
+	validate  ValidateFunc
+	broadcast BroadcastFunc
+}
+
+// NewIntent builds an Intent from either Verify or Validate and Broadcast hooks.
+func NewIntent(name string, hooks IntentHooks) (Intent, error) {
+	if name == "" {
+		return nil, fmt.Errorf("server: intent name is required")
+	}
+	if hooks.Verify != nil && hooks.Validate == nil && hooks.Broadcast == nil {
+		return &verifyHookIntent{name: name, verify: hooks.Verify}, nil
+	}
+	if hooks.Verify == nil && hooks.Validate != nil && hooks.Broadcast != nil {
+		return &splitHookIntent{name: name, validate: hooks.Validate, broadcast: hooks.Broadcast}, nil
+	}
+	return nil, fmt.Errorf("server: intent hooks require either Verify or both Validate and Broadcast")
+}
+
+func (i *verifyHookIntent) Name() string { return i.name }
+
+func (i *verifyHookIntent) Verify(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error) {
+	return i.verify(ctx, credential, request)
+}
+
+func (i *splitHookIntent) Name() string { return i.name }
+
+func (i *splitHookIntent) Verify(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error) {
+	if _, err := i.validate(ctx, credential, request); err != nil {
+		return nil, err
+	}
+	return i.broadcast(ctx, credential, request)
 }
 
 // Method is the interface for server-side payment methods.
@@ -97,7 +166,7 @@ func (m *Mpp) BroadcastCredential(ctx context.Context, credential *mpp.Credentia
 	if err != nil {
 		return nil, err
 	}
-	return validateAndBroadcastCredential(ctx, intent, credential, request)
+	return intent.Verify(ctx, credential, request)
 }
 
 // VerifyCredential is a backwards-compatible alias for BroadcastCredential.

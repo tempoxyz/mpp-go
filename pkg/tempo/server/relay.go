@@ -70,42 +70,30 @@ type relayClient struct {
 	broadcastURL string
 }
 
-type relayIntent struct {
-	base  mppserver.Intent
-	relay *relayClient
-}
-
-var _ mppserver.SplitIntent = (*relayIntent)(nil)
-
-func (i *relayIntent) Name() string {
-	return i.base.Name()
-}
-
-func (i *relayIntent) Validate(
-	ctx context.Context,
-	credential *mpp.Credential,
-	request map[string]any,
-) (*mppserver.Validation, error) {
-	return i.relay.validate(ctx, credential, request, tempo.MethodName, i.Name())
-}
-
-func (i *relayIntent) Broadcast(
-	ctx context.Context,
-	credential *mpp.Credential,
-	_ map[string]any,
-) (*mpp.Receipt, error) {
-	return i.relay.broadcast(ctx, credential)
-}
-
-func (i *relayIntent) Verify(
-	ctx context.Context,
-	credential *mpp.Credential,
-	request map[string]any,
-) (*mpp.Receipt, error) {
-	if _, err := i.Validate(ctx, credential, request); err != nil {
-		return nil, err
-	}
-	return i.Broadcast(ctx, credential, request)
+func (r *relayClient) intent(name string) (mppserver.Intent, error) {
+	return mppserver.NewIntent(name, mppserver.IntentHooks{
+		Validate: func(
+			ctx context.Context,
+			credential *mpp.Credential,
+			_ map[string]any,
+		) (*mppserver.Validation, error) {
+			if credential == nil {
+				return nil, mpp.ErrMalformedCredential("credential is required")
+			}
+			request, err := relayCredentialRequest(credential)
+			if err != nil {
+				return nil, mpp.ErrMalformedCredential("invalid echoed request")
+			}
+			return r.validate(ctx, credential, request, tempo.MethodName, name)
+		},
+		Broadcast: func(
+			ctx context.Context,
+			credential *mpp.Credential,
+			_ map[string]any,
+		) (*mpp.Receipt, error) {
+			return r.broadcast(ctx, credential)
+		},
+	})
 }
 
 type relayError struct {
@@ -160,13 +148,6 @@ func newRelayClient(config *RelayConfig) (*relayClient, error) {
 		validateURL:  parsed.ResolveReference(&url.URL{Path: "v1/mpp/validate"}).String(),
 		broadcastURL: parsed.ResolveReference(&url.URL{Path: "v1/mpp/broadcast"}).String(),
 	}, nil
-}
-
-func (r *relayClient) verify(ctx context.Context, credential *mpp.Credential) (*mpp.Receipt, error) {
-	if _, err := r.validate(ctx, credential, nil, tempo.MethodName, tempo.IntentCharge); err != nil {
-		return nil, err
-	}
-	return r.broadcast(ctx, credential)
 }
 
 func (r *relayClient) validate(
@@ -225,6 +206,13 @@ func marshalRelayInput(credential *mpp.Credential) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(canonical.Bytes(), []byte("\n")), nil
+}
+
+func relayCredentialRequest(credential *mpp.Credential) (map[string]any, error) {
+	if credential.Challenge.Request == "" {
+		return nil, nil
+	}
+	return mpp.B64Decode(credential.Challenge.Request)
 }
 
 func (r *relayClient) post(
