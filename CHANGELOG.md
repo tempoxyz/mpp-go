@@ -1,5 +1,24 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.4.0`
+
+### Minor Changes
+
+- Add split credential validation and broadcast lifecycle hooks, with Tempo API relay configuration for server-side charges. (by @BrendanRyan, [#110](https://github.com/tempoxyz/mpp-go/pull/110))
+
+### Patch Changes
+
+- Update Go dependencies in the weekly Dependabot batch. (by @dependabot[bot], [#109](https://github.com/tempoxyz/mpp-go/pull/109))
+- Batch routine dependency updates weekly and automatically merge patch and minor
+- updates after all pull request checks pass. (by @BrendanRyan, [#104](https://github.com/tempoxyz/mpp-go/pull/104))
+- Return a fresh `WWW-Authenticate: Payment` challenge when payment credential verification fails, allowing clients to retry with the current challenge. (by @PranjalPaliwal, [#74](https://github.com/tempoxyz/mpp-go/pull/74))
+- Decode a bare `0x` (and empty) hex quantity as zero in `ParseHexUint64`, matching `ParseHexBigInt` so both JSON-RPC integer decoders agree on zero-value forms returned by lenient nodes. (by @Salad, [#91](https://github.com/tempoxyz/mpp-go/pull/91))
+- Accept legacy challenge descriptions containing unescaped quotes. (by @BrendanRyan, [#105](https://github.com/tempoxyz/mpp-go/pull/105))
+- Reject a negative `decimals` in `ParseUnits` (and thus `TransformUnits`) instead of panicking on the fractional-part slice. (by @Alex, [#87](https://github.com/tempoxyz/mpp-go/pull/87))
+- Reject malformed `WWW-Authenticate: Payment` auth-param lists instead of silently accepting trailing bare parameters or missing separators. (by @MarkHarrison, [#92](https://github.com/tempoxyz/mpp-go/pull/92))
+- Strip CR and LF characters in the default `FormatAuthenticate` path so a `Challenge` field containing `\r\n` (e.g. `Description`, `Realm`) can no longer split the `WWW-Authenticate` header and inject a response. `FormatAuthenticateStrict` continues to reject such values with an error. (by @Tleao, [#86](https://github.com/tempoxyz/mpp-go/pull/86))
+- Refuse standalone `Transport` auto-pay after a redirect. A `Transport` used with a bare `http.Client` (no `CheckRedirect`) had none of `Client.Do`'s cross-origin redirect protection, so a redirect to an attacker origin could be auto-paid. The Transport now fails closed on any redirect-produced request when no trusted origin is pinned in the context. (by @Mattew, [#84](https://github.com/tempoxyz/mpp-go/pull/84))
+
 ## `github.com/tempoxyz/mpp-go@0.3.0`
 
 ### Minor Changes
