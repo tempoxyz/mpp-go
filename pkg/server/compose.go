@@ -9,9 +9,51 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
+// Offer configures one payment method advertised by Compose.
+type Offer struct {
+	Method Method
+	Params ChargeParams
+}
+
+// Compose creates an HTTP middleware that advertises and accepts one or more
+// payment methods on the same route. Realm and secretKey are shared by every
+// offer.
+func Compose(realm, secretKey string, offers ...Offer) func(http.Handler) http.Handler {
+	if len(offers) == 0 {
+		panic("server: Compose requires at least one Offer")
+	}
+
+	configs := make([]ComposeConfig, len(offers))
+	for i, offer := range offers {
+		if isNilMethod(offer.Method) {
+			panic(fmt.Sprintf("server: Offer[%d].Method is nil", i))
+		}
+		configs[i] = ComposeConfig{
+			Mpp:    New(offer.Method, realm, secretKey),
+			Params: offer.Params,
+		}
+	}
+	return ComposeMiddleware(configs...)
+}
+
+func isNilMethod(method Method) bool {
+	if method == nil {
+		return true
+	}
+	value := reflect.ValueOf(method)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // ComposeConfig pairs an Mpp instance with the ChargeParams for one payment
 // method. Pass one or more of these to ComposeMiddleware to advertise multiple
 // payment options on a single route.
+//
+// Deprecated: use Offer and Compose.
 type ComposeConfig struct {
 	Mpp    *Mpp
 	Params ChargeParams

@@ -195,6 +195,31 @@ implement `Verify` continue to work for paid routes and broadcasts.
 Tempo relay methods implement the split lifecycle by delegating validation to
 `POST /v1/mpp/validate` and finalization to `POST /v1/mpp/broadcast`.
 
+## Multiple Payment Methods
+
+Use `server.Compose` to advertise multiple payment methods on one route. Each
+offer pairs a method with its route-specific charge parameters; the realm and
+secret are shared by the composed handler.
+
+```go
+paid := server.Compose(
+	"api.example.com",
+	os.Getenv("MPP_SECRET_KEY"),
+	server.Offer{
+		Method: tempoMethod,
+		Params: server.ChargeParams{Amount: "1.00", Currency: tempoCurrency},
+	},
+	server.Offer{
+		Method: stripeMethod,
+		Params: server.ChargeParams{Amount: "1.00", Currency: "usd"},
+	},
+)(next)
+```
+
+Without a credential, the handler returns one `WWW-Authenticate` value per
+offer. With a credential, it dispatches to the method whose intent and
+challenge-bound request match.
+
 ## Web Frameworks
 
 The most common Go HTTP stacks today are `net/http`, Gin, Echo, Chi, and Fiber.

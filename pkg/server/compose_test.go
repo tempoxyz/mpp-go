@@ -51,6 +51,16 @@ func composeTestServer(t *testing.T, configs ...ComposeConfig) *httptest.Server 
 	return httptest.NewServer(handler)
 }
 
+func composeOfferTestServer(t *testing.T, offers ...Offer) *httptest.Server {
+	t.Helper()
+	handler := Compose(composeRealm, composeSecret, offers...)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cred := CredentialFromContext(r.Context())
+		receipt := ReceiptFromContext(r.Context())
+		_, _ = io.WriteString(w, cred.Challenge.Method+":"+receipt.Reference)
+	}))
+	return httptest.NewServer(handler)
+}
+
 // getChallenge does a bare GET and returns the 402 response.
 func getChallenge(t *testing.T, url string) *http.Response {
 	t.Helper()
@@ -162,6 +172,85 @@ func TestComposeMiddleware_FansOutChallenges(t *testing.T) {
 		return
 	}
 
+}
+
+func TestComposeOffersFanOutAndDispatch(t *testing.T) {
+	methodA := composeTestMethod{name: "alpha"}
+	methodB := composeTestMethod{name: "beta"}
+	srv := composeOfferTestServer(t,
+		Offer{Method: methodA, Params: ChargeParams{Amount: "1.00"}},
+		Offer{Method: methodB, Params: ChargeParams{Amount: "2.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	betaChallenge := findChallenge(t, resp, "beta")
+	assert.Len(t, resp.Header.Values("WWW-Authenticate"), 2)
+	assert.Equal(t, composeRealm, betaChallenge.Realm)
+	assert.Equal(t, "2.00", betaChallenge.Request["amount"])
+	resp.Body.Close()
+
+	paid := payWith(t, srv.URL, betaChallenge)
+	defer paid.Body.Close()
+	require.Equal(t, http.StatusOK, paid.StatusCode)
+	body, err := io.ReadAll(paid.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "beta:0xreceipt-beta", string(body))
+}
+
+func TestComposeOffersRouteSameMethodByRequest(t *testing.T) {
+	method := composeTestMethod{name: "tempo"}
+	srv := composeOfferTestServer(t,
+		Offer{Method: method, Params: ChargeParams{Amount: "0.01"}},
+		Offer{Method: method, Params: ChargeParams{Amount: "10.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	defer resp.Body.Close()
+	require.Len(t, resp.Header.Values("WWW-Authenticate"), 2)
+
+	var expensive *mpp.Challenge
+	for _, header := range resp.Header.Values("WWW-Authenticate") {
+		challenge, err := mpp.ParseChallenge(header)
+		require.NoError(t, err)
+		if challenge.Request["amount"] == "10.00" {
+			expensive = challenge
+		}
+	}
+	require.NotNil(t, expensive)
+
+	paid := payWith(t, srv.URL, expensive)
+	defer paid.Body.Close()
+	assert.Equal(t, http.StatusOK, paid.StatusCode)
+}
+
+func TestComposePanicsOnInvalidOffers(t *testing.T) {
+	var typedNil *composeTestMethod
+	tests := []struct {
+		name      string
+		offers    []Offer
+		wantPanic string
+	}{
+		{name: "empty", wantPanic: "server: Compose requires at least one Offer"},
+		{
+			name:      "nil method",
+			offers:    []Offer{{Params: ChargeParams{Amount: "1.00"}}},
+			wantPanic: "server: Offer[0].Method is nil",
+		},
+		{
+			name:      "typed nil method",
+			offers:    []Offer{{Method: typedNil, Params: ChargeParams{Amount: "1.00"}}},
+			wantPanic: "server: Offer[0].Method is nil",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.PanicsWithValue(t, tt.wantPanic, func() {
+				Compose(composeRealm, composeSecret, tt.offers...)
+			})
+		})
+	}
 }
 
 func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
