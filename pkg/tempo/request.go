@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -206,7 +207,9 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		return ChargeRequest{}, err
 	}
 	if raw, ok := input["methodDetails"].(map[string]any); ok {
-		if chainID, ok := asInt64(raw["chainId"]); ok {
+		if chainID, ok, err := asInt64(raw["chainId"]); err != nil {
+			return ChargeRequest{}, err
+		} else if ok {
 			request.MethodDetails.ChainID = &chainID
 		}
 		request.MethodDetails.FeePayer = asBool(raw["feePayer"])
@@ -404,23 +407,28 @@ func asBool(value any) bool {
 	}
 }
 
-func asInt64(value any) (int64, bool) {
+func asInt64(value any) (int64, bool, error) {
 	switch typed := value.(type) {
 	case int:
-		return int64(typed), true
+		return int64(typed), true, nil
 	case int64:
-		return typed, true
+		return typed, true, nil
 	case float64:
-		return int64(typed), true
+		if typed != float64(int64(typed)) {
+			return 0, false, fmt.Errorf("tempo: chainId must be an integer")
+		}
+		return int64(typed), true, nil
 	case string:
 		if typed == "" {
-			return 0, false
+			return 0, false, nil
 		}
-		var result int64
-		_, err := fmt.Sscan(typed, &result)
-		return result, err == nil
+		result, err := strconv.ParseInt(typed, 10, 64)
+		if err != nil {
+			return 0, false, fmt.Errorf("tempo: invalid chainId %q", typed)
+		}
+		return result, true, nil
 	default:
-		return 0, false
+		return 0, false, nil
 	}
 }
 
