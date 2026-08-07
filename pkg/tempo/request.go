@@ -160,6 +160,10 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err != nil {
 		return ChargeRequest{}, err
 	}
+	supportedModes, err := validateChargeModes(params.SupportedModes)
+	if err != nil {
+		return ChargeRequest{}, err
+	}
 	request := ChargeRequest{
 		Amount:      amount,
 		Currency:    currency,
@@ -171,7 +175,7 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 			FeePayerURL:    params.FeePayerURL,
 			Memo:           memo,
 			Splits:         splits,
-			SupportedModes: append([]ChargeMode(nil), params.SupportedModes...),
+			SupportedModes: supportedModes,
 		},
 	}
 	if params.ChainID != 0 {
@@ -219,7 +223,10 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		if err != nil {
 			return ChargeRequest{}, err
 		}
-		request.MethodDetails.SupportedModes = parseModes(raw["supportedModes"])
+		request.MethodDetails.SupportedModes, err = parseModes(raw["supportedModes"])
+		if err != nil {
+			return ChargeRequest{}, err
+		}
 	}
 	if err := validateCanonicalSplits(request.Amount, request.MethodDetails.Splits); err != nil {
 		return ChargeRequest{}, err
@@ -424,7 +431,7 @@ func asInt64(value any) (int64, bool) {
 	}
 }
 
-func parseModes(value any) []ChargeMode {
+func parseModes(value any) ([]ChargeMode, error) {
 	rawModes, ok := value.([]any)
 	if !ok {
 		if strings, ok := value.([]string); ok {
@@ -432,9 +439,9 @@ func parseModes(value any) []ChargeMode {
 			for _, mode := range strings {
 				modes = append(modes, ChargeMode(mode))
 			}
-			return modes
+			return validateChargeModes(modes)
 		}
-		return nil
+		return nil, nil
 	}
 	modes := make([]ChargeMode, 0, len(rawModes))
 	for _, mode := range rawModes {
@@ -442,7 +449,18 @@ func parseModes(value any) []ChargeMode {
 			modes = append(modes, ChargeMode(value))
 		}
 	}
-	return modes
+	return validateChargeModes(modes)
+}
+
+func validateChargeModes(modes []ChargeMode) ([]ChargeMode, error) {
+	for _, mode := range modes {
+		switch mode {
+		case ChargeModePull, ChargeModePush:
+		default:
+			return nil, fmt.Errorf("tempo: unsupported charge mode %q", mode)
+		}
+	}
+	return append([]ChargeMode(nil), modes...), nil
 }
 
 func normalizeSplits(splits []SplitParams, decimals int, totalAmount string) ([]Split, error) {
