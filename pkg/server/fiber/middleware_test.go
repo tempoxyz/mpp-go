@@ -32,6 +32,70 @@ func (verifyTestIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[strin
 	return mpp.Success("0xreceipt", mpp.WithReceiptMethod("tempo")), nil
 }
 
+// ctxCapturingMethod records whether the context passed to Verify is the inert
+// background context, so a test can assert the middleware forwards the
+// request-scoped context instead.
+type ctxCapturingMethod struct {
+	isBackground chan bool
+}
+
+func (ctxCapturingMethod) Name() string { return "tempo" }
+
+func (m ctxCapturingMethod) Intents() map[string]server.Intent {
+	return map[string]server.Intent{"charge": ctxCapturingIntent{isBackground: m.isBackground}}
+}
+
+type ctxCapturingIntent struct{ isBackground chan bool }
+
+func (ctxCapturingIntent) Name() string { return "charge" }
+
+func (i ctxCapturingIntent) Verify(ctx context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
+	select {
+	case i.isBackground <- ctx == context.Background():
+	default:
+	}
+	return mpp.Success("0xreceipt", mpp.WithReceiptMethod("tempo")), nil
+}
+
+func TestChargeMiddlewareUsesRequestContextNotBackground(t *testing.T) {
+	t.Parallel()
+
+	isBackground := make(chan bool, 1)
+	payment := server.New(ctxCapturingMethod{isBackground: isBackground}, "api.example.com", "secret-key")
+	app := fiberfw.New()
+	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
+		return c.SendString("paid")
+	})
+
+	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	challengeResponse, err := app.Test(challengeRequest)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse, err := app.Test(paidRequest)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	require.Equal(t, http.StatusOK, paidResponse.StatusCode)
+
+	select {
+	case background := <-isBackground:
+		assert.False(t, background,
+			"Verify received context.Background(); the request-scoped context (which cancels on server shutdown and carries request values) must be forwarded instead")
+	default:
+		t.Fatal("Verify was not called")
+	}
+}
+
 func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	t.Parallel()
 
