@@ -1,6 +1,7 @@
 package tempo
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
@@ -30,6 +31,9 @@ func EncodeTransferWithMemo(recipient string, amount *big.Int, memo string) (str
 	memo = strings.TrimPrefix(strings.ToLower(memo), "0x")
 	if len(memo) != 64 {
 		return "", fmt.Errorf("tempo: memo must be exactly 32 bytes")
+	}
+	if _, err := hex.DecodeString(memo); err != nil {
+		return "", fmt.Errorf("tempo: memo must be hex encoded")
 	}
 	return fmt.Sprintf("0x%s%s%s%s", TransferWithMemoSelector, padAddress(recipient), padBigInt(amount), memo), nil
 }

@@ -135,6 +135,17 @@ func TestNormalizeChargeRequest_RejectsInvalidSplits(t *testing.T) {
 
 }
 
+func TestEncodeTransferWithMemo_RejectsInvalidHex(t *testing.T) {
+	t.Parallel()
+
+	_, err := EncodeTransferWithMemo(
+		"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		big.NewInt(500000),
+		"0x"+strings.Repeat("zz", 32),
+	)
+	assert.EqualError(t, err, "tempo: memo must be hex encoded")
+}
+
 func TestEncodeAttribution_VerifiesServerFingerprint(t *testing.T) {
 	t.Parallel()
 
