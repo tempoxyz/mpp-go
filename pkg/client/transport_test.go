@@ -184,6 +184,33 @@ func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 
 }
 
+func TestTransport_RoundTrip_402UnparseableExpiresIsSkipped(t *testing.T) {
+	// A challenge whose expires cannot be parsed must not be paid: the issuing
+	// server would itself reject the resulting credential.
+	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil,
+		mpp.WithExpires("not-a-timestamp"))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte("bad expires"))
+	}))
+	defer srv.Close()
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err, "unexpected error: %v", err) {
+		return
+	}
+	defer resp.Body.Close()
+	// No parseable/valid challenge → original 402 returned, no payment made.
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Equalf(t, 0, method.calls,
+		"CreateCredential() calls = %d, want 0 for unparseable expires", method.calls)
+}
+
 func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 	callCount := 0
 	var challenge *mpp.Challenge
