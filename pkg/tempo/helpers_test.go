@@ -100,6 +100,28 @@ func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {
 
 }
 
+func TestChargeRequestRejectsUnsupportedModes(t *testing.T) {
+	t.Parallel()
+
+	_, err := NormalizeChargeRequest(ChargeRequestParams{
+		Amount:         "1",
+		Currency:       "0x20c0000000000000000000000000000000000001",
+		Recipient:      "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		SupportedModes: []ChargeMode{"invalid"},
+	})
+	assert.EqualError(t, err, `tempo: unsupported charge mode "invalid"`)
+
+	_, err = ParseChargeRequest(map[string]any{
+		"amount":    "1000000",
+		"currency":  "0x20c0000000000000000000000000000000000001",
+		"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		"methodDetails": map[string]any{
+			"supportedModes": []any{"pull", "invalid"},
+		},
+	})
+	assert.EqualError(t, err, `tempo: unsupported charge mode "invalid"`)
+}
+
 func TestNormalizeChargeRequest_RejectsNegativeDecimals(t *testing.T) {
 	t.Parallel()
 
