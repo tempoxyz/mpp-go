@@ -334,11 +334,66 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 	}
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{
-		"status": "success",
+		"status":    "success",
+		"method":    "tempo",
+		"timestamp": "2026-01-01T00:00:00Z",
 	}))
 	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "receipt missing reference"),
 		"ParseReceipt() error = %v, want missing reference error", err) {
 		return
+	}
+
+	for _, tt := range []struct {
+		name    string
+		receipt map[string]any
+		wantErr string
+	}{
+		{
+			name: "missing timestamp",
+			receipt: map[string]any{
+				"status":    "success",
+				"method":    "tempo",
+				"reference": "ref-123",
+			},
+			wantErr: "receipt missing timestamp",
+		},
+		{
+			name: "empty timestamp",
+			receipt: map[string]any{
+				"status":    "success",
+				"method":    "tempo",
+				"timestamp": "",
+				"reference": "ref-123",
+			},
+			wantErr: "receipt missing timestamp",
+		},
+		{
+			name: "missing method",
+			receipt: map[string]any{
+				"status":    "success",
+				"timestamp": "2026-01-01T00:00:00Z",
+				"reference": "ref-123",
+			},
+			wantErr: "receipt missing method",
+		},
+		{
+			name: "empty method",
+			receipt: map[string]any{
+				"status":    "success",
+				"method":    "",
+				"timestamp": "2026-01-01T00:00:00Z",
+				"reference": "ref-123",
+			},
+			wantErr: "receipt missing method",
+		},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseReceipt(b64EncodeAny(tt.receipt))
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
 	}
 
 	_, err = ParseReceipt(b64EncodeAny(map[string]any{

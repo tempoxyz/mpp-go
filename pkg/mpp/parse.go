@@ -491,13 +491,15 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 	}
 
 	var ts time.Time
-	if tsRaw := anyStr(data["timestamp"]); tsRaw != "" {
-		ts, err = time.Parse(time.RFC3339Nano, strings.Replace(tsRaw, "Z", "+00:00", 1))
+	tsRaw := anyStr(data["timestamp"])
+	if tsRaw == "" {
+		return nil, fmt.Errorf("mpp: receipt missing timestamp")
+	}
+	ts, err = time.Parse(time.RFC3339Nano, strings.Replace(tsRaw, "Z", "+00:00", 1))
+	if err != nil {
+		ts, err = time.Parse(time.RFC3339, tsRaw)
 		if err != nil {
-			ts, err = time.Parse(time.RFC3339, tsRaw)
-			if err != nil {
-				return nil, fmt.Errorf("mpp: invalid receipt timestamp: %w", err)
-			}
+			return nil, fmt.Errorf("mpp: invalid receipt timestamp: %w", err)
 		}
 	}
 
@@ -507,7 +509,10 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 	}
 
 	method := anyStr(data["method"])
-	if method != "" && !isMethodName(method) {
+	if method == "" {
+		return nil, fmt.Errorf("mpp: receipt missing method")
+	}
+	if !isMethodName(method) {
 		return nil, fmt.Errorf("mpp: invalid receipt method %q", method)
 	}
 
