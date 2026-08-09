@@ -53,6 +53,11 @@ var _ mppclient.Method = (*Method)(nil)
 
 // New constructs a Tempo charge client method.
 func New(config Config) (*Method, error) {
+	switch config.CredentialType {
+	case "", tempo.CredentialTypeTransaction, tempo.CredentialTypeHash, tempo.CredentialTypeProof:
+	default:
+		return nil, fmt.Errorf("tempo client: unsupported credential type %q", config.CredentialType)
+	}
 	if config.RPC == nil && config.RPCURL == "" && config.ChainID != 0 && !tempo.IsKnownChainID(config.ChainID) {
 		return nil, fmt.Errorf("tempo client: unknown chain id %d; configure RPC or RPCURL explicitly", config.ChainID)
 	}
