@@ -44,12 +44,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	secretKey := "chi-example-secret"
+	secretKey := "chi-example-secret-minimum-32-bytes"
 	if envSecret := os.Getenv("MPP_SECRET_KEY"); envSecret != "" {
 		secretKey = envSecret
 	}
 
-	payment := server.New(method, devnet.Realm, secretKey)
+	payment, err := server.New(method, devnet.Realm, secretKey)
+	if err != nil {
+		log.Fatal(err)
+	}
 	router := chi.NewRouter()
 
 	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {

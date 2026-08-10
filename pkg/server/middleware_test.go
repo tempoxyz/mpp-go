@@ -42,7 +42,7 @@ func (verificationFailedIntent) Verify(_ context.Context, _ *mpp.Credential, _ m
 }
 
 func TestChargeMiddleware_EndToEnd(t *testing.T) {
-	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, CredentialFromContext(r.Context()).Source+":"+ReceiptFromContext(r.Context()).Reference)
 	}))
@@ -119,7 +119,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 }
 
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
-	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "paid")
 	}))
@@ -158,7 +158,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 }
 
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
-	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		_, _ = io.WriteString(w, "paid")
@@ -195,7 +195,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 }
 
 func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
-	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_, _ = io.WriteString(w, string(body))
@@ -233,7 +233,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 }
 
 func TestChargeMiddlewareReturnsFreshChallengeOnVerificationFailure(t *testing.T) {
-	payment := New(verificationFailedMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, verificationFailedMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Fail(t, "handler should not be called")
 	}))
@@ -271,7 +271,7 @@ func TestChargeMiddlewareReturnsFreshChallengeOnVerificationFailure(t *testing.T
 }
 
 func TestChargeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
-	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handlerCalled := false
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
@@ -311,7 +311,7 @@ func TestChargeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
 }
 
 func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
-	payment := New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{
 		Amount:      "0.50",
 		Description: "Line one\r\nLine two",

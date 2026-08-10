@@ -47,7 +47,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 			return err
 		}
 	})
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e.GET("/paid", func(c echofw.Context) error {
 		credential := Credential(c)
 		receipt := Receipt(c)
@@ -123,7 +123,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	t.Parallel()
 
 	e := echofw.New()
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e.GET("/paid/:id", func(c echofw.Context) error {
 		return c.String(http.StatusOK, "paid")
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
@@ -159,7 +159,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	t.Parallel()
 
 	e := echofw.New()
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e.POST("/paid", func(c echofw.Context) error {
 		_, _ = io.ReadAll(c.Request().Body)
 		return c.String(http.StatusOK, "paid")
@@ -192,7 +192,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	t.Parallel()
 
 	e := echofw.New()
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e.POST("/paid", func(c echofw.Context) error {
 		body, _ := io.ReadAll(c.Request().Body)
 		return c.String(http.StatusOK, string(body))
@@ -218,4 +218,11 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, paidResponse.Code)
 	assert.Equal(t, originalBody, paidResponse.Body.String())
+}
+
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
+	t.Helper()
+	payment, err := server.New(method, realm, secretKey)
+	require.NoError(t, err)
+	return payment
 }

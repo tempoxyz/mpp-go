@@ -36,7 +36,10 @@ func startRelayServer(apiKey, apiURL, secretKey string, chainID int64) (*relaySe
 	if err != nil {
 		return nil, fmt.Errorf("configure relay server: %w", err)
 	}
-	payment := server.New(method, relayRealm, secretKey)
+	payment, err := server.New(method, relayRealm, secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("configure payment server: %w", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {

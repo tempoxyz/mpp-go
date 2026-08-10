@@ -27,7 +27,10 @@ func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	payment := server.New(method, devnet.Realm, "example-secret")
+	payment, err := server.New(method, devnet.Realm, "example-secret-minimum-32-byte-secret")
+	if err != nil {
+		return nil, err
+	}
 
 	handler := server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:         "0.50",

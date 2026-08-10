@@ -35,7 +35,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	t.Parallel()
 
 	ginfw.SetMode(ginfw.TestMode)
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	router := ginfw.New()
 	router.GET("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
 		credential := Credential(c)
@@ -104,7 +104,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	t.Parallel()
 
 	ginfw.SetMode(ginfw.TestMode)
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	router := ginfw.New()
 	router.GET("/paid/:id", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
 		c.String(http.StatusOK, "paid")
@@ -141,7 +141,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	t.Parallel()
 
 	ginfw.SetMode(ginfw.TestMode)
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	router := ginfw.New()
 	router.POST("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
 		_, _ = io.ReadAll(c.Request.Body)
@@ -175,7 +175,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	t.Parallel()
 
 	ginfw.SetMode(ginfw.TestMode)
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	router := ginfw.New()
 	router.POST("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
 		body, _ := io.ReadAll(c.Request.Body)
@@ -202,4 +202,11 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, paidResponse.Code)
 	assert.Equal(t, originalBody, paidResponse.Body.String())
+}
+
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
+	t.Helper()
+	payment, err := server.New(method, realm, secretKey)
+	require.NoError(t, err)
+	return payment
 }

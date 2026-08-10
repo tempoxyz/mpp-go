@@ -18,7 +18,7 @@ func (m chargeTestMethod) Intents() map[string]Intent { return m.intents }
 func TestMppCharge_UsesMetaAsChallengeMeta(t *testing.T) {
 	t.Parallel()
 
-	mppServer := New(chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}}, "api.example.com", "secret-key")
+	mppServer := newTestServer(t, chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	result, err := mppServer.Charge(context.Background(), ChargeParams{
 		Amount:     "0.50",
 		Currency:   "0x20c0000000000000000000000000000000000001",
@@ -71,7 +71,7 @@ func TestMppCharge_UsesMetaAsChallengeMeta(t *testing.T) {
 func TestMppCharge_RequiresChargeIntent(t *testing.T) {
 	t.Parallel()
 
-	mppServer := New(chargeTestMethod{intents: map[string]Intent{}}, "api.example.com", "secret-key")
+	mppServer := newTestServer(t, chargeTestMethod{intents: map[string]Intent{}}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	_, err := mppServer.Charge(context.Background(), ChargeParams{Amount: "0.50"})
 	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), `does not support charge intent`),
 		"Charge() error = %v, want missing charge intent error", err) {

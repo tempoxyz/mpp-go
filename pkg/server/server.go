@@ -130,6 +130,10 @@ type ChargeRequestBuilder interface {
 	BuildChargeRequest(params ChargeParams) (map[string]any, error)
 }
 
+// minimumSecretKeyBytes is the shortest secret key accepted for HMAC-bound
+// challenge IDs. It matches the canonical mppx reference (assertSecretKey).
+const minimumSecretKeyBytes = 32
+
 // Mpp is the server-side payment handler.
 type Mpp struct {
 	method    Method
@@ -137,13 +141,18 @@ type Mpp struct {
 	secretKey string
 }
 
-// New creates an Mpp instance.
-func New(method Method, realm, secretKey string) *Mpp {
+// New creates an Mpp instance. It returns an error when secretKey is shorter
+// than minimumSecretKeyBytes, since a weak secret yields forgeable,
+// HMAC-bound challenge IDs.
+func New(method Method, realm, secretKey string) (*Mpp, error) {
+	if len(secretKey) < minimumSecretKeyBytes {
+		return nil, fmt.Errorf("server: secret key must be at least %d bytes", minimumSecretKeyBytes)
+	}
 	return &Mpp{
 		method:    method,
 		realm:     realm,
 		secretKey: secretKey,
-	}
+	}, nil
 }
 
 // Realm returns the WWW-Authenticate realm used by this payment handler.

@@ -38,7 +38,7 @@ func (i composeTestIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[st
 
 const (
 	composeRealm  = "api.example.com"
-	composeSecret = "secret-key"
+	composeSecret = "test-secret-key-minimum-32-byte-secret"
 )
 
 func composeTestServer(t *testing.T, configs ...ComposeConfig) *httptest.Server {
@@ -137,8 +137,8 @@ func payWithBody(t *testing.T, url string, challenge *mpp.Challenge, body string
 // --- tests ---
 
 func TestComposeMiddleware_FansOutChallenges(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
-	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -165,8 +165,8 @@ func TestComposeMiddleware_FansOutChallenges(t *testing.T) {
 }
 
 func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
-	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -206,7 +206,7 @@ func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
 }
 
 func TestComposeMiddlewareAutoScopesResourceAndQuery(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -228,8 +228,8 @@ func TestComposeMiddlewareAutoScopesResourceAndQuery(t *testing.T) {
 }
 
 func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
-	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -254,7 +254,7 @@ func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 }
 
 func TestComposeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 	handler := ComposeMiddleware(ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
@@ -286,8 +286,8 @@ func TestComposeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
 	// Two entries with the same method+intent but different amounts.
 	// The credential should dispatch to the correct entry based on request matching.
-	methodCheap := New(composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
-	methodExpensive := New(composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
+	methodCheap := newTestServer(t, composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
+	methodExpensive := newTestServer(t, composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodCheap, Params: ChargeParams{Amount: "0.01"}},
@@ -335,8 +335,8 @@ func TestComposeMiddleware_SameMethodDifferentAmounts(t *testing.T) {
 }
 
 func TestComposeMiddleware_SameRequestDifferentMetaSelectsMatchingConfig(t *testing.T) {
-	methodBasic := New(composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
-	methodPro := New(composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
+	methodBasic := newTestServer(t, composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
+	methodPro := newTestServer(t, composeTestMethod{name: "tempo"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodBasic, Params: ChargeParams{Amount: "1.00", Meta: map[string]string{"plan": "basic"}}},
@@ -376,7 +376,7 @@ func TestComposeMiddleware_SameRequestDifferentMetaSelectsMatchingConfig(t *test
 }
 
 func TestComposeMiddleware_RejectsUnknownMethod(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -394,8 +394,8 @@ func TestComposeMiddleware_RejectsUnknownMethod(t *testing.T) {
 }
 
 func TestComposeMiddleware_CrossMethodCredentialRejected(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
-	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -433,8 +433,8 @@ func TestComposeMiddleware_CrossMethodCredentialRejected(t *testing.T) {
 }
 
 func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
-	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -475,8 +475,8 @@ func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing
 }
 
 func TestComposeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
-	methodB := New(composeTestMethod{name: "beta"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -511,7 +511,7 @@ func TestComposeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
 }
 
 func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -565,7 +565,7 @@ func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *
 }
 
 func TestComposeMiddleware_SingleMethod(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
@@ -599,7 +599,7 @@ func TestComposeMiddleware_SingleMethod(t *testing.T) {
 }
 
 func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
-	methodA := New(composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
 		ComposeConfig{
@@ -659,8 +659,8 @@ func TestComposeMiddleware_PanicsOnNilMpp(t *testing.T) {
 }
 
 func TestComposeMiddleware_PanicsOnMixedRealms(t *testing.T) {
-	a := New(composeTestMethod{name: "alpha"}, "realm-a.example.com", composeSecret)
-	b := New(composeTestMethod{name: "beta"}, "realm-b.example.com", composeSecret)
+	a := newTestServer(t, composeTestMethod{name: "alpha"}, "realm-a.example.com", composeSecret)
+	b := newTestServer(t, composeTestMethod{name: "beta"}, "realm-b.example.com", composeSecret)
 
 	defer func() {
 		{

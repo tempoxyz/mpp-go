@@ -76,14 +76,14 @@ import (
     charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
-payment := server.New(method, realm, secret)
+payment, err := server.New(method, realm, secret)
 
 // ❌ Bad
 import (
     mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 )
 
-payment := mppserver.New(method, realm, secret)
+payment, err := mppserver.New(method, realm, secret)
 ```
 
 When a local variable would shadow the package name, use a short variable name (`c`, `srv`) instead of aliasing the import.

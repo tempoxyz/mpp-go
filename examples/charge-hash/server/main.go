@@ -31,7 +31,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	payment := server.New(method, devnet.Realm, "example-secret")
+	payment, err := server.New(method, devnet.Realm, "example-secret-minimum-32-byte-secret")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/paid", server.ChargeMiddleware(payment, server.ChargeParams{

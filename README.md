@@ -50,6 +50,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -62,7 +63,11 @@ func main() {
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
 
-	payment := server.New(method, "api.example.com", "replace-me")
+	// Secret must be at least 32 bytes (generate with: openssl rand -base64 32).
+	payment, err := server.New(method, "api.example.com", "replace-me-with-a-32-byte-min-secret")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	handler := server.ChargeMiddleware(payment, server.ChargeParams{
 		Amount:      "0.50",

@@ -30,7 +30,7 @@ type relayCall struct {
 
 func relayTestCredential(payload map[string]any) *mpp.Credential {
 	challenge := mpp.NewChallenge(
-		"test-secret-key",
+		"test-secret-key-minimum-32-byte-secret",
 		"api.example.com",
 		tempo.MethodName,
 		tempo.IntentCharge,
@@ -178,7 +178,7 @@ func TestRelayIntentExposesCredentialHooks(t *testing.T) {
 		Relay:     &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: server.URL},
 	})
 	require.NoError(t, err)
-	payment := mppserver.New(method, "api.example.com", "test-secret-key")
+	payment := newTestServer(t, method, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	credential := relayTestCredential(map[string]any{"type": "transaction", "signature": "0x1234"})
 
 	validation, err := payment.ValidateCredential(context.Background(), credential)
@@ -384,4 +384,11 @@ func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
 
 	_, err = method.BuildChargeRequest(mppserver.ChargeParams{Amount: "1"})
 	require.NoError(t, err)
+}
+
+func newTestServer(t *testing.T, method mppserver.Method, realm, secretKey string) *mppserver.Mpp {
+	t.Helper()
+	payment, err := mppserver.New(method, realm, secretKey)
+	require.NoError(t, err)
+	return payment
 }

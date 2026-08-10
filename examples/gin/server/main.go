@@ -44,12 +44,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	secretKey := "gin-example-secret"
+	secretKey := "gin-example-secret-minimum-32-bytes"
 	if envSecret := os.Getenv("MPP_SECRET_KEY"); envSecret != "" {
 		secretKey = envSecret
 	}
 
-	payment := server.New(method, devnet.Realm, secretKey)
+	payment, err := server.New(method, devnet.Realm, secretKey)
+	if err != nil {
+		log.Fatal(err)
+	}
 	router := ginfw.Default()
 
 	router.GET("/health", func(c *ginfw.Context) {

@@ -77,14 +77,14 @@ func TestVerifyOrChallengeUsesSplitLifecycle(t *testing.T) {
 	t.Parallel()
 	intent := &splitTestIntent{}
 	request := map[string]any{"amount": "1", "currency": "0x123"}
-	credential := splitCredential("secret-key", request)
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", request)
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
 		Authorization: credential.ToAuthorization(),
 		Intent:        newSplitTestServerIntent(t, intent),
 		Request:       request,
 		Realm:         "api.example.com",
-		SecretKey:     "secret-key",
+		SecretKey:     "test-secret-key-minimum-32-byte-secret",
 		Method:        "tempo",
 		Expires:       credential.Challenge.Expires,
 	})
@@ -98,9 +98,9 @@ func TestMppCredentialLifecycle(t *testing.T) {
 	t.Parallel()
 	intent := &splitTestIntent{}
 	method := chargeTestMethod{intents: map[string]Intent{"charge": newSplitTestServerIntent(t, intent)}}
-	payment := New(method, "api.example.com", "secret-key")
+	payment := newTestServer(t, method, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	request := map[string]any{"amount": "1", "currency": "0x123"}
-	credential := splitCredential("secret-key", request)
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", request)
 
 	validation, err := payment.ValidateCredential(context.Background(), credential)
 	require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestMppCredentialLifecycle(t *testing.T) {
 func TestNewIntentSynthesizesVerify(t *testing.T) {
 	t.Parallel()
 	intent := &splitTestIntent{}
-	credential := splitCredential("secret-key", map[string]any{"amount": "1"})
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", map[string]any{"amount": "1"})
 	configured := newSplitTestServerIntent(t, intent)
 
 	receipt, err := configured.Verify(
@@ -191,12 +191,12 @@ func TestNewIntentValidatesHookShape(t *testing.T) {
 
 func TestMppValidateCredentialRequiresSplitHooks(t *testing.T) {
 	t.Parallel()
-	payment := New(
+	payment := newTestServer(t,
 		chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}},
 		"api.example.com",
-		"secret-key",
+		"test-secret-key-minimum-32-byte-secret",
 	)
-	credential := splitCredential("secret-key", map[string]any{"amount": "1"})
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", map[string]any{"amount": "1"})
 
 	_, err := payment.ValidateCredential(context.Background(), credential)
 	var paymentErr *mpp.PaymentError
@@ -207,12 +207,12 @@ func TestMppValidateCredentialRequiresSplitHooks(t *testing.T) {
 
 func TestMppBroadcastCredentialSupportsLegacyIntent(t *testing.T) {
 	t.Parallel()
-	payment := New(
+	payment := newTestServer(t,
 		chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}},
 		"api.example.com",
-		"secret-key",
+		"test-secret-key-minimum-32-byte-secret",
 	)
-	credential := splitCredential("secret-key", map[string]any{"amount": "1"})
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", map[string]any{"amount": "1"})
 
 	receipt, err := payment.BroadcastCredential(context.Background(), credential)
 	require.NoError(t, err)
@@ -222,12 +222,12 @@ func TestMppBroadcastCredentialSupportsLegacyIntent(t *testing.T) {
 func TestMppBroadcastCredentialStopsAfterValidationFailure(t *testing.T) {
 	t.Parallel()
 	intent := &splitTestIntent{validateErr: errors.New("invalid")}
-	payment := New(
+	payment := newTestServer(t,
 		chargeTestMethod{intents: map[string]Intent{"charge": newSplitTestServerIntent(t, intent)}},
 		"api.example.com",
-		"secret-key",
+		"test-secret-key-minimum-32-byte-secret",
 	)
-	credential := splitCredential("secret-key", map[string]any{"amount": "1"})
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", map[string]any{"amount": "1"})
 
 	_, err := payment.BroadcastCredential(context.Background(), credential)
 	require.Error(t, err)
@@ -238,10 +238,10 @@ func TestMppBroadcastCredentialStopsAfterValidationFailure(t *testing.T) {
 func TestMppCredentialLifecycleRejectsForeignChallenge(t *testing.T) {
 	t.Parallel()
 	intent := &splitTestIntent{}
-	payment := New(
+	payment := newTestServer(t,
 		chargeTestMethod{intents: map[string]Intent{"charge": newSplitTestServerIntent(t, intent)}},
 		"api.example.com",
-		"secret-key",
+		"test-secret-key-minimum-32-byte-secret",
 	)
 	credential := splitCredential("foreign-secret", map[string]any{"amount": "1"})
 

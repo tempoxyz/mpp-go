@@ -57,12 +57,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	secretKey := "basic-example-secret"
+	secretKey := "basic-example-secret-minimum-32-bytes"
 	if envSecret := getenv("MPP_SECRET_KEY"); envSecret != "" {
 		secretKey = envSecret
 	}
 
-	payment := server.New(method, devnet.Realm, secretKey)
+	payment, err := server.New(method, devnet.Realm, secretKey)
+	if err != nil {
+		log.Fatal(err)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {

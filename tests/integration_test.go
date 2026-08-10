@@ -36,7 +36,7 @@ const (
 	defaultIntegrationRPCURL = "http://localhost:8545"
 
 	integrationRealm     = "mpp-go.local"
-	integrationSecretKey = "integration-secret"
+	integrationSecretKey = "integration-secret-minimum-32-byte-secret"
 	// integrationCurrency is the fixed TIP-20 token used in the local devnet tests.
 	integrationCurrency = "0x20c0000000000000000000000000000000000000"
 	// integrationRecipient is the account that receives paid transfers during tests.
@@ -957,9 +957,9 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		ChainID:        int64(chainID),
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
-	basic := mppserver.New(basicMethod, integrationRealm, integrationSecretKey)
-	feePayer := mppserver.New(feePayerMethod, integrationRealm, integrationSecretKey)
-	hash := mppserver.New(hashMethod, integrationRealm, integrationSecretKey)
+	basic := newTestServer(t, basicMethod, integrationRealm, integrationSecretKey)
+	feePayer := newTestServer(t, feePayerMethod, integrationRealm, integrationSecretKey)
+	hash := newTestServer(t, hashMethod, integrationRealm, integrationSecretKey)
 
 	proofMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
 		Intent:    intent,
@@ -973,8 +973,8 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		Recipient: integrationRecipient,
 		ChainID:   int64(chainID),
 	})
-	proof := mppserver.New(proofMethod, integrationRealm, integrationSecretKey)
-	splits := mppserver.New(splitsMethod, integrationRealm, integrationSecretKey)
+	proof := newTestServer(t, proofMethod, integrationRealm, integrationSecretKey)
+	splits := newTestServer(t, splitsMethod, integrationRealm, integrationSecretKey)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/paid", paidHandler(t, basic, false))
@@ -1123,4 +1123,11 @@ func writeIntegrationPaymentError(w http.ResponseWriter, err error) {
 
 	w.WriteHeader(http.StatusInternalServerError)
 	_ = json.NewEncoder(w).Encode(map[string]any{"detail": err.Error()})
+}
+
+func newTestServer(t *testing.T, method mppserver.Method, realm, secretKey string) *mppserver.Mpp {
+	t.Helper()
+	payment, err := mppserver.New(method, realm, secretKey)
+	require.NoError(t, err)
+	return payment
 }

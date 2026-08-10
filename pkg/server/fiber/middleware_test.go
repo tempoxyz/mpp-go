@@ -35,7 +35,7 @@ func (verifyTestIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[strin
 func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	t.Parallel()
 
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	app := fiberfw.New()
 
 	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
@@ -120,7 +120,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	t.Parallel()
 
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	app := fiberfw.New()
 	app.Get("/paid/:id", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
 		return c.SendString("paid")
@@ -158,7 +158,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	t.Parallel()
 
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	app := fiberfw.New()
 
 	app.Post("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
@@ -193,7 +193,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	t.Parallel()
 
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	app := fiberfw.New()
 
 	app.Post("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
@@ -229,7 +229,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	t.Parallel()
 
-	payment := server.New(middlewareTestMethod{}, "api.example.com", "secret-key")
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	app := fiberfw.New()
 
 	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{
@@ -257,4 +257,11 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(challengeResponse.Body).Decode(&problem))
 	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+}
+
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
+	t.Helper()
+	payment, err := server.New(method, realm, secretKey)
+	require.NoError(t, err)
+	return payment
 }

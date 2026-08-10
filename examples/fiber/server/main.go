@@ -44,12 +44,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	secretKey := "fiber-example-secret"
+	secretKey := "fiber-example-secret-minimum-32-bytes"
 	if envSecret := os.Getenv("MPP_SECRET_KEY"); envSecret != "" {
 		secretKey = envSecret
 	}
 
-	payment := server.New(method, devnet.Realm, secretKey)
+	payment, err := server.New(method, devnet.Realm, secretKey)
+	if err != nil {
+		log.Fatal(err)
+	}
 	app := fiberfw.New()
 
 	app.Get("/health", func(c *fiberfw.Ctx) error {
