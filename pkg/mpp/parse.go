@@ -490,25 +490,31 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 		return nil, fmt.Errorf("mpp: invalid receipt status: %q", status)
 	}
 
-	var ts time.Time
-	if tsRaw := anyStr(data["timestamp"]); tsRaw != "" {
-		ts, err = time.Parse(time.RFC3339Nano, strings.Replace(tsRaw, "Z", "+00:00", 1))
-		if err != nil {
-			ts, err = time.Parse(time.RFC3339, tsRaw)
-			if err != nil {
-				return nil, fmt.Errorf("mpp: invalid receipt timestamp: %w", err)
-			}
-		}
-	}
-
 	reference := anyStr(data["reference"])
 	if reference == "" {
 		return nil, fmt.Errorf("mpp: receipt missing reference")
 	}
 
+	// method and timestamp are required base receipt fields per
+	// draft-ietf-httpauth-payment §5.3 and the canonical mppx Receipt schema.
 	method := anyStr(data["method"])
-	if method != "" && !isMethodName(method) {
+	if method == "" {
+		return nil, fmt.Errorf("mpp: receipt missing method")
+	}
+	if !isMethodName(method) {
 		return nil, fmt.Errorf("mpp: invalid receipt method %q", method)
+	}
+
+	tsRaw := anyStr(data["timestamp"])
+	if tsRaw == "" {
+		return nil, fmt.Errorf("mpp: receipt missing timestamp")
+	}
+	ts, err := time.Parse(time.RFC3339Nano, strings.Replace(tsRaw, "Z", "+00:00", 1))
+	if err != nil {
+		ts, err = time.Parse(time.RFC3339, tsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: invalid receipt timestamp: %w", err)
+		}
 	}
 
 	var externalID string

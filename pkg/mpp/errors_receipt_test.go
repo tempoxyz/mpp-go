@@ -376,6 +376,33 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 
 }
 
+// TestParsePaymentReceiptRequiresMethodAndTimestamp asserts that method and
+// timestamp are required receipt fields, matching draft-ietf-httpauth-payment
+// §5.3 and the canonical mppx Receipt schema. The wire values are the exact
+// error_missing_method and error_missing_timestamp scenarios from the shared
+// conformance suite (conformance/vectors/receipt.json), both of which require
+// parse rejection. Refs Agricola finding AGR-2026-048.
+func TestParsePaymentReceiptRequiresMethodAndTimestamp(t *testing.T) {
+	t.Parallel()
+
+	// conformance error_missing_method: valid receipt with "method" omitted.
+	const missingMethodWire = "eyJyZWZlcmVuY2UiOiIweGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYiIsInN0YXR1cyI6InN1Y2Nlc3MiLCJ0aW1lc3RhbXAiOiIyMDI2LTAxLTI5VDEyOjAwOjMwWiJ9"
+	// conformance error_missing_timestamp: valid receipt with "timestamp" omitted.
+	const missingTimestampWire = "eyJtZXRob2QiOiJ0ZW1wbyIsInJlZmVyZW5jZSI6IjB4YWJjZGVmMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiIiwic3RhdHVzIjoic3VjY2VzcyJ9"
+
+	_, err := ParseReceipt(missingMethodWire)
+	if assert.Errorf(t, err, "ParseReceipt(missing method) error = nil, want rejection") {
+		assert.Containsf(t, err.Error(), "receipt missing method",
+			"ParseReceipt(missing method) error = %v, want missing method error", err)
+	}
+
+	_, err = ParseReceipt(missingTimestampWire)
+	if assert.Errorf(t, err, "ParseReceipt(missing timestamp) error = nil, want rejection") {
+		assert.Containsf(t, err.Error(), "receipt missing timestamp",
+			"ParseReceipt(missing timestamp) error = %v, want missing timestamp error", err)
+	}
+}
+
 func TestChallengeVerifyAndToEcho(t *testing.T) {
 	t.Parallel()
 
