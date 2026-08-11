@@ -120,7 +120,30 @@ func TestRelayVerifyValidatesAndBroadcastsCredential(t *testing.T) {
 	assert.Equal(t, "/mpp/v1/mpp/broadcast", broadcastCall.Path)
 	raw, err := hexutil.Decode("0x1234")
 	require.NoError(t, err)
-	assert.Equal(t, "mppx_"+crypto.Keccak256Hash(raw).Hex(), broadcastCall.IdempotencyKey)
+	assert.Equal(t, "mpp_"+crypto.Keccak256Hash(raw).Hex(), broadcastCall.IdempotencyKey)
+}
+
+func TestRelayIdempotencyKeyUsesCanonicalNamespace(t *testing.T) {
+	t.Parallel()
+	// Canonical mppx namespaces relay broadcast idempotency keys with `mpp_`
+	// (src/tempo/server/Relay.ts:235,239). The key must match byte-for-byte so
+	// the relay can deduplicate equivalent canonical and Go submissions.
+	transaction := relayTestCredential(map[string]any{"type": "transaction", "signature": "0x1234"})
+	raw, err := hexutil.Decode("0x1234")
+	require.NoError(t, err)
+	txInput, err := marshalRelayInput(transaction)
+	require.NoError(t, err)
+	txKey := relayIdempotencyKey(transaction, txInput)
+	assert.Equal(t, "mpp_"+crypto.Keccak256Hash(raw).Hex(), txKey)
+	assert.NotContains(t, txKey, "mppx_")
+
+	fallback := relayTestCredential(map[string]any{"type": "hash", "hash": "0xabc"})
+	input, err := marshalRelayInput(fallback)
+	require.NoError(t, err)
+	digest := sha256.Sum256(input)
+	key := relayIdempotencyKey(fallback, input)
+	assert.Equal(t, "mpp_0x"+hex.EncodeToString(digest[:]), key)
+	assert.NotContains(t, key, "mppx_")
 }
 
 func TestRelayFinalizesPushCredential(t *testing.T) {
@@ -153,7 +176,7 @@ func TestRelayFinalizesPushCredential(t *testing.T) {
 	input, err := marshalRelayInput(credential)
 	require.NoError(t, err)
 	digest := sha256.Sum256(input)
-	assert.Equal(t, "mppx_0x"+hex.EncodeToString(digest[:]), broadcastCall.IdempotencyKey)
+	assert.Equal(t, "mpp_0x"+hex.EncodeToString(digest[:]), broadcastCall.IdempotencyKey)
 }
 
 func TestRelayIntentExposesCredentialHooks(t *testing.T) {

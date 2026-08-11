@@ -255,12 +255,12 @@ func relayIdempotencyKey(credential *mpp.Credential, input []byte) string {
 	if credential.Payload["type"] == string(tempo.CredentialTypeTransaction) {
 		if signature, ok := credential.Payload["signature"].(string); ok {
 			if raw, err := hexutil.Decode(signature); err == nil {
-				return "mppx_" + crypto.Keccak256Hash(raw).Hex()
+				return "mpp_" + crypto.Keccak256Hash(raw).Hex()
 			}
 		}
 	}
 	digest := sha256.Sum256(input)
-	return "mppx_0x" + hex.EncodeToString(digest[:])
+	return "mpp_0x" + hex.EncodeToString(digest[:])
 }
 
 func parseRelayReceipt(receipt *relayReceipt) (*mpp.Receipt, error) {
