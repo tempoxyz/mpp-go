@@ -36,13 +36,23 @@ func toBytes(body any) []byte {
 		return v
 	case string:
 		return []byte(v)
-	case map[string]any:
+	case json.RawMessage:
+		return v
+	default:
+		// Any other value that came out of ordinary JSON decoding — a
+		// map, a slice, a typed struct, a scalar — is JSON-marshallable.
+		// Route it through the same canonical JSON path used for
+		// map[string]any rather than rejecting it outright; this is
+		// what BodyDigest's `body any` signature already promises.
 		b, err := json.Marshal(v)
 		if err != nil {
-			panic(fmt.Sprintf("mpp: failed to marshal body: %v", err))
+			// Only genuinely non-JSON-serializable Go values reach
+			// here (chan, func, unsupported cyclic structures) —
+			// values no ordinary decoded HTTP body can produce. This
+			// remains a programmer error, not an operational input a
+			// server should ever receive from request handling.
+			panic(fmt.Sprintf("mpp: unsupported body type %T: %v", body, err))
 		}
 		return b
-	default:
-		panic(fmt.Sprintf("mpp: unsupported body type %T", body))
 	}
 }
