@@ -12,6 +12,16 @@ type Receipt struct {
 	ExternalID     string         `json:"externalId,omitempty"`
 	SubscriptionID string         `json:"subscriptionId,omitempty"`
 	Extra          map[string]any `json:"extra,omitempty"`
+
+	// Extensions holds method-defined top-level receipt fields beyond the
+	// base set. draft-ietf-httpauth-payment §5.3 states "Payment method
+	// specifications MAY define additional fields for receipts", and the
+	// canonical mppx schema preserves such unknown fields across
+	// parse/serialize round trips rather than discarding them. These are
+	// flattened to the top level of the Payment-Receipt JSON (not nested
+	// under "extra"). The tag is "-" because serialization is handled
+	// explicitly by FormatPaymentReceipt, not via struct marshaling.
+	Extensions map[string]any `json:"-"`
 }
 
 // ReceiptOption configures optional fields when creating a Receipt.
