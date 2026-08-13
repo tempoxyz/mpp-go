@@ -363,6 +363,12 @@ func parseUnitsString(value string, decimals int) (string, error) {
 		intPart = value[:dot]
 		fracPart = value[dot+1:]
 	}
+	// A bare "." carries no digits on either side of the separator. Without
+	// this guard it normalizes to "0", which silently turns a charge into a
+	// zero-amount one that a proof credential can satisfy for free.
+	if intPart == "" && fracPart == "" {
+		return "", fmt.Errorf("tempo: invalid amount %q", value)
+	}
 	if intPart == "" {
 		intPart = "0"
 	}

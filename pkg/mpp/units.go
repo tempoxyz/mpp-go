@@ -37,6 +37,13 @@ func ParseUnits(value string, decimals int) (int64, error) {
 		fracPart = value[dot+1:]
 	}
 
+	// A bare "." carries no digits on either side of the separator. Without
+	// this guard both parts pass the digit checks below and the value parses
+	// as 0 instead of being rejected.
+	if intPart == "" && fracPart == "" {
+		return 0, fmt.Errorf("mpp: invalid decimal value: %q", value)
+	}
+
 	if intPart == "" {
 		intPart = "0"
 	}
