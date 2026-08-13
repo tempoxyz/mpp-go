@@ -229,9 +229,9 @@ func ParseChallenge(header string) (*Challenge, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mpp: invalid opaque field: %w", err)
 		}
-		opaque = make(map[string]string, len(opaqueMap))
-		for k, v := range opaqueMap {
-			opaque[k] = anyStr(v)
+		opaque, err = toStringMap(opaqueMap)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: invalid opaque field: %w", err)
 		}
 	}
 
@@ -411,15 +411,18 @@ func ParseCredential(header string) (*Credential, error) {
 			if err != nil {
 				return nil, fmt.Errorf("mpp: invalid credential opaque field: %w", err)
 			}
-			echo.Opaque = make(map[string]string, len(decoded))
-			for key, value := range decoded {
-				echo.Opaque[key] = anyStr(value)
+			echo.Opaque, err = toStringMap(decoded)
+			if err != nil {
+				return nil, fmt.Errorf("mpp: invalid credential opaque field: %w", err)
 			}
 		case map[string]any:
-			echo.Opaque = make(map[string]string, len(opaque))
-			for key, value := range opaque {
-				echo.Opaque[key] = anyStr(value)
+			var err error
+			echo.Opaque, err = toStringMap(opaque)
+			if err != nil {
+				return nil, fmt.Errorf("mpp: invalid credential opaque field: %w", err)
 			}
+		default:
+			return nil, fmt.Errorf("mpp: invalid credential opaque field: must be an encoded string or object")
 		}
 	}
 
@@ -607,4 +610,19 @@ func anyStr(v any) string {
 		return s
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func toStringMap(data map[string]any) (map[string]string, error) {
+	if data == nil {
+		return nil, fmt.Errorf("must be an object")
+	}
+	result := make(map[string]string, len(data))
+	for key, value := range data {
+		stringValue, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("value for %q must be a string", key)
+		}
+		result[key] = stringValue
+	}
+	return result, nil
 }
