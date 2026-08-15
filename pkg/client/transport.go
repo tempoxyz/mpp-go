@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -48,7 +49,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// Parse all WWW-Authenticate headers looking for Payment challenges (RFC 9110).
 	challenges, errs := t.parseChallenges(resp.Header)
-	_ = errs // Non-Payment or malformed headers are silently skipped.
+	if len(errs) > 0 {
+		// Log the parsing errors instead of silently discarding them.
+		// This prevents malformed or attacker-supplied challenges from failing silently.
+		log.Printf("mpp: encountered %d malformed payment challenge(s)", len(errs))
+	}
 
 	// Find first challenge with a matching method that hasn't expired.
 	var matched *mpp.Challenge
