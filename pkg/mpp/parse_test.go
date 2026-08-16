@@ -258,6 +258,140 @@ func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
 	}
 }
 
+func TestFormatAuthenticateStrictRejectsEmptyRequiredAuthParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*Challenge)
+		wantErr string
+	}{
+		{
+			name:    "empty id",
+			mutate:  func(c *Challenge) { c.ID = "" },
+			wantErr: "mpp: missing required id auth-param",
+		},
+		{
+			name:    "empty realm",
+			wantErr: "mpp: missing required realm auth-param",
+		},
+		{
+			name:    "empty method",
+			mutate:  func(c *Challenge) { c.Method = "" },
+			wantErr: "mpp: missing required method auth-param",
+		},
+		{
+			name:    "empty intent",
+			mutate:  func(c *Challenge) { c.Intent = "" },
+			wantErr: "mpp: missing required intent auth-param",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			challenge := NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+			realm := "api.example.com"
+			if tt.mutate != nil {
+				tt.mutate(challenge)
+			} else {
+				realm = ""
+			}
+
+			got, err := challenge.ToAuthenticateStrict(realm)
+			require.Error(t, err, "ToAuthenticateStrict() = %q", got)
+			assert.EqualError(t, err, tt.wantErr)
+			assert.Empty(t, got)
+		})
+	}
+}
+
+func TestFormatAuthenticateAlwaysEncodesRequest(t *testing.T) {
+	t.Parallel()
+
+	// request is a required auth-param, but it can never be empty: an absent
+	// request object encodes to the empty JSON object. Assert that invariant so
+	// the required-field guard on "request" cannot be reached by accident.
+	challenge := &Challenge{ID: "ch_1", Method: "tempo", Intent: "charge"}
+
+	got, err := challenge.ToAuthenticateStrict("api.example.com")
+	require.NoError(t, err)
+	assert.Contains(t, got, `request="e30"`)
+}
+
+func TestFormatAuthenticateStrictDropsEmptyOptionalAuthParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*Challenge)
+		absent string
+	}{
+		{
+			name:   "empty digest",
+			mutate: func(c *Challenge) { c.Digest = "" },
+			absent: "digest=",
+		},
+		{
+			name:   "empty expires",
+			mutate: func(c *Challenge) { c.Expires = "" },
+			absent: "expires=",
+		},
+		{
+			name:   "empty description",
+			mutate: func(c *Challenge) { c.Description = "" },
+			absent: "description=",
+		},
+		{
+			name:   "nil opaque",
+			mutate: func(c *Challenge) { c.Opaque = nil },
+			absent: "opaque=",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			challenge := NewChallenge("secret", "api.example.com", "tempo", "charge",
+				map[string]any{"amount": "100"},
+				WithDigest("sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE="),
+				WithExpires("2026-01-29T12:05:00Z"),
+				WithDescription("API access payment required"),
+				WithMeta(map[string]string{"trace": "123"}),
+			)
+			tt.mutate(challenge)
+
+			got, err := challenge.ToAuthenticateStrict("api.example.com")
+			require.NoError(t, err)
+			assert.NotContains(t, got, tt.absent)
+
+			// The remaining challenge is still complete and parseable.
+			parsed, err := ParseChallenge(got)
+			require.NoError(t, err)
+			assert.Equal(t, challenge.ID, parsed.ID)
+		})
+	}
+}
+
+func TestFormatAuthenticateLenientKeepsDroppingEmptyAuthParams(t *testing.T) {
+	t.Parallel()
+
+	// The lenient formatter returns only a string, so callers cannot observe an
+	// error. Its behavior must stay unchanged: empty auth-params are dropped.
+	challenge := NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+	challenge.ID = ""
+
+	got := challenge.ToAuthenticate("")
+
+	assert.Equal(t, `Payment method="tempo", intent="charge", request="eyJhbW91bnQiOiIxMDAifQ"`, got)
+	assert.NotContains(t, got, "id=")
+	assert.NotContains(t, got, "realm=")
+}
+
 func TestFormatAuthenticateStripsCRLF(t *testing.T) {
 	t.Parallel()
 
