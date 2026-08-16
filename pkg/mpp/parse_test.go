@@ -425,6 +425,125 @@ func TestParseChallenge(t *testing.T) {
 	}
 }
 
+// TestParseChallengeAuthParamNamesAreCaseInsensitive pins RFC 9110 §11.2:
+// "Authentication parameters are name/value pairs, where the name token is
+// matched case-insensitively, and each parameter name MUST only occur once per
+// challenge." Only the name is normalized; auth-param values keep their case.
+func TestParseChallengeAuthParamNamesAreCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	opaqueB64 := b64EncodeSortedStringMap(map[string]string{"trace": "T-123"})
+
+	tests := []struct {
+		name    string
+		header  string
+		want    *Challenge
+		wantErr string
+	}{
+		{
+			name:   "mixed-case required names parse successfully",
+			header: `Payment ID="ch_abc", Realm="api.example.com", METHOD="tempo", InTeNt="charge", REQUEST="e30"`,
+			want: &Challenge{
+				ID:         "ch_abc",
+				Realm:      "api.example.com",
+				Method:     "tempo",
+				Intent:     "charge",
+				Request:    map[string]any{},
+				RequestB64: "e30",
+			},
+		},
+		{
+			name: "mixed-case optional names parse successfully",
+			header: `Payment id="ch_opt", realm="api.example.com", method="tempo", intent="charge", request="e30", ` +
+				`EXPIRES="2026-01-01T00:00:00.000Z", Digest="sha-256=:abc123:", ` +
+				`DESCRIPTION="Pay for API access", OPAQUE="` + opaqueB64 + `"`,
+			want: &Challenge{
+				ID:          "ch_opt",
+				Realm:       "api.example.com",
+				Method:      "tempo",
+				Intent:      "charge",
+				Request:     map[string]any{},
+				RequestB64:  "e30",
+				Expires:     "2026-01-01T00:00:00.000Z",
+				Digest:      "sha-256=:abc123:",
+				Description: "Pay for API access",
+				Opaque:      map[string]string{"trace": "T-123"},
+			},
+		},
+		{
+			name: "values keep their case",
+			header: `Payment ID="Ch_ABC123", Realm="API.Example.COM", method="tempo", InTeNt="Charge_XYZ", ` +
+				`REQUEST="e30", Description="Premium ACCESS"`,
+			want: &Challenge{
+				ID:          "Ch_ABC123",
+				Realm:       "API.Example.COM",
+				Method:      "tempo",
+				Intent:      "Charge_XYZ",
+				Request:     map[string]any{},
+				RequestB64:  "e30",
+				Description: "Premium ACCESS",
+			},
+		},
+		{
+			// Guards the fix against over-reaching: lowercasing the whole
+			// auth-param would turn "Tempo" into a valid method name.
+			name:    "uppercase method value is still rejected",
+			header:  `Payment ID="abc", Realm="api.example.com", METHOD="Tempo", InTeNt="charge", REQUEST="e30"`,
+			wantErr: `invalid challenge method`,
+		},
+		{
+			name:    "duplicate required name hidden by case is rejected",
+			header:  `Payment id="a", ID="b", realm="api.example.com", method="tempo", intent="charge", request="e30"`,
+			wantErr: `duplicate auth-param`,
+		},
+		{
+			name:    "duplicate optional name hidden by case is rejected",
+			header:  `Payment id="a", realm="api.example.com", method="tempo", intent="charge", request="e30", expires="1", EXPIRES="2"`,
+			wantErr: `duplicate auth-param`,
+		},
+		{
+			name:    "duplicate name in the same case is still rejected",
+			header:  `Payment id="a", id="b", realm="api.example.com", method="tempo", intent="charge", request="e30"`,
+			wantErr: `duplicate auth-param`,
+		},
+		{
+			// The unescaped-quote tolerance keyed on "description" must follow
+			// the normalized name, not the raw one.
+			name: "mixed-case description tolerates unescaped quotes",
+			header: `Payment id="ch_special", realm="api.example.com", method="tempo", intent="charge", ` +
+				`request="e30", DeScRiPtIoN="Payment for "Premium" service"`,
+			want: &Challenge{
+				ID:          "ch_special",
+				Realm:       "api.example.com",
+				Method:      "tempo",
+				Intent:      "charge",
+				Request:     map[string]any{},
+				RequestB64:  "e30",
+				Description: "Payment for ",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ParseChallenge(tt.header)
+			if tt.wantErr != "" {
+				require.Errorf(t, err, "ParseChallenge() error = nil, want substring %q", tt.wantErr)
+				assert.Containsf(t, err.Error(), tt.wantErr,
+					"ParseChallenge() error = %v, want substring %q", err, tt.wantErr)
+
+				return
+			}
+
+			require.NoErrorf(t, err, "ParseChallenge() unexpected error: %v", err)
+			assertChallengeEqual(t, got, tt.want)
+		})
+	}
+}
+
 func TestParseCredential(t *testing.T) {
 	t.Parallel()
 
