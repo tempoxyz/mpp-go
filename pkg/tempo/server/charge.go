@@ -328,6 +328,14 @@ func (i *Intent) verifyTransaction(
 		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires, policy); err != nil {
 			return nil, err
 		}
+		// validateFeePayerTransaction only checks the sponsor-policy upper
+		// bound when ValidBefore is non-zero, so re-apply the same
+		// zero/expired guard used before co-signing. This matters most for
+		// the remote fee payer path just above, where tx was replaced with
+		// whatever tempotx.Deserialize parsed out of the remote response.
+		if tx.ValidBefore == 0 || time.Now().Unix() >= int64(tx.ValidBefore) {
+			return nil, mpp.ErrVerificationFailed("co-signed fee payer transaction has expired")
+		}
 		if tx.AwaitingFeePayer {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction must clear the awaiting fee payer marker")
 		}
