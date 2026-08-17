@@ -6,5 +6,5 @@ rules:
   - ignore: true
     conditions:
       - expr: |
-          ActionRepoFullName in ["tempoxyz/gh-actions", "tempoxyz/mpp-tools"]
-      - expr: ActionVersion matches "^[0-9a-f]{40}$"
+          ActionRepoFullName in ["tempoxyz/gh-actions", "tempoxyz/mpp-tools"] &&
+          ActionVersion matches "^[0-9a-f]{40}$"
