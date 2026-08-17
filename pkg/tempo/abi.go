@@ -49,8 +49,10 @@ func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challen
 		return false
 	}
 	toAddress := "0x" + dataHex[8+24:8+64]
-	amount := new(big.Int)
-	amount.SetString(dataHex[72:136], 16)
+	amount, ok := new(big.Int).SetString(dataHex[72:136], 16)
+	if !ok {
+		return false
+	}
 	if !strings.EqualFold(toAddress, request.Recipient) || amount.String() != request.Amount {
 		return false
 	}
