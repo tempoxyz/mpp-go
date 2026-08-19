@@ -198,7 +198,10 @@ func (m *Method) buildTransfer(
 	token := common.HexToAddress(request.Currency)
 	gasLimit := tempo.DefaultGasLimit
 	if len(transfers) == 1 {
-		dataHex := transferDataHex(transfers[0])
+		dataHex, err := transferDataHex(transfers[0])
+		if err != nil {
+			return "", err
+		}
 		if estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex); err == nil && estimated+5_000 > gasLimit {
 			gasLimit = estimated + 5_000
 		}
@@ -210,7 +213,11 @@ func (m *Method) buildTransfer(
 		SetGas(gasLimit).
 		SetNonceKey(big.NewInt(0))
 	for _, transfer := range transfers {
-		builder.AddCall(token, big.NewInt(0), common.FromHex(transferDataHex(transfer)))
+		dataHex, err := transferDataHex(transfer)
+		if err != nil {
+			return "", err
+		}
+		builder.AddCall(token, big.NewInt(0), common.FromHex(dataHex))
 	}
 
 	if request.MethodDetails.FeePayer {
@@ -295,12 +302,11 @@ func buildTransfers(request tempo.ChargeRequest, memo string) ([]transfer, error
 	return transfers, nil
 }
 
-func transferDataHex(transfer transfer) string {
+func transferDataHex(transfer transfer) (string, error) {
 	if transfer.memo != "" {
-		dataHex, _ := tempo.EncodeTransferWithMemo(transfer.recipient, transfer.amount, transfer.memo)
-		return dataHex
+		return tempo.EncodeTransferWithMemo(transfer.recipient, transfer.amount, transfer.memo)
 	}
-	return tempo.EncodeTransfer(transfer.recipient, transfer.amount)
+	return tempo.EncodeTransfer(transfer.recipient, transfer.amount), nil
 }
 
 // TODO(tempo-go): replace these JSON-RPC helpers with shared transaction-prep
