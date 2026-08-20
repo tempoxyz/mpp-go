@@ -254,6 +254,19 @@ func (i *Intent) verifyTransaction(
 	raw string,
 	source *sourceDID,
 ) (*mpp.Receipt, error) {
+	// sponsoredKeyToRelease tracks the fee-payer idempotency key written by
+	// PutIfAbsent. It is cleared once SendRawTransaction is called, because
+	// after that point the transaction may already be in the mempool and
+	// releasing the key could allow a conflicting retry. Any pre-broadcast
+	// failure (co-signing error, preflight revert, serialization error, etc.)
+	// sets this so the deferred cleanup can restore retryability.
+	var sponsoredKeyToRelease string
+	defer func() {
+		if sponsoredKeyToRelease != "" {
+			_ = i.store.Delete(ctx, sponsoredKeyToRelease)
+		}
+	}()
+
 	tx, err := tempotx.Deserialize(raw)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("failed to deserialize transaction payload")
@@ -303,6 +316,9 @@ func (i *Intent) verifyTransaction(
 		if !accepted {
 			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
+		// Mark the key for deferred cleanup. It is cleared before SendRawTransaction
+		// so that post-broadcast failures do not undo the replay protection.
+		sponsoredKeyToRelease = tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)
 		if i.feePayerSigner != nil {
 			tx.From = sender
 			tx.FeeToken = common.HexToAddress(request.Currency)
@@ -372,6 +388,9 @@ func (i *Intent) verifyTransaction(
 	}
 
 	if shouldBroadcast {
+		// Clear before calling SendRawTransaction: once the tx may be in the
+		// mempool, the sponsored challenge key must not be released on failure.
+		sponsoredKeyToRelease = ""
 		var err error
 		txHash, err = rpc.SendRawTransaction(ctx, serialized)
 		if err != nil {
