@@ -21,6 +21,11 @@ type Transport struct {
 	paymentPreferences []paymentPreference
 	acceptPayment      string
 	configErr          error
+
+	// Authorize, if set, is consulted with the selected challenge before
+	// the transport pays it. If it returns an error the transport does not
+	// pay and returns the server's 402 response unmodified.
+	Authorize func(ctx context.Context, challenge *mpp.Challenge) error
 }
 
 const defaultMaxPaymentRetries = 3
@@ -101,6 +106,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err := validatePaymentOrigin(request, selected.challenge); err != nil {
 			drainAndClose(resp.Body)
 			return nil, err
+		}
+
+		// Runs before the body drain so a declined 402 is returned intact.
+		if t.Authorize != nil {
+			if err := t.Authorize(baseRequest.Context(), selected.challenge); err != nil {
+				return resp, nil
+			}
 		}
 
 		drainAndClose(resp.Body)
