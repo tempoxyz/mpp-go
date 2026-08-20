@@ -1014,6 +1014,69 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 
 }
 
+func TestChargeFlow_FeePayerTransactionIsRetryableAfterPreflightFailure(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+
+	// First call: preflight fails.
+	preflightAttempts := 0
+	rpc.onEstimateGas = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+		callObject, ok := params[0].(map[string]any)
+		if !ok {
+			return &temporpc.JSONRPCResponse{Result: rpc.estimateGas}, nil
+		}
+		// Server-side preflight calls include a "calls" key.
+		if _, ok := callObject["calls"]; ok {
+			preflightAttempts++
+			if preflightAttempts == 1 {
+				return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
+			}
+		}
+		return &temporpc.JSONRPCResponse{Result: rpc.estimateGas}, nil
+	}
+
+	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	challenge := buildChallenge(t, request)
+
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	if !assert.NoErrorf(t, err, "CreateCredential() error = %v", err) {
+		return
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	if !assert.NoErrorf(t, err, "NewIntent() error = %v", err) {
+		return
+	}
+
+	// First Verify: preflight fails — sponsored key must be released.
+	{
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "transaction preflight failed"),
+			"first Verify() error = %v, want preflight failure", err) {
+			return
+		}
+	}
+	if !assert.Lenf(t, rpc.sentRawTxs, 0,
+		"expected no broadcast after failed preflight, got %d", len(rpc.sentRawTxs)) {
+		return
+	}
+
+	// Second Verify with the same credential: preflight now succeeds, so the
+	// full flow should complete. If the sponsored key was NOT released after the
+	// first failure, this call would return "fee payer challenge already used".
+	{
+		_, err := intent.Verify(ctx, credential, request.Map())
+		if !assert.NoErrorf(t, err, "second Verify() after preflight retry error = %v", err) {
+			return
+		}
+	}
+	if !assert.Lenf(t, rpc.sentRawTxs, 1,
+		"expected 1 broadcast on successful retry, got %d", len(rpc.sentRawTxs)) {
+		return
+	}
+}
+
 func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
 	ctx := context.Background()
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
