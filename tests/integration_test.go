@@ -29,7 +29,6 @@ import (
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 const (
@@ -40,9 +39,7 @@ const (
 	// integrationCurrency is the fixed TIP-20 token used in the local devnet tests.
 	integrationCurrency = "0x20c0000000000000000000000000000000000000"
 	// integrationRecipient is the account that receives paid transfers during tests.
-	integrationRecipient = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
-	// integrationDevPrivateKey is Anvil's default funded dev key used for fallback funding.
-	integrationDevPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	integrationRecipient     = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
 	receiptPollingTimeout    = 45 * time.Second
 	receiptPollingInterval   = 500 * time.Millisecond
 	rpcReadinessTimeout      = 45 * time.Second
@@ -712,80 +709,25 @@ func fundAddress(t *testing.T, ctx context.Context, rpc tempo.RPCClient, address
 	t.Helper()
 
 	response, err := rpc.SendRequest(ctx, "tempo_fundAddress", address.Hex())
-	if err == nil {
-		if err := response.CheckError(); err == nil {
-			switch result := response.Result.(type) {
-			case string:
-				if result != "" {
-					waitForReceipt(t, ctx, rpc, result)
-					waitForTokenBalance(t, ctx, rpc, address, integrationFundingAmount)
-					return
-				}
-			case []any:
-				for _, item := range result {
-					hash, ok := item.(string)
-					if ok && hash != "" {
-						waitForReceipt(t, ctx, rpc, hash)
-					}
-				}
-				waitForTokenBalance(t, ctx, rpc, address, integrationFundingAmount)
-				return
-			}
+	require.NoError(t, err)
+	require.NoError(t, response.CheckError())
+
+	switch result := response.Result.(type) {
+	case string:
+		require.NotEmpty(t, result)
+		waitForReceipt(t, ctx, rpc, result)
+	case []any:
+		require.NotEmpty(t, result)
+		for _, item := range result {
+			hash, ok := item.(string)
+			require.True(t, ok)
+			require.NotEmpty(t, hash)
+			waitForReceipt(t, ctx, rpc, hash)
 		}
+	default:
+		require.Failf(t, "unexpected faucet response", "result type = %T", result)
 	}
 
-	devSigner, err := temposigner.NewSigner(integrationDevPrivateKey)
-	if !assert.NoErrorf(t, err,
-		"NewSigner(dev key) error = %v", err) {
-		return
-	}
-
-	chainID, err := rpc.GetChainID(ctx)
-	if !assert.NoErrorf(t, err,
-		"GetChainID(funding tx) error = %v", err) {
-		return
-	}
-
-	gasPrice := mustGasPrice(t, ctx, rpc)
-	nonce, err := rpc.GetTransactionCount(ctx, devSigner.Address().Hex())
-	if !assert.NoErrorf(t, err,
-		"GetTransactionCount(dev signer) error = %v", err) {
-		return
-	}
-
-	transferData := common.FromHex(tempo.EncodeTransfer(address.Hex(), integrationFundingAmount))
-	gasLimit := mustEstimateGas(t, ctx, rpc, devSigner.Address(), common.HexToAddress(integrationCurrency), transferData)
-	tx, err := tempotx.NewBuilder(new(big.Int).SetUint64(chainID)).
-		SetMaxFeePerGas(gasPrice).
-		SetMaxPriorityFeePerGas(new(big.Int).Set(gasPrice)).
-		SetGas(gasLimit).
-		SetNonceKey(big.NewInt(0)).
-		SetNonce(nonce).
-		SetFeeToken(common.HexToAddress(integrationCurrency)).
-		AddCall(common.HexToAddress(integrationCurrency), big.NewInt(0), transferData).
-		BuildAndValidate()
-	if !assert.NoErrorf(t, err,
-		"BuildAndValidate(funding tx) error = %v", err) {
-		return
-	}
-
-	if err := tempotx.SignTransaction(tx, devSigner); err != nil {
-		assert.Failf(t, "", "SignTransaction(funding tx) error = %v", err)
-		return
-	}
-	serialized, err := tempotx.Serialize(tx, nil)
-	if !assert.NoErrorf(t, err,
-		"Serialize(funding tx) error = %v", err) {
-		return
-	}
-
-	hash, err := rpc.SendRawTransaction(ctx, serialized)
-	if !assert.NoErrorf(t, err,
-		"SendRawTransaction(funding tx) error = %v", err) {
-		return
-	}
-
-	waitForReceipt(t, ctx, rpc, hash)
 	waitForTokenBalance(t, ctx, rpc, address, integrationFundingAmount)
 }
 
