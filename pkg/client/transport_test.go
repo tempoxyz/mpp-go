@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -549,4 +550,155 @@ func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 		return
 	}
 
+}
+
+// intentMockMethod implements Method and reports the intents it supports.
+type intentMockMethod struct {
+	mockMethod
+	intents []string
+	seen    []string
+}
+
+func (m *intentMockMethod) Intents() []string { return m.intents }
+
+func (m *intentMockMethod) CreateCredential(ctx context.Context, ch *mpp.Challenge) (*mpp.Credential, error) {
+	m.seen = append(m.seen, ch.Intent)
+	return m.mockMethod.CreateCredential(ctx, ch)
+}
+
+// TestTransport_RoundTrip_SkipsUnsupportedIntent covers the intent negotiation
+// example from the core spec: a server offering the same method under two
+// intents. A client that does not recognize an intent must treat that
+// challenge as unsupported rather than paying it with the wrong intent's
+// credential.
+func TestTransport_RoundTrip_SkipsUnsupportedIntent(t *testing.T) {
+	var authorizeCh, chargeCh *mpp.Challenge
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			// Unsupported intent is advertised first, so a client that
+			// matches on method alone picks it.
+			w.Header().Add("WWW-Authenticate", authorizeCh.ToAuthenticate(authorizeCh.Realm))
+			w.Header().Add("WWW-Authenticate", chargeCh.ToAuthenticate(chargeCh.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	parsedURL, err := urlpkg.Parse(srv.URL)
+	if !assert.NoErrorf(t, err, "url.Parse(%q) error = %v", srv.URL, err) {
+		return
+	}
+	authorizeCh = mpp.NewChallenge("secret", parsedURL.Host, "example", "authorize", nil)
+	chargeCh = mpp.NewChallenge("secret", parsedURL.Host, "example", "charge", nil)
+
+	method := &intentMockMethod{
+		mockMethod: mockMethod{name: "example", cred: newTestCredential("example")},
+		intents:    []string{"charge"},
+	}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err, "unexpected error: %v", err) {
+		return
+	}
+	defer resp.Body.Close()
+
+	assert.Equalf(t, []string{"charge"}, method.seen,
+		"client paid the wrong intent: built credentials for %v, want only [charge]", method.seen)
+}
+
+// strictIntentMethod mirrors the built-in Tempo client method, which rejects
+// challenges carrying an intent it cannot settle.
+type strictIntentMethod struct {
+	intentMockMethod
+}
+
+func (m *strictIntentMethod) CreateCredential(ctx context.Context, ch *mpp.Challenge) (*mpp.Credential, error) {
+	if ch.Intent != "charge" {
+		return nil, fmt.Errorf("unsupported challenge intent %q", ch.Intent)
+	}
+	return m.intentMockMethod.CreateCredential(ctx, ch)
+}
+
+// TestTransport_RoundTrip_UnsupportedIntentFirstStillPays is the user-visible
+// consequence of matching on the method token alone: the transport committed
+// to the unsupported challenge, CreateCredential rejected it, and RoundTrip
+// failed the whole request even though the server also offered a challenge the
+// method could settle.
+func TestTransport_RoundTrip_UnsupportedIntentFirstStillPays(t *testing.T) {
+	var authorizeCh, chargeCh *mpp.Challenge
+	paid := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Add("WWW-Authenticate", authorizeCh.ToAuthenticate(authorizeCh.Realm))
+			w.Header().Add("WWW-Authenticate", chargeCh.ToAuthenticate(chargeCh.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		paid = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	parsedURL, err := urlpkg.Parse(srv.URL)
+	if !assert.NoErrorf(t, err, "url.Parse(%q) error = %v", srv.URL, err) {
+		return
+	}
+	authorizeCh = mpp.NewChallenge("secret", parsedURL.Host, "example", "authorize", nil)
+	chargeCh = mpp.NewChallenge("secret", parsedURL.Host, "example", "charge", nil)
+
+	method := &strictIntentMethod{intentMockMethod{
+		mockMethod: mockMethod{name: "example", cred: newTestCredential("example")},
+		intents:    []string{"charge"},
+	}}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err,
+		"request failed even though a payable challenge was offered: %v", err) {
+		return
+	}
+	defer resp.Body.Close()
+
+	assert.Equalf(t, http.StatusOK, resp.StatusCode, "expected 200, got %d", resp.StatusCode)
+	assert.Truef(t, paid, "server never received the payment credential")
+}
+
+// TestTransport_RoundTrip_MethodWithoutIntentsAcceptsAny pins the compatibility
+// contract: a Method that does not implement IntentMethod keeps matching on the
+// method token alone.
+func TestTransport_RoundTrip_MethodWithoutIntentsAcceptsAny(t *testing.T) {
+	var challenge *mpp.Challenge
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	parsedURL, err := urlpkg.Parse(srv.URL)
+	if !assert.NoErrorf(t, err, "url.Parse(%q) error = %v", srv.URL, err) {
+		return
+	}
+	challenge = mpp.NewChallenge("secret", parsedURL.Host, "example", "some-new-intent", nil)
+
+	method := &mockMethod{name: "example", cred: newTestCredential("example")}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err, "unexpected error: %v", err) {
+		return
+	}
+	defer resp.Body.Close()
+
+	assert.Equalf(t, 1, method.calls,
+		"method without declared intents should still be used, calls = %d", method.calls)
 }

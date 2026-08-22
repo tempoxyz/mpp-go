@@ -69,7 +69,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				continue
 			}
 		}
-		if m, ok := t.methods[ch.Method]; ok {
+		if m, ok := t.methods[ch.Method]; ok && methodSupportsIntent(m, ch.Intent) {
 			matched = ch
 			method = m
 			break
@@ -174,6 +174,23 @@ func requestOrigin(requestURL *url.URL) string {
 
 func sameOriginURL(requestURL *url.URL, origin string) bool {
 	return requestOrigin(requestURL) == origin
+}
+
+// methodSupportsIntent reports whether method can build a credential for the
+// given challenge intent. Methods that do not declare their intents via
+// IntentMethod are assumed to accept any intent, so existing implementations
+// keep their current behavior.
+func methodSupportsIntent(method Method, intent string) bool {
+	declaring, ok := method.(IntentMethod)
+	if !ok {
+		return true
+	}
+	for _, supported := range declaring.Intents() {
+		if supported == intent {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {

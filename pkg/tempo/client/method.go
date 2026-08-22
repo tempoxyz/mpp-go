@@ -50,6 +50,7 @@ type Method struct {
 }
 
 var _ mppclient.Method = (*Method)(nil)
+var _ mppclient.IntentMethod = (*Method)(nil)
 
 // New constructs a Tempo charge client method.
 func New(config Config) (*Method, error) {
@@ -84,6 +85,13 @@ func New(config Config) (*Method, error) {
 // Name returns the method token used in Challenges and Credentials.
 func (m *Method) Name() string {
 	return tempo.MethodName
+}
+
+// Intents returns the challenge intents this method can build credentials for.
+// It implements client.IntentMethod so the transport skips Tempo challenges
+// carrying another intent rather than failing the request on them.
+func (m *Method) Intents() []string {
+	return []string{tempo.IntentCharge}
 }
 
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.

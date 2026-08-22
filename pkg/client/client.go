@@ -18,6 +18,23 @@ type Method interface {
 	CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error)
 }
 
+// IntentMethod is an optional interface a Method may implement to declare the
+// payment intents it can build credentials for.
+//
+// A server may offer the same method under several intents, and the core spec
+// requires that clients "that do not recognize an intent SHOULD treat the
+// challenge as unsupported". The transport consults this interface to skip
+// such challenges and keep looking, instead of committing to the first
+// challenge that merely shares the method token.
+//
+// Methods that do not implement IntentMethod are treated as accepting any
+// intent, which preserves the behavior of existing implementations.
+type IntentMethod interface {
+	Method
+	// Intents returns the intent tokens this method supports (e.g., "charge").
+	Intents() []string
+}
+
 // Client is an HTTP client with automatic 402 payment handling.
 type Client struct {
 	methods    map[string]Method
