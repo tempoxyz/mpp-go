@@ -36,74 +36,94 @@ func NewTransport(methods []Method, inner http.RoundTripper) *Transport {
 	}
 }
 
+// defaultMaxPaymentRetries matches mppx's defaultMaxPaymentRetries: a server
+// may respond to a submitted credential with a *fresh* 402 challenge (an
+// expired challenge racing a slow client, a rejected credential offering a
+// new one, etc.) rather than success or a final failure. Retrying up to this
+// many times lets the client recover from that instead of giving up after a
+// single credential.
+const defaultMaxPaymentRetries = 3
+
 // RoundTrip implements http.RoundTripper with automatic 402 handling.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.inner.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusPaymentRequired {
-		return resp, nil
-	}
 
-	// Parse all WWW-Authenticate headers looking for Payment challenges (RFC 9110).
-	challenges, errs := t.parseChallenges(resp.Header)
-	_ = errs // Non-Payment or malformed headers are silently skipped.
+	for attempt := 0; attempt < defaultMaxPaymentRetries; attempt++ {
+		if resp.StatusCode != http.StatusPaymentRequired {
+			return resp, nil
+		}
 
-	// Find first challenge with a matching method that hasn't expired.
-	var matched *mpp.Challenge
-	var method Method
-	now := time.Now().UTC()
-	for i := range challenges {
-		ch := &challenges[i]
-		if ch.Expires != "" {
-			expiry, err := parseChallengeExpiry(ch.Expires)
-			if err != nil {
-				// Unparseable expiry: the issuing server rejects such a
-				// credential (server.VerifyOrChallenge returns "invalid expires
-				// format"), so don't waste a payment on a challenge it would
-				// refuse. Skip it.
-				continue
+		// Parse all WWW-Authenticate headers looking for Payment challenges (RFC 9110).
+		challenges, errs := t.parseChallenges(resp.Header)
+		_ = errs // Non-Payment or malformed headers are silently skipped.
+
+		// Find first challenge with a matching method that hasn't expired.
+		var matched *mpp.Challenge
+		var method Method
+		now := time.Now().UTC()
+		for i := range challenges {
+			ch := &challenges[i]
+			if ch.Expires != "" {
+				expiry, err := parseChallengeExpiry(ch.Expires)
+				if err != nil {
+					// Unparseable expiry: the issuing server rejects such a
+					// credential (server.VerifyOrChallenge returns "invalid expires
+					// format"), so don't waste a payment on a challenge it would
+					// refuse. Skip it.
+					continue
+				}
+				if expiry.Before(now) {
+					continue
+				}
 			}
-			if expiry.Before(now) {
-				continue
+			if m, ok := t.methods[ch.Method]; ok {
+				matched = ch
+				method = m
+				break
 			}
 		}
-		if m, ok := t.methods[ch.Method]; ok {
-			matched = ch
-			method = m
-			break
-		}
-	}
 
-	if matched == nil {
-		// No matching method found — return original 402 response as-is.
-		return resp, nil
-	}
-	if err := validatePaymentOrigin(req, matched); err != nil {
+		if matched == nil {
+			// No matching method found — return this 402 response as-is.
+			return resp, nil
+		}
+		if err := validatePaymentOrigin(req, matched); err != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			return nil, err
+		}
+
+		// Drain and close the 402 response body so the connection can be reused.
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		return nil, err
+
+		// Create payment credential.
+		cred, err := method.CreateCredential(req.Context(), matched)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: creating credential for method %q: %w", matched.Method, err)
+		}
+
+		// Clone the original request for retry. Always cloned from the original
+		// req (not the previous retry) so a request body backed by GetBody is
+		// re-read fresh each attempt rather than chaining clones of clones.
+		retry, err := t.cloneRequest(req)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
+		}
+		retry.Header.Set("Authorization", cred.ToAuthorization())
+
+		resp, err = t.inner.RoundTrip(retry)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Drain and close the 402 response body so the connection can be reused.
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	// Create payment credential.
-	cred, err := method.CreateCredential(req.Context(), matched)
-	if err != nil {
-		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", matched.Method, err)
-	}
-
-	// Clone the original request for retry.
-	retry, err := t.cloneRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
-	}
-	retry.Header.Set("Authorization", cred.ToAuthorization())
-
-	return t.inner.RoundTrip(retry)
+	// Exhausted retries — return whatever the last attempt produced (still a
+	// 402 at this point, since a non-402 response returns immediately above).
+	return resp, nil
 }
 
 // parseChallengeExpiry parses a challenge expiry using RFC 3339 and the

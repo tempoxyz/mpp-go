@@ -126,6 +126,107 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 
 }
 
+// Regression test for AGR-2026-052 / tempoxyz/mpp-tools#148: a server that
+// rejects the first credential with a *fresh* 402 challenge (rather than
+// succeeding or failing outright) must still be recoverable — the client
+// should retry up to defaultMaxPaymentRetries times, not give up after one.
+func TestTransport_RoundTrip_RetriesAcrossMultiple402s(t *testing.T) {
+	callCount := 0
+	var challengeA, challengeB *mpp.Challenge
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			// First request: no credential yet, issue challenge A.
+			w.Header().Set("WWW-Authenticate", challengeA.ToAuthenticate(challengeA.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			w.Write([]byte("pay me (A)"))
+		case 2:
+			// Second request: credential for A submitted, but the server
+			// rejects it and issues a *different* fresh challenge B instead
+			// of failing outright (e.g. the A credential expired mid-flight).
+			assert.Truef(t, strings.HasPrefix(r.Header.Get("Authorization"), "Payment "),
+				"expected a Payment credential on attempt 2, got %q", r.Header.Get("Authorization"))
+			w.Header().Set("WWW-Authenticate", challengeB.ToAuthenticate(challengeB.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			w.Write([]byte("pay me (B)"))
+		default:
+			// Third request: credential for B submitted, accept it.
+			assert.Truef(t, strings.HasPrefix(r.Header.Get("Authorization"), "Payment "),
+				"expected a Payment credential on attempt 3, got %q", r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("paid"))
+		}
+	}))
+	defer srv.Close()
+	challengeA = challengeForURL(t, srv.URL, "tempo", nil)
+	challengeB = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
+	}
+
+	defer resp.Body.Close()
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !assert.Equalf(t, "paid", string(body),
+		"expected body 'paid', got %q", string(body)) {
+		return
+	}
+	if !assert.EqualValuesf(t, 3, callCount,
+		"expected 3 calls to server (initial + 2 retries), got %d", callCount) {
+		return
+	}
+	if !assert.EqualValuesf(t, 2, method.calls,
+		"expected CreateCredential to be called twice (once per challenge), got %d", method.calls) {
+		return
+	}
+}
+
+// A server that keeps issuing fresh 402 challenges past the retry budget
+// must not loop forever — the client gives up and returns the last 402.
+func TestTransport_RoundTrip_GivesUpAfterMaxRetries(t *testing.T) {
+	callCount := 0
+	challenge := mpp.NewChallenge("secret", "127.0.0.1", "tempo", "payment", nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("127.0.0.1"))
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte("pay me"))
+	}))
+	defer srv.Close()
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
+	}
+
+	defer resp.Body.Close()
+	if !assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
+		"expected final response to still be 402, got %d", resp.StatusCode) {
+		return
+	}
+	// 1 initial request + defaultMaxPaymentRetries (3) retries = 4 total calls.
+	if !assert.EqualValuesf(t, 1+defaultMaxPaymentRetries, callCount,
+		"expected %d calls to server, got %d", 1+defaultMaxPaymentRetries, callCount) {
+		return
+	}
+}
+
 func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
 	challenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", nil)
 
