@@ -33,3 +33,17 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 	}
 
 }
+
+func TestWriteChallenge_FormatsBodylessPaymentRequired(t *testing.T) {
+	t.Parallel()
+
+	challenge := mpp.NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+	response := httptest.NewRecorder()
+	WriteChallenge(response, challenge, challenge.Realm)
+
+	assert.Equal(t, http.StatusPaymentRequired, response.Code)
+	assert.NotEmpty(t, response.Header().Get("WWW-Authenticate"))
+	assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+	assert.Empty(t, response.Header().Get("Content-Type"))
+	assert.Empty(t, response.Body.String())
+}

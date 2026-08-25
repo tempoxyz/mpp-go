@@ -147,7 +147,7 @@ func WritePaymentErrorWithChallenge(w http.ResponseWriter, err error, challenge 
 	WritePaymentError(w, err)
 }
 
-// WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
+// WriteChallenge serializes an initial 402 challenge response.
 func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
 	header, err := challenge.ToAuthenticateStrict(realm)
 	if err != nil {
@@ -156,12 +156,8 @@ func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm strin
 	}
 
 	w.Header().Set(mpp.HeaderWWWAuthenticate, header)
-	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusPaymentRequired)
-
-	problem := mpp.ErrPaymentRequired(realm, challenge.Description)
-	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
 }
 
 // WritePaymentError serializes MPP verification errors as problem details.
