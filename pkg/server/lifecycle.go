@@ -17,7 +17,7 @@ func validateCredential(
 	request map[string]any,
 	method string,
 ) (*Validation, error) {
-	split, ok := intent.(*splitHookIntent)
+	validating, ok := intent.(ValidatingIntent)
 	if !ok {
 		err := mpp.ErrVerificationFailed(fmt.Sprintf(
 			"%s/%s does not support non-mutating credential validation",
@@ -27,7 +27,7 @@ func validateCredential(
 		err.Details = map[string]any{"intent": intent.Name(), "method": method}
 		return nil, err
 	}
-	return split.validate(ctx, credential, request)
+	return validating.Validate(ctx, credential, request)
 }
 
 // prepareCredential authenticates the echoed stateless challenge, enforces its

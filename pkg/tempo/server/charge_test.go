@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -77,10 +78,42 @@ type mockRPC struct {
 	callResult       string
 	receipts         map[string]map[string]any
 	sentRawTxs       []string
+	callRequests     []map[string]any
 	estimateGasCalls []map[string]any
+	onCall           func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 	onSend           func(raw string) (string, map[string]any, error)
 	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 	onGetReceipt     func(hash string) (*temporpc.JSONRPCResponse, error)
+}
+
+type recordingStore struct {
+	inner            tempo.Store
+	deleteCalls      int
+	putCalls         int
+	putIfAbsentCalls int
+}
+
+func newRecordingStore() *recordingStore {
+	return &recordingStore{inner: tempo.NewMemoryStore()}
+}
+
+func (s *recordingStore) Get(ctx context.Context, key string) (string, bool, error) {
+	return s.inner.Get(ctx, key)
+}
+
+func (s *recordingStore) Put(ctx context.Context, key, value string) error {
+	s.putCalls++
+	return s.inner.Put(ctx, key, value)
+}
+
+func (s *recordingStore) PutIfAbsent(ctx context.Context, key, value string) (bool, error) {
+	s.putIfAbsentCalls++
+	return s.inner.PutIfAbsent(ctx, key, value)
+}
+
+func (s *recordingStore) Delete(ctx context.Context, key string) error {
+	s.deleteCalls++
+	return s.inner.Delete(ctx, key)
 }
 
 func (m *mockRPC) GetChainID(context.Context) (uint64, error) {
@@ -121,6 +154,14 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 		}
 		return &temporpc.JSONRPCResponse{Result: m.estimateGas}, nil
 	case "eth_call":
+		if len(params) > 0 {
+			if callObject, ok := params[0].(map[string]any); ok {
+				m.callRequests = append(m.callRequests, callObject)
+			}
+		}
+		if m.onCall != nil {
+			return m.onCall(params...)
+		}
 		return &temporpc.JSONRPCResponse{Result: m.callResult}, nil
 	case "eth_getTransactionReceipt":
 		hash := params[0].(string)
@@ -131,6 +172,183 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 	default:
 		return nil, fmt.Errorf("unexpected rpc method %q", method)
 	}
+}
+
+func TestIntentTransactionCredentialLifecycle(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePull})
+	rpc := newMockRPC(request)
+	challenge := mpp.NewChallenge(
+		"test-secret-key-minimum-32-byte-secret",
+		testRealm,
+		tempo.MethodName,
+		tempo.IntentCharge,
+		request.Map(),
+		mpp.WithExpires(mpp.Expires.Minutes(5)),
+	)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, challenge)
+	require.NoError(t, err)
+	rpc.callRequests = nil
+	store := newRecordingStore()
+	method, err := MethodFromConfig(Config{RPC: rpc, Store: store})
+	require.NoError(t, err)
+	payment, err := server.New(method, testRealm, "test-secret-key-minimum-32-byte-secret")
+	require.NoError(t, err)
+
+	validation, err := payment.ValidateCredential(ctx, credential)
+	require.NoError(t, err)
+	assert.Equal(t, "pull", validation.Details["mode"])
+	assert.Equal(t, credential.Source, validation.Source)
+	assert.NotEmpty(t, validation.Details["sender"])
+	assert.Equal(t, credential.Payload["signature"], validation.Details["serializedTransaction"])
+	assert.Len(t, validation.Details["transfers"], 1)
+	assert.Empty(t, rpc.sentRawTxs)
+	assert.Len(t, rpc.callRequests, 1)
+	assert.Zero(t, store.putCalls)
+	assert.Zero(t, store.putIfAbsentCalls)
+	assert.Zero(t, store.deleteCalls)
+
+	receipt, err := payment.BroadcastCredential(ctx, credential)
+	require.NoError(t, err)
+	assert.Equal(t, testReceiptHash, receipt.Reference)
+	assert.Len(t, rpc.sentRawTxs, 1)
+	assert.Len(t, rpc.callRequests, 3)
+	assert.Equal(t, 1, store.putIfAbsentCalls)
+}
+
+func TestIntentValidateTransactionRejectsFailedSimulationWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePull})
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	rpc.callRequests = nil
+	rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+		return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
+	}
+	store := newRecordingStore()
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
+	require.NoError(t, err)
+
+	_, err = intent.Validate(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "transaction preflight failed")
+	assert.Empty(t, rpc.sentRawTxs)
+	assert.Len(t, rpc.callRequests, 1)
+	assert.Zero(t, store.putIfAbsentCalls)
+	assert.Zero(t, store.deleteCalls)
+}
+
+func TestIntentValidatePushAndProofCredentialsDoesNotConsumeReplayState(t *testing.T) {
+	tests := []struct {
+		name           string
+		credentialType tempo.CredentialType
+		prepareRequest func(tempo.ChargeRequest) tempo.ChargeRequest
+		wantMode       string
+	}{
+		{
+			name:           "push",
+			credentialType: tempo.CredentialTypeHash,
+			prepareRequest: func(request tempo.ChargeRequest) tempo.ChargeRequest {
+				request.MethodDetails.SupportedModes = []tempo.ChargeMode{tempo.ChargeModePush}
+				return request
+			},
+			wantMode: "push",
+		},
+		{
+			name:           "proof",
+			credentialType: tempo.CredentialTypeProof,
+			prepareRequest: func(request tempo.ChargeRequest) tempo.ChargeRequest {
+				request.Amount = "0"
+				return request
+			},
+			wantMode: "proof",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			request := tt.prepareRequest(buildRequest(t, false, nil))
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tt.credentialType).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			store := newRecordingStore()
+			intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
+			require.NoError(t, err)
+
+			for range 2 {
+				validation, err := intent.Validate(ctx, credential, request.Map())
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantMode, validation.Details["mode"])
+			}
+			assert.Zero(t, store.putIfAbsentCalls)
+
+			_, err = intent.Broadcast(ctx, credential, request.Map())
+			require.NoError(t, err)
+			assert.Equal(t, 1, store.putIfAbsentCalls)
+
+			_, err = intent.Validate(ctx, credential, request.Map())
+			require.NoError(t, err)
+			_, err = intent.Broadcast(ctx, credential, request.Map())
+			require.ErrorContains(t, err, "already used")
+			assert.Equal(t, 2, store.putIfAbsentCalls)
+		})
+	}
+}
+
+func TestIntentValidateSponsoredCredentialDoesNotInvokeFeePayer(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, []tempo.ChargeMode{tempo.ChargeModePull})
+	feePayerCalls := 0
+	feePayerServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		feePayerCalls++
+	}))
+	defer feePayerServer.Close()
+	request.MethodDetails.FeePayerURL = feePayerServer.URL
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	rpc.estimateGasCalls = nil
+	rpc.callRequests = nil
+	store := newRecordingStore()
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
+	require.NoError(t, err)
+
+	validation, err := intent.Validate(ctx, credential, request.Map())
+	require.NoError(t, err)
+	assert.Equal(t, "pull", validation.Details["mode"])
+	assert.Zero(t, feePayerCalls)
+	assert.Empty(t, rpc.sentRawTxs)
+	assert.Empty(t, rpc.estimateGasCalls)
+	assert.Empty(t, rpc.callRequests)
+	assert.Zero(t, store.putIfAbsentCalls)
+}
+
+func TestIntentBroadcastSponsoredCredentialSimulatesBeforeFeePayer(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, []tempo.ChargeMode{tempo.ChargeModePull})
+	feePayerCalls := 0
+	feePayerServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		feePayerCalls++
+	}))
+	defer feePayerServer.Close()
+	request.MethodDetails.FeePayerURL = feePayerServer.URL
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	rpc.callRequests = nil
+	rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+		return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
+	}
+	store := newRecordingStore()
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
+	require.NoError(t, err)
+
+	_, err = intent.Broadcast(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "transaction preflight failed")
+	assert.Len(t, rpc.callRequests, 1)
+	assert.Zero(t, feePayerCalls)
+	assert.Empty(t, rpc.sentRawTxs)
+	assert.Zero(t, store.putIfAbsentCalls)
 }
 
 func TestChargeFlow_FeePayerTransactionViaRemoteSigner(t *testing.T) {
@@ -1173,35 +1391,39 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
 	rpc := newMockRPC(request)
-	rpc.onEstimateGas = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	rpc.onCall = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
 		callObject, ok := params[0].(map[string]any)
 		if !assert.Truef(t, ok,
-			"estimateGas params[0] type = %T, want map[string]any", params[0]) {
+			"eth_call params[0] type = %T, want map[string]any", params[0]) {
 			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
 
-		if _, ok := callObject["calls"]; !ok {
-			return &temporpc.JSONRPCResponse{Result: rpc.estimateGas}, nil
+		if _, finalEnvelope := callObject["feePayer"]; !finalEnvelope {
+			assert.Equal(t, map[string]any{
+				"calls": callObject["calls"],
+				"from":  callObject["from"],
+			}, callObject)
+			return &temporpc.JSONRPCResponse{Result: rpc.callResult}, nil
 		}
 		if !assert.NotEqual(t, "", callObject["from"],
-			"estimateGas call object missing from") {
+			"eth_call object missing from") {
 			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
 		if !assert.Equalf(t, request.Currency, callObject["feeToken"],
-			"estimateGas feeToken = %v, want %s", callObject["feeToken"], request.Currency) {
+			"eth_call feeToken = %v, want %s", callObject["feeToken"], request.Currency) {
 			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
 
 		calls, ok := callObject["calls"].([]map[string]any)
 		if !assert.Falsef(t, !ok || len(calls) == 0,
-			"estimateGas calls = %#v, want non-empty call batch", callObject["calls"]) {
+			"eth_call calls = %#v, want non-empty call batch", callObject["calls"]) {
 			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
 		{
 
 			_, ok := callObject["nonceKey"]
 			if !assert.True(t, ok,
-				"estimateGas call object missing nonceKey") {
+				"eth_call object missing nonceKey") {
 				return *new(*temporpc.JSONRPCResponse), *new(error)
 			}
 		}
@@ -1209,7 +1431,7 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 
 			_, ok := callObject["validBefore"]
 			if !assert.True(t, ok,
-				"estimateGas call object missing validBefore") {
+				"eth_call object missing validBefore") {
 				return *new(*temporpc.JSONRPCResponse), *new(error)
 			}
 		}
@@ -1225,7 +1447,8 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	store := newRecordingStore()
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store, FeePayerPrivateKey: feePayerKey})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1242,10 +1465,12 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 		"expected no broadcast after failed preflight, got %d", len(rpc.sentRawTxs)) {
 		return
 	}
-	if !assert.Falsef(t, len(rpc.estimateGasCalls) < 2,
-		"expected client estimate and server preflight calls, got %d", len(rpc.estimateGasCalls)) {
+	if !assert.Lenf(t, rpc.callRequests, 2,
+		"expected sender and final-envelope simulations, got %d", len(rpc.callRequests)) {
 		return
 	}
+	assert.Equal(t, 1, store.putIfAbsentCalls)
+	assert.Equal(t, 1, store.deleteCalls)
 
 }
 

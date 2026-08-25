@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
@@ -77,6 +78,17 @@ type Intent struct {
 	store          tempo.Store
 }
 
+var _ mppserver.BroadcastingIntent = (*Intent)(nil)
+
+type validatedChargeCredential struct {
+	payload tempo.ChargeCredentialPayload
+	request tempo.ChargeRequest
+	rpc     tempo.RPCClient
+	sender  common.Address
+	source  *sourceDID
+	tx      *tempotx.Tx
+}
+
 // NewIntent constructs a Tempo charge verifier.
 func NewIntent(config IntentConfig) (*Intent, error) {
 	feePayerPrivateKey := config.FeePayerPrivateKey
@@ -116,12 +128,92 @@ func (i *Intent) Name() string {
 	return tempo.IntentCharge
 }
 
-// Verify validates a Tempo charge Credential against the supplied request.
+// Validate checks a Tempo charge Credential without consuming replay state,
+// signing a sponsored transaction, or broadcasting.
+func (i *Intent) Validate(
+	ctx context.Context,
+	credential *mpp.Credential,
+	requestMap map[string]any,
+) (*mppserver.Validation, error) {
+	validated, err := i.validateCredential(ctx, credential, requestMap)
+	if err != nil {
+		return nil, err
+	}
+	mode := string(tempo.ChargeModePull)
+	if validated.payload.Type == tempo.CredentialTypeHash {
+		mode = string(tempo.ChargeModePush)
+	} else if validated.payload.Type == tempo.CredentialTypeProof {
+		mode = string(tempo.CredentialTypeProof)
+	}
+	details := map[string]any{"mode": mode}
+	if validated.sender != (common.Address{}) {
+		details["sender"] = validated.sender.Hex()
+	}
+	if validated.payload.Type == tempo.CredentialTypeHash || validated.payload.Type == tempo.CredentialTypeTransaction {
+		details["transfers"] = validationTransferDetails(validated.request)
+	}
+	if validated.payload.Type == tempo.CredentialTypeTransaction {
+		details["serializedTransaction"] = validated.payload.Signature
+	}
+	return &mppserver.Validation{
+		Challenge:  credential.Challenge,
+		Credential: credential,
+		Details:    details,
+		Intent:     tempo.IntentCharge,
+		Method:     tempo.MethodName,
+		Request:    validated.request.Map(),
+		Source:     credential.Source,
+	}, nil
+}
+
+func validationTransferDetails(request tempo.ChargeRequest) []map[string]any {
+	transfers := expectedTransfers(request)
+	details := make([]map[string]any, 0, len(transfers))
+	for _, transfer := range transfers {
+		detail := map[string]any{
+			"amount":    transfer.amount,
+			"recipient": transfer.recipient,
+		}
+		if transfer.memo != "" {
+			detail["memo"] = transfer.memo
+		} else {
+			detail["allowAnyMemo"] = true
+		}
+		details = append(details, detail)
+	}
+	return details
+}
+
+// Broadcast revalidates and settles a Tempo charge Credential.
+func (i *Intent) Broadcast(
+	ctx context.Context,
+	credential *mpp.Credential,
+	requestMap map[string]any,
+) (*mpp.Receipt, error) {
+	validated, err := i.validateCredential(ctx, credential, requestMap)
+	if err != nil {
+		return nil, err
+	}
+	return i.broadcastCredential(ctx, credential, validated)
+}
+
+// Verify is the backwards-compatible combined validation and broadcast path.
 func (i *Intent) Verify(
 	ctx context.Context,
 	credential *mpp.Credential,
 	requestMap map[string]any,
 ) (*mpp.Receipt, error) {
+	return i.Broadcast(ctx, credential, requestMap)
+}
+
+func (i *Intent) validateCredential(
+	ctx context.Context,
+	credential *mpp.Credential,
+	requestMap map[string]any,
+) (*validatedChargeCredential, error) {
+	if credential == nil {
+		return nil, mpp.ErrMalformedCredential("credential is required")
+	}
 	request, err := tempo.ParseChargeRequest(requestMap)
 	if err != nil {
 		return nil, mpp.ErrBadRequest(err.Error())
@@ -149,157 +241,210 @@ func (i *Intent) Verify(
 		return nil, err
 	}
 
+	validated := &validatedChargeCredential{
+		payload: payload,
+		request: request,
+		rpc:     rpc,
+		source:  source,
+	}
 	switch payload.Type {
 	case tempo.CredentialTypeHash:
-		return i.verifyHash(ctx, rpc, credential, request, payload.Hash, source)
+		if err := i.validateHash(ctx, credential, validated); err != nil {
+			return nil, err
+		}
 	case tempo.CredentialTypeProof:
-		return i.verifyProof(ctx, rpc, credential, request, payload.Signature, source)
+		if err := i.validateProof(ctx, credential, validated); err != nil {
+			return nil, err
+		}
 	case tempo.CredentialTypeTransaction:
-		return i.verifyTransaction(ctx, rpc, credential, request, payload.Signature, source)
+		if err := i.validateTransaction(ctx, credential, validated); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("unsupported credential type %q", payload.Type))
 	}
+	return validated, nil
 }
 
-func (i *Intent) verifyHash(
+func (i *Intent) validateHash(
 	ctx context.Context,
-	rpc tempo.RPCClient,
 	credential *mpp.Credential,
-	request tempo.ChargeRequest,
-	hash string,
-	source *sourceDID,
-) (*mpp.Receipt, error) {
+	validated *validatedChargeCredential,
+) error {
+	request := validated.request
+	source := validated.source
 	if request.MethodDetails.Memo != "" {
-		return nil, mpp.ErrInvalidPayload("hash credentials are not supported when the primary transfer uses an explicit memo")
+		return mpp.ErrInvalidPayload("hash credentials are not supported when the primary transfer uses an explicit memo")
 	}
 	if source == nil {
-		return nil, mpp.ErrInvalidPayload("hash credential must include a source")
+		return mpp.ErrInvalidPayload("hash credential must include a source")
 	}
-	receiptMap, err := fetchReceipt(ctx, rpc, hash)
+	receiptMap, err := fetchReceipt(ctx, validated.rpc, validated.payload.Hash)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !receiptMatches(receiptMap, credential, request, source.address) {
-		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
+		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
-	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
-	if err != nil {
-		return nil, err
-	}
-	if !accepted {
-		return nil, mpp.ErrVerificationFailed("transaction hash already used")
-	}
-	return mpp.Success(
-		hash,
-		mpp.WithReceiptMethod(tempo.MethodName),
-		mpp.WithExternalID(request.ExternalID),
-	), nil
+	validated.sender = common.HexToAddress(source.address)
+	return nil
 }
 
-func (i *Intent) verifyProof(
+func (i *Intent) validateProof(
 	ctx context.Context,
-	rpc tempo.RPCClient,
 	credential *mpp.Credential,
-	request tempo.ChargeRequest,
-	signature string,
-	source *sourceDID,
-) (*mpp.Receipt, error) {
+	validated *validatedChargeCredential,
+) error {
+	request := validated.request
+	source := validated.source
 	if request.Amount != "0" {
-		return nil, mpp.ErrInvalidPayload("proof credentials are only valid for zero-amount challenges")
+		return mpp.ErrInvalidPayload("proof credentials are only valid for zero-amount challenges")
 	}
 	if source == nil {
-		return nil, mpp.ErrInvalidPayload("proof credential must include a source")
+		return mpp.ErrInvalidPayload("proof credential must include a source")
 	}
-	chainID, err := resolveChallengeChainID(ctx, rpc, request)
+	chainID, err := resolveChallengeChainID(ctx, validated.rpc, request)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if source.chainID != chainID {
-		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
+		return mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
 	// Bind the digest to the claimed payer so a proof cannot be replayed
 	// against a different account (e.g. via a shared access key).
 	proofHash, err := tempo.ProofTypedDataHash(chainID, common.HexToAddress(source.address), credential.Challenge.ID, credential.Challenge.Realm)
 	if err != nil {
-		return nil, mpp.ErrVerificationFailed("failed to construct proof payload")
+		return mpp.ErrVerificationFailed("failed to construct proof payload")
 	}
-	proofSigner, err := recoverProofSigner(proofHash, signature, common.HexToAddress(source.address))
+	proofSigner, err := recoverProofSigner(proofHash, validated.payload.Signature, common.HexToAddress(source.address))
 	if err != nil {
-		return nil, mpp.ErrInvalidPayload("proof signature is invalid")
+		return mpp.ErrInvalidPayload("proof signature is invalid")
 	}
 	if !strings.EqualFold(proofSigner.Hex(), source.address) {
-		active, err := isActiveAccessKey(ctx, rpc, common.HexToAddress(source.address), proofSigner)
+		active, err := isActiveAccessKey(ctx, validated.rpc, common.HexToAddress(source.address), proofSigner)
 		if err != nil || !active {
-			return nil, mpp.ErrInvalidPayload("proof signature does not match source")
+			return mpp.ErrInvalidPayload("proof signature does not match source")
 		}
 	}
-	accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(credential.Challenge.ID), credential.Challenge.ID)
-	if err != nil {
-		return nil, err
-	}
-	if !accepted {
-		return nil, mpp.ErrVerificationFailed("proof credential already used")
-	}
-	return mpp.Success(
-		credential.Challenge.ID,
-		mpp.WithReceiptMethod(tempo.MethodName),
-		mpp.WithExternalID(request.ExternalID),
-	), nil
+	validated.sender = common.HexToAddress(source.address)
+	return nil
 }
 
-func (i *Intent) verifyTransaction(
+func (i *Intent) validateTransaction(
 	ctx context.Context,
-	rpc tempo.RPCClient,
 	credential *mpp.Credential,
-	request tempo.ChargeRequest,
-	raw string,
-	source *sourceDID,
-) (*mpp.Receipt, error) {
-	tx, feePayerForm, err := deserializeTransactionCredential(raw)
+	validated *validatedChargeCredential,
+) error {
+	request := validated.request
+	tx, feePayerForm, err := deserializeTransactionCredential(validated.payload.Signature)
 	if err != nil {
-		return nil, mpp.ErrInvalidPayload("failed to deserialize transaction payload")
+		return mpp.ErrInvalidPayload("failed to deserialize transaction payload")
 	}
 	if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
-		return nil, mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
+		return mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
 	}
 
 	sender, err := verifyTransactionSender(tx)
 	if err != nil {
-		return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
+		return mpp.ErrInvalidPayload("transaction signature is invalid")
 	}
-	if source != nil && !strings.EqualFold(source.address, sender.Hex()) {
-		return nil, mpp.ErrInvalidPayload("credential source does not match transaction signer")
+	if validated.source != nil && !strings.EqualFold(validated.source.address, sender.Hex()) {
+		return mpp.ErrInvalidPayload("credential source does not match transaction signer")
 	}
+	tx.From = sender
 
 	if request.MethodDetails.FeePayer {
 		policy, err := i.feePayerPolicyFor(request.Currency)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// tempo-go exposes the signing primitives already; this package keeps the
 		// sponsor policy checks local until a shared helper exists upstream.
 		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires, policy); err != nil {
-			return nil, err
+			return err
 		}
 		if !tx.AwaitingFeePayer {
-			return nil, mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
+			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
 		if tx.ValidBefore == 0 || time.Now().Unix() >= int64(tx.ValidBefore) {
-			return nil, mpp.ErrVerificationFailed("fee payer transaction has expired")
+			return mpp.ErrVerificationFailed("fee payer transaction has expired")
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
-			return nil, mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
+			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
 		}
 		requestFeeToken := common.HexToAddress(request.Currency)
 		if !feePayerForm && tx.FeeToken != (common.Address{}) {
-			return nil, mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
+			return mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
 		}
 		if feePayerForm && tx.FeeToken != (common.Address{}) && tx.FeeToken != requestFeeToken {
-			return nil, mpp.ErrInvalidPayload("fee payer transaction fee token does not match the charge request")
+			return mpp.ErrInvalidPayload("fee payer transaction fee token does not match the charge request")
 		}
+	} else if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
+		return err
+	}
+	validated.sender = sender
+	validated.tx = tx
+	return nil
+}
+
+func (i *Intent) broadcastCredential(
+	ctx context.Context,
+	credential *mpp.Credential,
+	validated *validatedChargeCredential,
+) (*mpp.Receipt, error) {
+	switch validated.payload.Type {
+	case tempo.CredentialTypeHash:
+		hash := validated.payload.Hash
+		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+		}
+		return mpp.Success(hash, mpp.WithReceiptMethod(tempo.MethodName), mpp.WithExternalID(validated.request.ExternalID)), nil
+	case tempo.CredentialTypeProof:
+		challengeID := credential.Challenge.ID
+		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(challengeID), challengeID)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			return nil, mpp.ErrVerificationFailed("proof credential already used")
+		}
+		return mpp.Success(challengeID, mpp.WithReceiptMethod(tempo.MethodName), mpp.WithExternalID(validated.request.ExternalID)), nil
+	case tempo.CredentialTypeTransaction:
+		return i.broadcastTransaction(ctx, credential, validated)
+	default:
+		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("unsupported credential type %q", validated.payload.Type))
+	}
+}
+
+func (i *Intent) broadcastTransaction(
+	ctx context.Context,
+	credential *mpp.Credential,
+	validated *validatedChargeCredential,
+) (*mpp.Receipt, error) {
+	request := validated.request
+	rpc := validated.rpc
+	sender := validated.sender
+	tx := validated.tx
+	sponsoredClaimKey := ""
+	releaseSponsoredClaim := false
+	defer func() {
+		if releaseSponsoredClaim {
+			_ = i.store.Delete(context.WithoutCancel(ctx), sponsoredClaimKey)
+		}
+	}()
+
+	if request.MethodDetails.FeePayer {
+		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
+			return nil, err
+		}
+		sponsoredClaimKey = tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)
 		accepted, err := i.store.PutIfAbsent(
 			ctx,
-			tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID),
+			sponsoredClaimKey,
 			credential.Challenge.ID,
 		)
 		if err != nil {
@@ -308,15 +453,16 @@ func (i *Intent) verifyTransaction(
 		if !accepted {
 			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
+		releaseSponsoredClaim = true
+		requestFeeToken := common.HexToAddress(request.Currency)
 		if i.feePayerSigner != nil {
-			tx.From = sender
 			tx.FeeToken = requestFeeToken
 			tx.AwaitingFeePayer = false
 			if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
 				return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer transaction")
 			}
 		} else if request.MethodDetails.FeePayerURL != "" {
-			coSignedRaw, err := signWithRemoteFeePayer(ctx, request.MethodDetails.FeePayerURL, raw)
+			coSignedRaw, err := signWithRemoteFeePayer(ctx, request.MethodDetails.FeePayerURL, validated.payload.Signature)
 			if err != nil {
 				return nil, err
 			}
@@ -329,6 +475,10 @@ func (i *Intent) verifyTransaction(
 		}
 		if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction does not contain a matching Tempo transfer")
+		}
+		policy, err := i.feePayerPolicyFor(request.Currency)
+		if err != nil {
+			return nil, err
 		}
 		if err := validateFeePayerTransaction(tx, credential.Challenge.Expires, policy); err != nil {
 			return nil, err
@@ -346,13 +496,16 @@ func (i *Intent) verifyTransaction(
 		if coSignedSender != sender {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction sender does not match the credential signer")
 		}
-		if _, err := tempotx.VerifyFeePayerSignature(tx, coSignedSender); err != nil {
+		feePayerAddress, err := tempotx.VerifyFeePayerSignature(tx, coSignedSender)
+		if err != nil {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
 		}
 		tx.From = coSignedSender
-		if err := simulateTransactionPreflight(ctx, rpc, tx); err != nil {
+		if err := simulateSponsoredTransactionExecution(ctx, rpc, tx, feePayerAddress); err != nil {
 			return nil, err
 		}
+	} else if err := simulateTransactionExecution(ctx, rpc, tx); err != nil {
+		return nil, err
 	}
 
 	serialized, err := tempotx.Serialize(tx, nil)
@@ -380,6 +533,9 @@ func (i *Intent) verifyTransaction(
 	}
 
 	if shouldBroadcast {
+		if request.MethodDetails.FeePayer {
+			releaseSponsoredClaim = false
+		}
 		var err error
 		txHash, err = rpc.SendRawTransaction(ctx, serialized)
 		if err != nil {
@@ -968,8 +1124,30 @@ func signWithRemoteFeePayer(ctx context.Context, feePayerURL, raw string) (strin
 	return serialized, nil
 }
 
-func simulateTransactionPreflight(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
-	response, err := rpc.SendRequest(ctx, "eth_estimateGas", transactionCallObject(tx))
+func simulateSponsoredSenderExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
+	return simulateCall(ctx, rpc, map[string]any{
+		"calls": callsCallObject(tx.Calls),
+		"from":  tx.From.Hex(),
+	})
+}
+
+func simulateSponsoredTransactionExecution(
+	ctx context.Context,
+	rpc tempo.RPCClient,
+	tx *tempotx.Tx,
+	feePayer common.Address,
+) error {
+	callObject := transactionCallObject(tx)
+	callObject["feePayer"] = feePayer.Hex()
+	return simulateCall(ctx, rpc, callObject)
+}
+
+func simulateTransactionExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
+	return simulateCall(ctx, rpc, transactionCallObject(tx))
+}
+
+func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[string]any) error {
+	response, err := rpc.SendRequest(ctx, "eth_call", callObject, "latest")
 	if err != nil {
 		return mpp.ErrVerificationFailed("transaction preflight failed")
 	}

@@ -17,6 +17,54 @@ type splitTestIntent struct {
 	broadcastErr   error
 }
 
+type publicSplitTestIntent struct {
+	validateCalls  int
+	broadcastCalls int
+	verifyCalls    int
+}
+
+var _ BroadcastingIntent = (*publicSplitTestIntent)(nil)
+
+func (i *publicSplitTestIntent) Name() string { return "charge" }
+
+func (i *publicSplitTestIntent) Validate(
+	_ context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*Validation, error) {
+	i.validateCalls++
+	return &Validation{
+		Challenge:  credential.Challenge,
+		Credential: credential,
+		Details:    map[string]any{"implementation": "public"},
+		Intent:     i.Name(),
+		Method:     "tempo",
+		Request:    request,
+		Source:     credential.Source,
+	}, nil
+}
+
+func (i *publicSplitTestIntent) Broadcast(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error) {
+	if _, err := i.Validate(ctx, credential, request); err != nil {
+		return nil, err
+	}
+	i.broadcastCalls++
+	return mpp.Success("0xpublic", mpp.WithReceiptMethod("tempo")), nil
+}
+
+func (i *publicSplitTestIntent) Verify(
+	context.Context,
+	*mpp.Credential,
+	map[string]any,
+) (*mpp.Receipt, error) {
+	i.verifyCalls++
+	return mpp.Success("0xlegacy"), nil
+}
+
 func (i *splitTestIntent) Name() string { return "charge" }
 
 func (i *splitTestIntent) Validate(
@@ -120,6 +168,32 @@ func TestMppCredentialLifecycle(t *testing.T) {
 	assert.Equal(t, "0xsplit", receipt.Reference)
 	assert.Equal(t, 3, intent.validateCalls)
 	assert.Equal(t, 2, intent.broadcastCalls)
+}
+
+func TestMppCredentialLifecycleUsesPublicInterfaces(t *testing.T) {
+	t.Parallel()
+	intent := &publicSplitTestIntent{}
+	payment := newTestServer(t,
+		chargeTestMethod{intents: map[string]Intent{"charge": intent}},
+		"api.example.com",
+		"test-secret-key-minimum-32-byte-secret",
+	)
+	request := map[string]any{"amount": "1", "currency": "0x123"}
+	credential := splitCredential("test-secret-key-minimum-32-byte-secret", request)
+
+	validation, err := payment.ValidateCredential(context.Background(), credential)
+	require.NoError(t, err)
+	assert.Equal(t, "public", validation.Details["implementation"])
+	assert.Equal(t, 1, intent.validateCalls)
+	assert.Zero(t, intent.broadcastCalls)
+	assert.Zero(t, intent.verifyCalls)
+
+	receipt, err := payment.BroadcastCredential(context.Background(), credential)
+	require.NoError(t, err)
+	assert.Equal(t, "0xpublic", receipt.Reference)
+	assert.Equal(t, 2, intent.validateCalls)
+	assert.Equal(t, 1, intent.broadcastCalls)
+	assert.Zero(t, intent.verifyCalls)
 }
 
 func TestNewIntentSynthesizesVerify(t *testing.T) {

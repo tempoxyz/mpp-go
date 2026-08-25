@@ -20,6 +20,26 @@ type Intent interface {
 	Verify(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
 }
 
+// ValidatingIntent supports non-mutating credential validation.
+//
+// Validate must not consume replay state, sign transactions, broadcast, or
+// otherwise mutate payment state. Callers must use BroadcastCredential to
+// accept a payment after validation.
+type ValidatingIntent interface {
+	Intent
+	Validate(ctx context.Context, credential *mpp.Credential, request map[string]any) (*Validation, error)
+}
+
+// BroadcastingIntent supports a split validation and settlement lifecycle.
+//
+// Broadcast must revalidate the credential before performing its terminal
+// payment operation. Verify remains the compatibility path for callers that do
+// not use the split lifecycle explicitly.
+type BroadcastingIntent interface {
+	ValidatingIntent
+	Broadcast(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
+}
+
 // Validation describes a credential accepted without consuming or broadcasting it.
 type Validation struct {
 	// Challenge is the server-issued challenge echoed by the credential.
@@ -80,6 +100,8 @@ type splitHookIntent struct {
 	broadcast BroadcastFunc
 }
 
+var _ BroadcastingIntent = (*splitHookIntent)(nil)
+
 // NewIntent builds an Intent from either Verify or Validate and Broadcast hooks.
 func NewIntent(name string, hooks IntentHooks) (Intent, error) {
 	if name == "" {
@@ -106,15 +128,33 @@ func (i *verifyHookIntent) Verify(
 
 func (i *splitHookIntent) Name() string { return i.name }
 
+// Validate performs the configured non-mutating credential check.
+func (i *splitHookIntent) Validate(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*Validation, error) {
+	return i.validate(ctx, credential, request)
+}
+
+// Broadcast revalidates the credential before invoking the settlement hook.
+func (i *splitHookIntent) Broadcast(
+	ctx context.Context,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error) {
+	if _, err := i.Validate(ctx, credential, request); err != nil {
+		return nil, err
+	}
+	return i.broadcast(ctx, credential, request)
+}
+
 func (i *splitHookIntent) Verify(
 	ctx context.Context,
 	credential *mpp.Credential,
 	request map[string]any,
 ) (*mpp.Receipt, error) {
-	if _, err := i.validate(ctx, credential, request); err != nil {
-		return nil, err
-	}
-	return i.broadcast(ctx, credential, request)
+	return i.Broadcast(ctx, credential, request)
 }
 
 // Method is the interface for server-side payment methods.
@@ -174,6 +214,9 @@ func (m *Mpp) BroadcastCredential(ctx context.Context, credential *mpp.Credentia
 	intent, request, err := m.prepareCredential(credential)
 	if err != nil {
 		return nil, err
+	}
+	if broadcasting, ok := intent.(BroadcastingIntent); ok {
+		return broadcasting.Broadcast(ctx, credential, request)
 	}
 	return intent.Verify(ctx, credential, request)
 }

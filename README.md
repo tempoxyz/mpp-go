@@ -182,23 +182,25 @@ intent, err := server.NewIntent("charge", server.IntentHooks{
 })
 ```
 
-The constructed intent still satisfies the existing `server.Intent` interface;
-its `Verify` method calls `Validate` and then `Broadcast`. Servers can also run
-the phases independently:
+The constructed intent satisfies the public `server.BroadcastingIntent`
+interface as well as the backwards-compatible `server.Intent` interface. Custom
+intents can implement `server.ValidatingIntent` or `server.BroadcastingIntent`
+directly. Servers can run the phases independently:
 
 ```go
 validation, err := payment.ValidateCredential(ctx, credential)
 receipt, err := payment.BroadcastCredential(ctx, credential)
 ```
 
-`ValidateCredential` requires an intent constructed with split hooks and must
-not consume replay state, sign fee-payer transactions, or broadcast.
+`ValidateCredential` requires a `server.ValidatingIntent` and must not consume
+replay state, sign fee-payer transactions, or broadcast.
 `BroadcastCredential` re-validates before settlement. `VerifyCredential`
 remains an alias for the mutating broadcast path, and legacy intents that only
 implement `Verify` continue to work for paid routes and broadcasts.
 
-Tempo relay methods implement the split lifecycle by delegating validation to
-`POST /v1/mpp/validate` and finalization to `POST /v1/mpp/broadcast`.
+The built-in Tempo charge intent implements the split lifecycle locally. Tempo
+relay methods implement the same lifecycle by delegating validation to `POST
+/v1/mpp/validate` and finalization to `POST /v1/mpp/broadcast`.
 
 ## Web Frameworks
 
