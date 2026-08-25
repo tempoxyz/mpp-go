@@ -15,7 +15,7 @@ import (
 // Transport is an http.RoundTripper that handles 402 Payment Required responses.
 // It wraps an inner transport and automatically negotiates payment.
 type Transport struct {
-	methods map[string]Method
+	methods map[methodKey]Method
 	inner   http.RoundTripper
 }
 
@@ -26,9 +26,9 @@ func NewTransport(methods []Method, inner http.RoundTripper) *Transport {
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
-	m := make(map[string]Method, len(methods))
+	m := make(map[methodKey]Method, len(methods))
 	for _, method := range methods {
-		m[method.Name()] = method
+		m[keyForMethod(method)] = method
 	}
 	return &Transport{
 		methods: m,
@@ -69,7 +69,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				continue
 			}
 		}
-		if m, ok := t.methods[ch.Method]; ok {
+		if m, ok := t.methods[methodKey{name: ch.Method, intent: ch.Intent}]; ok {
 			matched = ch
 			method = m
 			break

@@ -14,13 +14,24 @@ import (
 type Method interface {
 	// Name returns the method name this handler supports (e.g., "tempo").
 	Name() string
+	// Intent returns the payment intent this handler supports (e.g., "charge").
+	Intent() string
 	// CreateCredential creates a payment credential for the given challenge.
 	CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error)
 }
 
+type methodKey struct {
+	name   string
+	intent string
+}
+
+func keyForMethod(method Method) methodKey {
+	return methodKey{name: method.Name(), intent: method.Intent()}
+}
+
 // Client is an HTTP client with automatic 402 payment handling.
 type Client struct {
-	methods    map[string]Method
+	methods    map[methodKey]Method
 	httpClient *http.Client
 }
 
@@ -37,11 +48,11 @@ func WithHTTPClient(c *http.Client) Option {
 // New creates a Client with the given payment methods.
 func New(methods []Method, opts ...Option) *Client {
 	c := &Client{
-		methods:    make(map[string]Method, len(methods)),
+		methods:    make(map[methodKey]Method, len(methods)),
 		httpClient: http.DefaultClient,
 	}
 	for _, m := range methods {
-		c.methods[m.Name()] = m
+		c.methods[keyForMethod(m)] = m
 	}
 	for _, opt := range opts {
 		opt(c)

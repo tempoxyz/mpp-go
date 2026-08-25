@@ -15,15 +15,24 @@ import (
 
 // mockMethod implements Method for testing.
 type mockMethod struct {
-	name  string
-	cred  *mpp.Credential
-	err   error
-	calls int
+	name   string
+	intent string
+	cred   *mpp.Credential
+	err    error
+	calls  int
+	seen   []string
 }
 
 func (m *mockMethod) Name() string { return m.name }
+func (m *mockMethod) Intent() string {
+	if m.intent == "" {
+		return "payment"
+	}
+	return m.intent
+}
 func (m *mockMethod) CreateCredential(_ context.Context, ch *mpp.Challenge) (*mpp.Credential, error) {
 	m.calls++
+	m.seen = append(m.seen, ch.Intent)
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -151,6 +160,49 @@ func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
 		return
 	}
 
+}
+
+func TestTransport_RoundTrip_MatchesMethodAndIntent(t *testing.T) {
+	var challenges []*mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			for _, challenge := range challenges {
+				w.Header().Add("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			}
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	parsedURL, err := urlpkg.Parse(srv.URL)
+	if !assert.NoError(t, err) {
+		return
+	}
+	challenges = []*mpp.Challenge{
+		mpp.NewChallenge("secret", parsedURL.Host, "tempo", "authorize", nil),
+		mpp.NewChallenge("secret", parsedURL.Host, "tempo", "charge", nil),
+	}
+	method := &mockMethod{
+		name:   "tempo",
+		intent: "charge",
+		cred:   newTestCredential("tempo"),
+	}
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if !assert.NoError(t, err) {
+		return
+	}
+	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
+	assert.Equal(t, []string{"charge"}, method.seen)
 }
 
 func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {

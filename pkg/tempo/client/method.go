@@ -86,6 +86,11 @@ func (m *Method) Name() string {
 	return tempo.MethodName
 }
 
+// Intent returns the charge intent handled by this method.
+func (m *Method) Intent() string {
+	return tempo.IntentCharge
+}
+
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge.Method != tempo.MethodName {
