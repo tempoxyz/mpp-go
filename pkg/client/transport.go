@@ -84,9 +84,41 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	challenges, errs := t.parseChallenges(resp.Header)
 	_ = errs // Non-Payment or malformed headers are silently skipped.
 
-	// Find the preferred challenge and method that can handle it.
+	candidates := t.challengeCandidates(challenges, preferences, time.Now().UTC())
+
+	if len(candidates) == 0 {
+		// No matching method found — return original 402 response as-is.
+		return resp, nil
+	}
+	selected := candidates[0]
+	if err := validatePaymentOrigin(request, selected.challenge); err != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return nil, err
+	}
+
+	// Drain and close the 402 response body so the connection can be reused.
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Create payment credential.
+	cred, err := selected.method.CreateCredential(request.Context(), selected.challenge)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
+	}
+
+	// Clone the original request for retry.
+	retry, err := t.cloneRequest(request)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
+	}
+	retry.Header.Set("Authorization", cred.ToAuthorization())
+
+	return t.inner.RoundTrip(retry)
+}
+
+func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {
 	candidates := make([]challengeCandidate, 0, len(challenges))
-	now := time.Now().UTC()
 	for i := range challenges {
 		ch := &challenges[i]
 		if ch.Expires != "" {
@@ -121,39 +153,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			})
 		}
 	}
-
-	if len(candidates) == 0 {
-		// No matching method found — return original 402 response as-is.
-		return resp, nil
-	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].quality > candidates[j].quality
 	})
-	selected := candidates[0]
-	if err := validatePaymentOrigin(request, selected.challenge); err != nil {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return nil, err
-	}
-
-	// Drain and close the 402 response body so the connection can be reused.
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	// Create payment credential.
-	cred, err := selected.method.CreateCredential(request.Context(), selected.challenge)
-	if err != nil {
-		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
-	}
-
-	// Clone the original request for retry.
-	retry, err := t.cloneRequest(request)
-	if err != nil {
-		return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
-	}
-	retry.Header.Set("Authorization", cred.ToAuthorization())
-
-	return t.inner.RoundTrip(retry)
+	return candidates
 }
 
 type challengeCandidate struct {

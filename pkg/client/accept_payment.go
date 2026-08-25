@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"math"
+	"mime"
 	"strconv"
 	"strings"
 
@@ -34,7 +35,7 @@ func resolvePaymentPreferences(methods []Method, configured PaymentPreferences) 
 	for _, method := range methods {
 		key := keyForMethod(method)
 		name := paymentPreferenceKey(key.name, key.intent)
-		if !validPaymentToken(key.name) || !validPaymentToken(key.intent) {
+		if _, _, err := mime.ParseMediaType(name); err != nil {
 			return nil, "", fmt.Errorf("mpp: invalid payment method capability %q", name)
 		}
 		if _, ok := known[name]; ok {
@@ -65,7 +66,7 @@ func resolvePaymentPreferences(methods []Method, configured PaymentPreferences) 
 }
 
 func parseAcceptPayment(header string) ([]paymentPreference, error) {
-	parts, err := splitHeaderValue(header, ',')
+	parts, err := splitHeaderList(header)
 	if err != nil {
 		return nil, err
 	}
@@ -88,28 +89,24 @@ func parseAcceptPayment(header string) ([]paymentPreference, error) {
 }
 
 func parsePaymentPreference(value string, index int) (paymentPreference, error) {
-	parts, err := splitHeaderValue(value, ';')
-	if err != nil {
-		return paymentPreference{}, err
-	}
-	method, intent, ok := strings.Cut(strings.TrimSpace(parts[0]), "/")
+	capability, parameters, hasParameters := strings.Cut(value, ";")
+	method, intent, ok := strings.Cut(strings.TrimSpace(capability), "/")
 	method = strings.TrimSpace(method)
 	intent = strings.TrimSpace(intent)
-	if !ok || !validPreferenceToken(method) || !validPreferenceToken(intent) {
+	if !ok {
 		return paymentPreference{}, fmt.Errorf("mpp: invalid Accept-Payment entry %q", value)
+	}
+	normalized := paymentPreferenceKey(method, intent)
+	if hasParameters {
+		normalized += ";" + parameters
+	}
+	_, parsedParameters, err := mime.ParseMediaType(normalized)
+	if err != nil {
+		return paymentPreference{}, fmt.Errorf("mpp: invalid Accept-Payment entry %q: %w", value, err)
 	}
 
 	quality := 1.0
-	for _, raw := range parts[1:] {
-		name, parameter, ok := strings.Cut(strings.TrimSpace(raw), "=")
-		name = strings.TrimSpace(name)
-		parameter = strings.TrimSpace(parameter)
-		if !ok || !validParameterName(name) || parameter == "" {
-			return paymentPreference{}, fmt.Errorf("mpp: invalid Accept-Payment parameter %q", raw)
-		}
-		if !strings.EqualFold(name, "q") {
-			continue
-		}
+	if parameter, ok := parsedParameters["q"]; ok {
 		parsed, err := strconv.ParseFloat(parameter, 64)
 		if err != nil || !validHeaderQuality(parameter) {
 			return paymentPreference{}, fmt.Errorf("mpp: invalid Accept-Payment q-value %q", parameter)
@@ -126,7 +123,10 @@ func parsePaymentPreference(value string, index int) (paymentPreference, error) 
 	}, nil
 }
 
-func splitHeaderValue(value string, separator byte) ([]string, error) {
+// splitHeaderList splits the comma-separated field value while preserving
+// commas in quoted extension parameters. The standard library handles each
+// resulting entry with mime.ParseMediaType but does not expose its list scanner.
+func splitHeaderList(value string) ([]string, error) {
 	var parts []string
 	inQuote := false
 	escaped := false
@@ -139,7 +139,7 @@ func splitHeaderValue(value string, separator byte) ([]string, error) {
 			escaped = true
 		case ch == '"':
 			inQuote = !inQuote
-		case ch == separator && !inQuote:
+		case ch == ',' && !inQuote:
 			parts = append(parts, strings.TrimSpace(value[start:i]))
 			start = i + 1
 		}
@@ -210,41 +210,6 @@ func validHeaderQuality(value string) bool {
 	return whole == "1" && strings.Trim(fraction, "0") == ""
 }
 
-func validPreferenceToken(value string) bool {
-	return value == "*" || validPaymentToken(value)
-}
-
-func validPaymentToken(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := range len(value) {
-		ch := value[i]
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
-			continue
-		}
-		if !strings.ContainsRune("!#$%&'*+-.^_`|~", rune(ch)) {
-			return false
-		}
-	}
-	return true
-}
-
-func validParameterName(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := range len(value) {
-		ch := value[i]
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-			(ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func allDigits(value string) bool {
 	for i := range len(value) {
 		if value[i] < '0' || value[i] > '9' {
@@ -262,5 +227,5 @@ func boolInt(value bool) int {
 }
 
 func formatQuality(quality float64) string {
-	return strings.TrimRight(strings.TrimRight(strconv.FormatFloat(quality, 'f', 3, 64), "0"), ".")
+	return strconv.FormatFloat(quality, 'f', -1, 64)
 }
