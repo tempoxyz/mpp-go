@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,30 +16,63 @@ import (
 // Transport is an http.RoundTripper that handles 402 Payment Required responses.
 // It wraps an inner transport and automatically negotiates payment.
 type Transport struct {
-	methods map[methodKey]Method
-	inner   http.RoundTripper
+	methods            map[methodKey][]Method
+	inner              http.RoundTripper
+	paymentPreferences []paymentPreference
+	acceptPayment      string
+	configErr          error
 }
 
 type paymentOriginContextKey struct{}
 
+// TransportOption configures a Transport.
+type TransportOption func(*transportConfig)
+
+type transportConfig struct {
+	paymentPreferences PaymentPreferences
+}
+
+// WithTransportPaymentPreferences sets payment preferences on a standalone
+// Transport. Client users should use WithPaymentPreferences instead. Unknown
+// keys and invalid q-values cause RoundTrip to fail before sending the request.
+func WithTransportPaymentPreferences(preferences PaymentPreferences) TransportOption {
+	return func(config *transportConfig) {
+		config.paymentPreferences = clonePaymentPreferences(preferences)
+	}
+}
+
 // NewTransport creates a payment-aware transport.
-func NewTransport(methods []Method, inner http.RoundTripper) *Transport {
+func NewTransport(methods []Method, inner http.RoundTripper, opts ...TransportOption) *Transport {
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
-	m := make(map[methodKey]Method, len(methods))
-	for _, method := range methods {
-		m[keyForMethod(method)] = method
+	config := new(transportConfig)
+	for _, opt := range opts {
+		opt(config)
 	}
+	m := make(map[methodKey][]Method, len(methods))
+	for _, method := range methods {
+		key := keyForMethod(method)
+		m[key] = append(m[key], method)
+	}
+	preferences, header, err := resolvePaymentPreferences(methods, config.paymentPreferences)
 	return &Transport{
-		methods: m,
-		inner:   inner,
+		methods:            m,
+		inner:              inner,
+		paymentPreferences: preferences,
+		acceptPayment:      header,
+		configErr:          err,
 	}
 }
 
 // RoundTrip implements http.RoundTripper with automatic 402 handling.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := t.inner.RoundTrip(req)
+	if t.configErr != nil {
+		return nil, t.configErr
+	}
+
+	request, preferences := t.prepareRequest(req)
+	resp, err := t.inner.RoundTrip(request)
 	if err != nil {
 		return nil, err
 	}
@@ -50,9 +84,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	challenges, errs := t.parseChallenges(resp.Header)
 	_ = errs // Non-Payment or malformed headers are silently skipped.
 
-	// Find first challenge with a matching method that hasn't expired.
-	var matched *mpp.Challenge
-	var method Method
+	// Find the preferred challenge and method that can handle it.
+	candidates := make([]challengeCandidate, 0, len(challenges))
 	now := time.Now().UTC()
 	for i := range challenges {
 		ch := &challenges[i]
@@ -69,18 +102,35 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				continue
 			}
 		}
-		if m, ok := t.methods[methodKey{name: ch.Method, intent: ch.Intent}]; ok {
-			matched = ch
-			method = m
-			break
+		methods := t.methods[methodKey{name: ch.Method, intent: ch.Intent}]
+		if len(methods) == 0 {
+			continue
+		}
+		preference, ok := bestPaymentPreference(ch, preferences)
+		if !ok || preference.quality == 0 {
+			continue
+		}
+		for _, method := range methods {
+			if matcher, ok := method.(ChallengeMatcher); ok && !matcher.CanHandleChallenge(ch) {
+				continue
+			}
+			candidates = append(candidates, challengeCandidate{
+				challenge: ch,
+				method:    method,
+				quality:   preference.quality,
+			})
 		}
 	}
 
-	if matched == nil {
+	if len(candidates) == 0 {
 		// No matching method found — return original 402 response as-is.
 		return resp, nil
 	}
-	if err := validatePaymentOrigin(req, matched); err != nil {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].quality > candidates[j].quality
+	})
+	selected := candidates[0]
+	if err := validatePaymentOrigin(request, selected.challenge); err != nil {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		return nil, err
@@ -91,19 +141,53 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp.Body.Close()
 
 	// Create payment credential.
-	cred, err := method.CreateCredential(req.Context(), matched)
+	cred, err := selected.method.CreateCredential(request.Context(), selected.challenge)
 	if err != nil {
-		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", matched.Method, err)
+		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
 	}
 
 	// Clone the original request for retry.
-	retry, err := t.cloneRequest(req)
+	retry, err := t.cloneRequest(request)
 	if err != nil {
 		return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 	}
 	retry.Header.Set("Authorization", cred.ToAuthorization())
 
 	return t.inner.RoundTrip(retry)
+}
+
+type challengeCandidate struct {
+	challenge *mpp.Challenge
+	method    Method
+	quality   float64
+}
+
+func (t *Transport) prepareRequest(req *http.Request) (*http.Request, []paymentPreference) {
+	if header, ok := headerValue(req.Header, "Accept-Payment"); ok {
+		if preferences, err := parseAcceptPayment(header); err == nil {
+			return req, preferences
+		}
+		return req, t.paymentPreferences
+	}
+	if t.acceptPayment == "" {
+		return req, t.paymentPreferences
+	}
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
+	clone.Header.Set("Accept-Payment", t.acceptPayment)
+	return clone, t.paymentPreferences
+}
+
+func headerValue(header http.Header, name string) (string, bool) {
+	for key, values := range header {
+		if strings.EqualFold(key, name) {
+			return strings.Join(values, ", "), true
+		}
+	}
+	return "", false
 }
 
 // parseChallengeExpiry parses a challenge expiry using RFC 3339 and the
