@@ -183,12 +183,18 @@ func TestIntentTransactionCredentialLifecycle(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePull})
 	rpc := newMockRPC(request)
+	requestMap := request.Map()
+	scope := map[string]any{
+		"resource": "/paid",
+		"route":    "/paid",
+	}
+	requestMap["_mppx_scope"] = scope
 	challenge := mpp.NewChallenge(
 		"test-secret-key-minimum-32-byte-secret",
 		testRealm,
 		tempo.MethodName,
 		tempo.IntentCharge,
-		request.Map(),
+		requestMap,
 		mpp.WithExpires(mpp.Expires.Minutes(5)),
 	)
 	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, challenge)
@@ -207,6 +213,7 @@ func TestIntentTransactionCredentialLifecycle(t *testing.T) {
 	assert.NotEmpty(t, validation.Details["sender"])
 	assert.Equal(t, credential.Payload["signature"], validation.Details["serializedTransaction"])
 	assert.Len(t, validation.Details["transfers"], 1)
+	assert.Equal(t, scope, validation.Request["_mppx_scope"])
 	assert.Empty(t, rpc.sentRawTxs)
 	assert.Len(t, rpc.callRequests, 1)
 	assert.Zero(t, store.putCalls)
@@ -219,6 +226,21 @@ func TestIntentTransactionCredentialLifecycle(t *testing.T) {
 	assert.Len(t, rpc.sentRawTxs, 1)
 	assert.Len(t, rpc.callRequests, 3)
 	assert.Equal(t, 1, store.putIfAbsentCalls)
+}
+
+func TestValidationTransferDetailsDistinguishesAttributionFromWildcardMemo(t *testing.T) {
+	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePull})
+	request.MethodDetails.Splits = []tempo.Split{{
+		Amount:    "100000",
+		Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+	}}
+
+	details := validationTransferDetails(request)
+	require.Len(t, details, 2)
+	assert.Equal(t, true, details[0]["requireAttribution"])
+	assert.NotContains(t, details[0], "allowAnyMemo")
+	assert.Equal(t, true, details[1]["allowAnyMemo"])
+	assert.NotContains(t, details[1], "requireAttribution")
 }
 
 func TestIntentValidateTransactionRejectsFailedSimulationWithoutMutation(t *testing.T) {

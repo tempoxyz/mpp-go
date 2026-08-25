@@ -161,7 +161,7 @@ func (i *Intent) Validate(
 		Details:    details,
 		Intent:     tempo.IntentCharge,
 		Method:     tempo.MethodName,
-		Request:    validated.request.Map(),
+		Request:    requestMap,
 		Source:     credential.Source,
 	}, nil
 }
@@ -176,7 +176,9 @@ func validationTransferDetails(request tempo.ChargeRequest) []map[string]any {
 		}
 		if transfer.memo != "" {
 			detail["memo"] = transfer.memo
-		} else {
+		} else if transfer.requireAttribution {
+			detail["requireAttribution"] = true
+		} else if transfer.allowAnyMemo {
 			detail["allowAnyMemo"] = true
 		}
 		details = append(details, detail)
@@ -510,8 +512,12 @@ func (i *Intent) broadcastTransaction(
 		if err := simulateSponsoredTransactionExecution(ctx, rpc, tx, feePayerAddress); err != nil {
 			return nil, err
 		}
-	} else if err := simulateTransactionExecution(ctx, rpc, tx); err != nil {
-		return nil, err
+	} else {
+		// Match mppx's final pre-broadcast simulation to narrow the window in
+		// which account or contract state can change after validation.
+		if err := simulateTransactionExecution(ctx, rpc, tx); err != nil {
+			return nil, err
+		}
 	}
 	if err := validateChallengeExpiry(credential); err != nil {
 		return nil, err
