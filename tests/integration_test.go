@@ -28,7 +28,9 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
+	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 const (
@@ -231,6 +233,72 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 		return
 	}
 
+}
+
+func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
+	rpcURL := integrationRPCURL(t)
+	rpc := tempo.NewRPCClient(rpcURL)
+	ctx := context.Background()
+	chainID := waitForRPC(t, ctx, rpc)
+	rootSigner := newSigner(t)
+	accessSigner := newSigner(t)
+	feePayerSigner := newSigner(t)
+	fundAddress(t, ctx, rpc, rootSigner.Address())
+	fundAddress(t, ctx, rpc, feePayerSigner.Address())
+
+	httpServer := newPaidServer(t, rpcURL, chainID, feePayerSigner)
+	defer httpServer.Close()
+
+	challengeResponse, err := http.Get(httpServer.URL + "/paid-fee-payer")
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		Signer:  rootSigner,
+		RPCURL:  rpcURL,
+		ChainID: int64(chainID),
+	})
+	require.NoError(t, err)
+	credential, err := clientMethod.CreateCredential(ctx, challenge)
+	require.NoError(t, err)
+	tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+	require.NoError(t, err)
+
+	tx.Signature = nil
+	tx.From = common.Address{}
+	tx.FeeToken = common.HexToAddress(integrationCurrency)
+	tx.Gas = 1_000_000
+	authorization := keychain.NewKeyAuthorization(chainID, keychain.SignatureTypeSecp256k1, accessSigner.Address()).
+		WithExpiry(uint64(time.Now().Add(5 * time.Minute).Unix()))
+	require.NoError(t, authorization.SignAndAttach(tx, rootSigner))
+	require.NoError(t, keychain.SignWithAccessKey(tx, accessSigner, rootSigner.Address()))
+	// Tempo CLI 1.6 emits the inner recovery byte in legacy 27/28 form.
+	tx.Signature.Raw[keychain.KeychainSignatureLength-1] += 27
+	serialized, err := tempotx.Serialize(tx, &tempotx.SerializeOptions{
+		Format: tempotx.FormatFeePayer,
+		Sender: rootSigner.Address(),
+	})
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(serialized, "0x78"))
+	credential.Payload["signature"] = serialized
+
+	paidRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/paid-fee-payer", nil)
+	require.NoError(t, err)
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse, err := http.DefaultClient.Do(paidRequest)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	if paidResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(paidResponse.Body)
+		t.Fatalf("paid response status = %d, want %d: %s", paidResponse.StatusCode, http.StatusOK, body)
+	}
+	receipt, err := mpp.ParsePaymentReceipt(paidResponse.Header.Get("Payment-Receipt"))
+	require.NoError(t, err)
+	require.Equal(t, "success", receipt.Status)
+	require.NotEmpty(t, receipt.Reference)
 }
 
 func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
