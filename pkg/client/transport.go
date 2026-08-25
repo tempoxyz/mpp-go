@@ -23,6 +23,13 @@ type Transport struct {
 	configErr          error
 }
 
+const defaultMaxPaymentRetries = 3
+
+type credentialKey struct {
+	id     string
+	method methodKey
+}
+
 type paymentOriginContextKey struct{}
 
 // TransportOption configures a Transport.
@@ -71,50 +78,55 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, t.configErr
 	}
 
-	request, preferences := t.prepareRequest(req)
-	resp, err := t.inner.RoundTrip(request)
-	if err != nil {
-		return nil, err
+	baseRequest, preferences := t.prepareRequest(req)
+	credentials := make(map[credentialKey]*mpp.Credential)
+	request := baseRequest
+
+	for retries := 0; ; retries++ {
+		resp, err := t.inner.RoundTrip(request)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusPaymentRequired || retries >= defaultMaxPaymentRetries {
+			return resp, nil
+		}
+
+		challenges, errs := t.parseChallenges(resp.Header)
+		_ = errs // Non-Payment or malformed headers are silently skipped.
+		candidates := t.challengeCandidates(challenges, preferences, time.Now().UTC())
+		if len(candidates) == 0 {
+			return resp, nil
+		}
+		selected := candidates[0]
+		if err := validatePaymentOrigin(request, selected.challenge); err != nil {
+			drainAndClose(resp.Body)
+			return nil, err
+		}
+
+		drainAndClose(resp.Body)
+
+		key := credentialKey{
+			id: selected.challenge.ID,
+			method: methodKey{
+				name:   selected.challenge.Method,
+				intent: selected.challenge.Intent,
+			},
+		}
+		cred := credentials[key]
+		if cred == nil {
+			cred, err = selected.method.CreateCredential(baseRequest.Context(), selected.challenge)
+			if err != nil {
+				return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
+			}
+			credentials[key] = cred
+		}
+
+		request, err = t.cloneRequest(baseRequest)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
+		}
+		request.Header.Set(mpp.HeaderAuthorization, cred.ToAuthorization())
 	}
-	if resp.StatusCode != http.StatusPaymentRequired {
-		return resp, nil
-	}
-
-	// Parse all WWW-Authenticate headers looking for Payment challenges (RFC 9110).
-	challenges, errs := t.parseChallenges(resp.Header)
-	_ = errs // Non-Payment or malformed headers are silently skipped.
-
-	candidates := t.challengeCandidates(challenges, preferences, time.Now().UTC())
-
-	if len(candidates) == 0 {
-		// No matching method found — return original 402 response as-is.
-		return resp, nil
-	}
-	selected := candidates[0]
-	if err := validatePaymentOrigin(request, selected.challenge); err != nil {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return nil, err
-	}
-
-	// Drain and close the 402 response body so the connection can be reused.
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	// Create payment credential.
-	cred, err := selected.method.CreateCredential(request.Context(), selected.challenge)
-	if err != nil {
-		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
-	}
-
-	// Clone the original request for retry.
-	retry, err := t.cloneRequest(request)
-	if err != nil {
-		return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
-	}
-	retry.Header.Set(mpp.HeaderAuthorization, cred.ToAuthorization())
-
-	return t.inner.RoundTrip(retry)
 }
 
 func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {
@@ -191,6 +203,11 @@ func headerValue(header http.Header, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, body)
+	_ = body.Close()
 }
 
 // parseChallengeExpiry parses a challenge expiry using RFC 3339 and the

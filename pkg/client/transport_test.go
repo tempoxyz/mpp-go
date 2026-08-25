@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -133,6 +134,101 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 		return
 	}
 
+}
+
+func TestTransport_RoundTrip_RetriesFreshPaymentChallenges(t *testing.T) {
+	var challenges []*mpp.Challenge
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount <= len(challenges) {
+			if callCount > 1 {
+				assert.NotEmpty(t, r.Header.Get("Authorization"))
+			}
+			challenge := challenges[callCount-1]
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	challenges = []*mpp.Challenge{
+		challengeForURL(t, srv.URL, "tempo", map[string]any{"attempt": 1}),
+		challengeForURL(t, srv.URL, "tempo", map[string]any{"attempt": 2}),
+	}
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 3, callCount)
+	assert.Equal(t, 2, method.calls)
+}
+
+func TestTransport_RoundTrip_StopsAtDefaultPaymentRetryLimit(t *testing.T) {
+	var challenges []*mpp.Challenge
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		challenge := challenges[callCount]
+		callCount++
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+
+	for attempt := 1; attempt <= defaultMaxPaymentRetries+1; attempt++ {
+		challenges = append(challenges, challengeForURL(t, srv.URL, "tempo", map[string]any{"attempt": attempt}))
+	}
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Equal(t, defaultMaxPaymentRetries+1, callCount)
+	assert.Equal(t, defaultMaxPaymentRetries, method.calls)
+}
+
+func TestTransport_RoundTrip_ReusesCredentialForRepeatedChallenge(t *testing.T) {
+	var challenge *mpp.Challenge
+	var authorizations []string
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if authorization := r.Header.Get("Authorization"); authorization != "" {
+			authorizations = append(authorizations, authorization)
+		}
+		if callCount <= 2 {
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
+	require.Len(t, authorizations, 2)
+	assert.Equal(t, authorizations[0], authorizations[1])
 }
 
 func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
