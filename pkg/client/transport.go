@@ -112,7 +112,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 	}
-	retry.Header.Set("Authorization", cred.ToAuthorization())
+	retry.Header.Set(mpp.HeaderAuthorization, cred.ToAuthorization())
 
 	return t.inner.RoundTrip(retry)
 }
@@ -166,7 +166,7 @@ type challengeCandidate struct {
 }
 
 func (t *Transport) prepareRequest(req *http.Request) (*http.Request, []paymentPreference) {
-	if header, ok := headerValue(req.Header, "Accept-Payment"); ok {
+	if header, ok := headerValue(req.Header, mpp.HeaderAcceptPayment); ok {
 		if preferences, err := parseAcceptPayment(header); err == nil {
 			return req, preferences
 		}
@@ -180,7 +180,7 @@ func (t *Transport) prepareRequest(req *http.Request) (*http.Request, []paymentP
 	if clone.Header == nil {
 		clone.Header = make(http.Header)
 	}
-	clone.Header.Set("Accept-Payment", t.acceptPayment)
+	clone.Header.Set(mpp.HeaderAcceptPayment, t.acceptPayment)
 	return clone, t.paymentPreferences
 }
 
@@ -225,11 +225,11 @@ func (t *Transport) cloneRequest(req *http.Request) (*http.Request, error) {
 func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []error) {
 	var challenges []mpp.Challenge
 	var errs []error
-	for _, h := range header.Values("WWW-Authenticate") {
+	for _, h := range header.Values(mpp.HeaderWWWAuthenticate) {
 		for _, part := range mpp.SplitAuthenticate(h) {
 			part = strings.TrimSpace(part)
 			scheme, _, ok := strings.Cut(part, " ")
-			if !ok || !strings.EqualFold(scheme, "Payment") {
+			if !ok || !strings.EqualFold(scheme, mpp.SchemePayment) {
 				continue
 			}
 			ch, err := mpp.ParseChallenge(part)

@@ -63,11 +63,11 @@ func ExtractAuthorizationSchemeStrict(header, scheme string) (string, error) {
 // FindPaymentAuthorization returns the Payment credential from an Authorization
 // header. It tolerates comma-separated schemes and ignores non-Payment values.
 func FindPaymentAuthorization(header string) string {
-	return ExtractAuthorizationScheme(header, "Payment")
+	return ExtractAuthorizationScheme(header, SchemePayment)
 }
 
 // FindPaymentAuthorizationStrict returns the Payment credential from an
 // Authorization header, or an error if more than one Payment credential exists.
 func FindPaymentAuthorizationStrict(header string) (string, error) {
-	return ExtractAuthorizationSchemeStrict(header, "Payment")
+	return ExtractAuthorizationSchemeStrict(header, SchemePayment)
 }

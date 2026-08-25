@@ -192,7 +192,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 	}
 
 	scheme, rest, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Payment") {
+	if !ok || !strings.EqualFold(scheme, SchemePayment) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
 	}
 
@@ -314,7 +314,7 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 		}
 	}
 
-	return "Payment " + strings.Join(parts, ", "), nil
+	return SchemePayment + " " + strings.Join(parts, ", "), nil
 }
 
 func b64EncodeRequest(request map[string]any) string {
@@ -351,7 +351,7 @@ func ParseCredential(header string) (*Credential, error) {
 	}
 
 	scheme, rest, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Payment") {
+	if !ok || !strings.EqualFold(scheme, SchemePayment) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
 	}
 
@@ -465,7 +465,7 @@ func FormatAuthorization(c *Credential) string {
 		payload["source"] = c.Source
 	}
 
-	return "Payment " + b64EncodeAny(payload)
+	return SchemePayment + " " + b64EncodeAny(payload)
 }
 
 // ParsePaymentReceipt parses a Payment-Receipt header value into a Receipt.

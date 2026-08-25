@@ -30,7 +30,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 	return func(next echofw.HandlerFunc) echofw.HandlerFunc {
 		return func(c echofw.Context) error {
 			chargeParams := params
-			chargeParams.Authorization = c.Request().Header.Get("Authorization")
+			chargeParams.Authorization = c.Request().Header.Get(mpp.HeaderAuthorization)
 			chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
 			body, err := server.ReadRequestBody(c.Request())
 			if err != nil {
@@ -60,7 +60,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			c.SetRequest(c.Request().WithContext(ctx))
 			c.Set(credentialKey, result.Credential)
 			c.Set(receiptKey, result.Receipt)
-			c.Response().Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+			c.Response().Header().Set(mpp.HeaderPaymentReceipt, result.Receipt.ToPaymentReceipt())
 			return next(c)
 		}
 	}

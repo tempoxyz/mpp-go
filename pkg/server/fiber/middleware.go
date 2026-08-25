@@ -31,7 +31,7 @@ func Receipt(c *fiberfw.Ctx) *mpp.Receipt {
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler {
 	return func(c *fiberfw.Ctx) error {
 		chargeParams := params
-		chargeParams.Authorization = c.Get("Authorization")
+		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
 		chargeParams.MppxScope = fiberScope(c)
 		if body := c.Body(); len(body) > 0 {
 			chargeParams.Body = append([]byte(nil), body...)
@@ -56,7 +56,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.SetUserContext(ctx)
 		c.Locals(credentialKey, result.Credential)
 		c.Locals(receiptKey, result.Receipt)
-		c.Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		c.Set(mpp.HeaderPaymentReceipt, result.Receipt.ToPaymentReceipt())
 		return c.Next()
 	}
 }
@@ -91,7 +91,7 @@ func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Ch
 		return
 	}
 
-	c.Set("WWW-Authenticate", header)
+	c.Set(mpp.HeaderWWWAuthenticate, header)
 	WritePaymentError(c, err)
 }
 
@@ -106,7 +106,7 @@ func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
 		return
 	}
 
-	c.Set("WWW-Authenticate", header)
+	c.Set(mpp.HeaderWWWAuthenticate, header)
 	c.Set("Content-Type", "application/problem+json")
 	c.Set("Cache-Control", "no-store")
 

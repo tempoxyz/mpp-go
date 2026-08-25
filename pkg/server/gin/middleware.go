@@ -29,7 +29,7 @@ func Receipt(c *ginfw.Context) *mpp.Receipt {
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFunc {
 	return func(c *ginfw.Context) {
 		chargeParams := params
-		chargeParams.Authorization = c.GetHeader("Authorization")
+		chargeParams.Authorization = c.GetHeader(mpp.HeaderAuthorization)
 		chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
 		body, err := server.ReadRequestBody(c.Request)
 		if err != nil {
@@ -63,7 +63,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		c.Request = c.Request.WithContext(ctx)
 		c.Set(credentialKey, result.Credential)
 		c.Set(receiptKey, result.Receipt)
-		c.Writer.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		c.Writer.Header().Set(mpp.HeaderPaymentReceipt, result.Receipt.ToPaymentReceipt())
 		c.Next()
 	}
 }

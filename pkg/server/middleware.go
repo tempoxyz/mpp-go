@@ -73,7 +73,7 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			chargeParams := params
-			chargeParams.Authorization = r.Header.Get("Authorization")
+			chargeParams.Authorization = r.Header.Get(mpp.HeaderAuthorization)
 			chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
 			body, err := ReadRequestBody(r)
 			if err != nil {
@@ -125,7 +125,7 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 	// Payment-Receipt to a different client. This mirrors the MPP spec
 	// (mpp.dev/protocol) and the rust reference implementation.
 	w.Header().Set("Cache-Control", "private")
-	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
+	w.Header().Set(mpp.HeaderPaymentReceipt, receipt.ToPaymentReceipt())
 
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
@@ -143,7 +143,7 @@ func WritePaymentErrorWithChallenge(w http.ResponseWriter, err error, challenge 
 		return
 	}
 
-	w.Header().Set("WWW-Authenticate", header)
+	w.Header().Set(mpp.HeaderWWWAuthenticate, header)
 	WritePaymentError(w, err)
 }
 
@@ -155,7 +155,7 @@ func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm strin
 		return
 	}
 
-	w.Header().Set("WWW-Authenticate", header)
+	w.Header().Set(mpp.HeaderWWWAuthenticate, header)
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusPaymentRequired)
