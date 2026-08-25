@@ -1,6 +1,8 @@
 package mpp
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -600,4 +602,45 @@ func assertCredentialEqual(t *testing.T, got, want *Credential) {
 		return
 	}
 
+}
+
+func TestB64DecodePreservesLargeIntegers(t *testing.T) {
+	// The challenge ID is an HMAC over the re-encoded request, so a decode that
+	// cannot reproduce the digits it was given cannot reproduce the ID either.
+	for _, literal := range []string{
+		"9007199254740991",    // 2^53-1, the largest float64-exact integer
+		"9007199254740993",    // 2^53+1
+		"1234567890123456789", // ~1.23 tokens on an 18-decimal asset
+		"18446744073709551615",
+	} {
+		encoded := b64EncodeAny(map[string]any{"amount": json.RawMessage(literal)})
+		decoded, err := B64Decode(encoded)
+		require.NoError(t, err)
+		assert.Equal(t, literal, fmt.Sprint(decoded["amount"]),
+			"amount %s must survive a decode without being rounded through float64", literal)
+	}
+}
+
+func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
+	const (
+		secret = "0123456789abcdef0123456789abcdef"
+		realm  = "api"
+	)
+
+	// A challenge the server issued must verify after the round trip through the
+	// WWW-Authenticate header, whatever the magnitude of the amounts it carries.
+	for _, amount := range []int64{
+		1000,
+		9007199254740991,
+		9007199254740993,
+		1234567890123456789,
+	} {
+		request := map[string]any{"amount": amount, "asset": "usdc"}
+		issued := NewChallenge(secret, realm, "tempo", "charge", request)
+
+		parsed, err := ParseChallenge(issued.ToAuthenticate(realm))
+		require.NoError(t, err)
+		assert.True(t, parsed.Verify(secret, realm),
+			"challenge for amount %d was issued by this server and must verify", amount)
+	}
 }
