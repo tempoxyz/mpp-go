@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
@@ -28,7 +29,9 @@ const (
 	// testPrivateKey is the fixed payer key used across Tempo charge tests.
 	testPrivateKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 	// feePayerKey is the co-signer key used for sponsored-transaction tests.
-	feePayerKey     = "0xdd83cd66cd98801a07e0b7c1a5b02364b369e696da7c0ab444acffea5cca86fc"
+	feePayerKey = "0xdd83cd66cd98801a07e0b7c1a5b02364b369e696da7c0ab444acffea5cca86fc"
+	// accessKey is a deterministic test-only key authorized by testPrivateKey.
+	accessKey       = "0x0000000000000000000000000000000000000000000000000000000000000003"
 	testCurrency    = "0x20c0000000000000000000000000000000000001"
 	testRecipient   = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
 	testRealm       = "api.example.com"
@@ -304,6 +307,238 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSignerRejectsTamperedFeeToken(t 
 		return
 	}
 
+}
+
+func TestChargeHTTPFlow_KeychainFeePayerSigningForm(t *testing.T) {
+	cases := []struct {
+		name          string
+		legacyYParity bool
+	}{
+		{name: "canonical y parity"},
+		{name: "legacy y parity", legacyYParity: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, true, nil)
+			rpc := newMockRPC(request)
+
+			rootSigner, err := temposigner.NewSigner(testPrivateKey)
+			if err != nil {
+				t.Fatalf("NewSigner(root) error = %v", err)
+			}
+			feePayerSigner, err := temposigner.NewSigner(feePayerKey)
+			if err != nil {
+				t.Fatalf("NewSigner(fee payer) error = %v", err)
+			}
+
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				broadcast, err := tempotx.Deserialize(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				if broadcast.Signature == nil || broadcast.Signature.Type != "keychain" {
+					return "", nil, fmt.Errorf("broadcast signature = %#v, want keychain", broadcast.Signature)
+				}
+				if broadcast.KeyAuthorization == nil {
+					return "", nil, fmt.Errorf("broadcast omitted key authorization")
+				}
+				if broadcast.FeeToken != common.HexToAddress(request.Currency) {
+					return "", nil, fmt.Errorf("broadcast fee token = %s, want %s", broadcast.FeeToken.Hex(), request.Currency)
+				}
+				gotParity := broadcast.Signature.Raw[keychain.KeychainSignatureLength-1]
+				if tc.legacyYParity && gotParity != 27 && gotParity != 28 {
+					return "", nil, fmt.Errorf("broadcast y parity = %d, want unmodified legacy parity", gotParity)
+				}
+				if !tc.legacyYParity && gotParity != 0 && gotParity != 1 {
+					return "", nil, fmt.Errorf("broadcast y parity = %d, want canonical parity", gotParity)
+				}
+				feePayer, err := tempotx.VerifyFeePayerSignature(broadcast, rootSigner.Address())
+				if err != nil {
+					return "", nil, err
+				}
+				if feePayer != feePayerSigner.Address() {
+					return "", nil, fmt.Errorf("broadcast fee payer = %s, want %s", feePayer.Hex(), feePayerSigner.Address().Hex())
+				}
+				return testReceiptHash, buildReceipt(raw, request, rootSigner.Address()), nil
+			}
+
+			intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			if err != nil {
+				t.Fatalf("NewIntent() error = %v", err)
+			}
+			method := NewMethod(MethodConfig{
+				Intent:    intent,
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				ChainID:   42431,
+				FeePayer:  true,
+			})
+			payment, err := server.New(method, testRealm, "test-secret-key-at-least-32-bytes")
+			if err != nil {
+				t.Fatalf("server.New() error = %v", err)
+			}
+			handler := server.ChargeMiddleware(payment, server.ChargeParams{
+				Amount:   "0.50",
+				FeePayer: true,
+			})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			httpServer := httptest.NewServer(handler)
+			defer httpServer.Close()
+
+			challengeResponse, err := httpServer.Client().Get(httpServer.URL)
+			if err != nil {
+				t.Fatalf("GET challenge error = %v", err)
+			}
+			_ = challengeResponse.Body.Close()
+			if challengeResponse.StatusCode != http.StatusPaymentRequired {
+				t.Fatalf("challenge status = %d, want %d", challengeResponse.StatusCode, http.StatusPaymentRequired)
+			}
+			challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+			if err != nil {
+				t.Fatalf("ParseChallenge() error = %v", err)
+			}
+			credential := buildKeychainFeePayerCredential(t, rpc, challenge, keychainCredentialOptions{
+				legacyYParity: tc.legacyYParity,
+			})
+
+			paidRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL, nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext() error = %v", err)
+			}
+			paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+			paidResponse, err := httpServer.Client().Do(paidRequest)
+			if err != nil {
+				t.Fatalf("paid GET error = %v", err)
+			}
+			_ = paidResponse.Body.Close()
+			if paidResponse.StatusCode != http.StatusOK {
+				t.Fatalf("paid status = %d, want %d", paidResponse.StatusCode, http.StatusOK)
+			}
+			if _, err := mpp.ParseReceipt(paidResponse.Header.Get("Payment-Receipt")); err != nil {
+				t.Fatalf("ParseReceipt() error = %v", err)
+			}
+			if len(rpc.sentRawTxs) != 1 {
+				t.Fatalf("broadcast count = %d, want 1", len(rpc.sentRawTxs))
+			}
+		})
+	}
+}
+
+func TestChargeFlow_KeychainFeePayerSigningFormRejectsTampering(t *testing.T) {
+	cases := []struct {
+		name      string
+		options   keychainCredentialOptions
+		wantError string
+	}{
+		{
+			name:      "sender does not match keychain root",
+			options:   keychainCredentialOptions{sender: common.HexToAddress("0x1111111111111111111111111111111111111111")},
+			wantError: "transaction signature is invalid",
+		},
+		{
+			name:      "sender is zero address",
+			options:   keychainCredentialOptions{zeroSender: true},
+			wantError: "failed to deserialize transaction payload",
+		},
+		{
+			name:      "fee token does not match request",
+			options:   keychainCredentialOptions{feeToken: common.HexToAddress("0x20c0000000000000000000000000000000000002")},
+			wantError: "fee payer transaction fee token does not match the charge request",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := buildRequest(t, true, nil)
+			rpc := newMockRPC(request)
+			challenge := buildChallenge(t, request)
+			credential := buildKeychainFeePayerCredential(t, rpc, challenge, tc.options)
+			intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			if err != nil {
+				t.Fatalf("NewIntent() error = %v", err)
+			}
+
+			_, err = intent.Verify(context.Background(), credential, request.Map())
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("Verify() error = %v, want %q", err, tc.wantError)
+			}
+			if len(rpc.sentRawTxs) != 0 {
+				t.Fatalf("broadcast count = %d, want 0", len(rpc.sentRawTxs))
+			}
+		})
+	}
+}
+
+type keychainCredentialOptions struct {
+	feeToken      common.Address
+	legacyYParity bool
+	sender        common.Address
+	zeroSender    bool
+}
+
+func buildKeychainFeePayerCredential(
+	t *testing.T,
+	rpc tempo.RPCClient,
+	challenge *mpp.Challenge,
+	options keychainCredentialOptions,
+) *mpp.Credential {
+	t.Helper()
+
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(context.Background(), challenge)
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+	if err != nil {
+		t.Fatalf("Deserialize(seed) error = %v", err)
+	}
+
+	rootSigner, err := temposigner.NewSigner(testPrivateKey)
+	if err != nil {
+		t.Fatalf("NewSigner(root) error = %v", err)
+	}
+	accessSigner, err := temposigner.NewSigner(accessKey)
+	if err != nil {
+		t.Fatalf("NewSigner(access) error = %v", err)
+	}
+	tx.Signature = nil
+	tx.From = common.Address{}
+	feeToken := options.feeToken
+	if feeToken == (common.Address{}) {
+		feeToken = common.HexToAddress(testCurrency)
+	}
+	tx.FeeToken = feeToken
+	authorization := keychain.NewKeyAuthorization(42431, keychain.SignatureTypeSecp256k1, accessSigner.Address()).
+		WithExpiry(uint64(time.Now().Add(5 * time.Minute).Unix()))
+	if err := authorization.SignAndAttach(tx, rootSigner); err != nil {
+		t.Fatalf("SignAndAttach() error = %v", err)
+	}
+	if err := keychain.SignWithAccessKey(tx, accessSigner, rootSigner.Address()); err != nil {
+		t.Fatalf("SignWithAccessKey() error = %v", err)
+	}
+	if options.legacyYParity {
+		tx.Signature.Raw[keychain.KeychainSignatureLength-1] += 27
+	}
+
+	sender := options.sender
+	if sender == (common.Address{}) && !options.zeroSender {
+		sender = rootSigner.Address()
+	}
+	serialized, err := tempotx.Serialize(tx, &tempotx.SerializeOptions{
+		Format: tempotx.FormatFeePayer,
+		Sender: sender,
+	})
+	if err != nil {
+		t.Fatalf("Serialize(FormatFeePayer) error = %v", err)
+	}
+	if !strings.HasPrefix(serialized, "0x78") {
+		t.Fatalf("serialized transaction prefix = %.4s, want 0x78", serialized)
+	}
+	credential.Payload["signature"] = serialized
+	return credential
 }
 
 func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {

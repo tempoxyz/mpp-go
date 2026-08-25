@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
@@ -254,7 +255,7 @@ func (i *Intent) verifyTransaction(
 	raw string,
 	source *sourceDID,
 ) (*mpp.Receipt, error) {
-	tx, err := tempotx.Deserialize(raw)
+	tx, feePayerForm, err := deserializeTransactionCredential(raw)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("failed to deserialize transaction payload")
 	}
@@ -262,7 +263,7 @@ func (i *Intent) verifyTransaction(
 		return nil, mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
 	}
 
-	sender, err := tempotx.VerifySignature(tx)
+	sender, err := verifyTransactionSender(tx)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("transaction signature is invalid")
 	}
@@ -289,8 +290,12 @@ func (i *Intent) verifyTransaction(
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return nil, mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
 		}
-		if tx.FeeToken != (common.Address{}) {
+		requestFeeToken := common.HexToAddress(request.Currency)
+		if !feePayerForm && tx.FeeToken != (common.Address{}) {
 			return nil, mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
+		}
+		if feePayerForm && tx.FeeToken != (common.Address{}) && tx.FeeToken != requestFeeToken {
+			return nil, mpp.ErrInvalidPayload("fee payer transaction fee token does not match the charge request")
 		}
 		accepted, err := i.store.PutIfAbsent(
 			ctx,
@@ -305,7 +310,7 @@ func (i *Intent) verifyTransaction(
 		}
 		if i.feePayerSigner != nil {
 			tx.From = sender
-			tx.FeeToken = common.HexToAddress(request.Currency)
+			tx.FeeToken = requestFeeToken
 			tx.AwaitingFeePayer = false
 			if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
 				return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer transaction")
@@ -331,15 +336,18 @@ func (i *Intent) verifyTransaction(
 		if tx.AwaitingFeePayer {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction must clear the awaiting fee payer marker")
 		}
-		if tx.FeeToken != common.HexToAddress(request.Currency) {
+		if tx.FeeToken != requestFeeToken {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the charge request")
 		}
-		coSignedSender, _, err := tempotx.VerifyDualSignatures(tx)
+		coSignedSender, err := verifyTransactionSender(tx)
 		if err != nil {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
 		}
 		if coSignedSender != sender {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction sender does not match the credential signer")
+		}
+		if _, err := tempotx.VerifyFeePayerSignature(tx, coSignedSender); err != nil {
+			return nil, mpp.ErrVerificationFailed("co-signed transaction failed signature verification")
 		}
 		tx.From = coSignedSender
 		if err := simulateTransactionPreflight(ctx, rpc, tx); err != nil {
@@ -422,13 +430,125 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0)), nil
 }
 
+// deserializeTransactionCredential accepts both the broadcast transaction
+// envelope (0x76) and the fee-payer signing form (0x78). tempo-go v0.5 only
+// decodes 0x76, so the 0x78 body is validated and converted to the equivalent
+// awaiting-fee-payer shape before delegating the remaining decoding.
+func deserializeTransactionCredential(serialized string) (*tempotx.Tx, bool, error) {
+	hexValue := serialized
+	if strings.HasPrefix(hexValue, "0x") || strings.HasPrefix(hexValue, "0X") {
+		hexValue = hexValue[2:]
+	}
+	encoded, err := hex.DecodeString(hexValue)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode transaction: %w", err)
+	}
+	if len(encoded) < 2 {
+		return nil, false, fmt.Errorf("transaction is too short")
+	}
+
+	switch encoded[0] {
+	case 0x76:
+		tx, err := tempotx.Deserialize("0x" + hex.EncodeToString(encoded))
+		return tx, false, err
+	case 0x78:
+		var fields []rlp.RawValue
+		if err := rlp.DecodeBytes(encoded[1:], &fields); err != nil {
+			return nil, false, fmt.Errorf("decode fee-payer transaction body: %w", err)
+		}
+		if len(fields) != 13 && len(fields) != 14 && len(fields) != 15 {
+			return nil, false, fmt.Errorf("invalid fee-payer transaction field count %d", len(fields))
+		}
+
+		var senderBytes []byte
+		if err := rlp.DecodeBytes(fields[11], &senderBytes); err != nil {
+			return nil, false, fmt.Errorf("decode fee-payer transaction sender: %w", err)
+		}
+		if len(senderBytes) != common.AddressLength {
+			return nil, false, fmt.Errorf("invalid fee-payer transaction sender length %d", len(senderBytes))
+		}
+		sender := common.BytesToAddress(senderBytes)
+		if sender == (common.Address{}) {
+			return nil, false, fmt.Errorf("fee-payer transaction sender is required")
+		}
+
+		awaitingFeePayer, err := rlp.EncodeToBytes([]byte{0})
+		if err != nil {
+			return nil, false, fmt.Errorf("encode fee-payer marker: %w", err)
+		}
+		fields[11] = awaitingFeePayer
+		body, err := rlp.EncodeToBytes(fields)
+		if err != nil {
+			return nil, false, fmt.Errorf("encode transaction body: %w", err)
+		}
+
+		tx, err := tempotx.Deserialize("0x76" + hex.EncodeToString(body))
+		if err != nil {
+			return nil, false, err
+		}
+		tx.AwaitingFeePayer = true
+		tx.From = sender
+		return tx, true, nil
+	default:
+		return nil, false, fmt.Errorf("unsupported transaction prefix 0x%02x", encoded[0])
+	}
+}
+
+// verifyTransactionSender verifies a transaction's sender signature and
+// returns the authorizing account. Keychain signatures are made by an access
+// key but authorize the root account embedded in the envelope.
+func verifyTransactionSender(tx *tempotx.Tx) (common.Address, error) {
+	if tx.Signature == nil {
+		return common.Address{}, fmt.Errorf("transaction has no sender signature")
+	}
+
+	if tx.Signature.Type != "keychain" {
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return common.Address{}, err
+		}
+		if tx.From != (common.Address{}) && tx.From != sender {
+			return common.Address{}, fmt.Errorf("transaction sender does not match signature")
+		}
+		return sender, nil
+	}
+
+	_, rootAccount, innerSignature, err := keychain.ParseKeychainSignature(tx.Signature.Raw)
+	if err != nil {
+		return common.Address{}, err
+	}
+	switch innerSignature.YParity {
+	case 0, 1:
+	case 27, 28:
+		innerSignature.YParity -= 27
+	default:
+		return common.Address{}, fmt.Errorf("invalid keychain signature y parity %d", innerSignature.YParity)
+	}
+
+	txForVerify := *tx
+	signatureForVerify := *tx.Signature
+	signatureForVerify.Raw = keychain.BuildKeychainSignature(innerSignature, rootAccount)
+	txForVerify.Signature = &signatureForVerify
+	_, verifiedRoot, err := keychain.VerifyAccessKeySignature(&txForVerify)
+	if err != nil {
+		return common.Address{}, err
+	}
+	if verifiedRoot != rootAccount {
+		return common.Address{}, fmt.Errorf("keychain signature root account mismatch")
+	}
+	if tx.From != (common.Address{}) && tx.From != rootAccount {
+		return common.Address{}, fmt.Errorf("transaction sender does not match keychain root account")
+	}
+	return rootAccount, nil
+}
+
 // TODO(tempo-go): extract the Tempo transaction/receipt matching and fee-payer
 // verification helpers below once tempo-go exposes a shared verifier surface for
 // TIP-20 charge flows.
 
 func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, challengeID string) bool {
 	expected := expectedTransfers(request)
-	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 || tx.KeyAuthorization != nil {
+	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 {
 		return false
 	}
 	actual := make([]decodedTransfer, 0, len(tx.Calls))
