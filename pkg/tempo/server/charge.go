@@ -194,6 +194,9 @@ func (i *Intent) Broadcast(
 	if err != nil {
 		return nil, err
 	}
+	if err := validateChallengeExpiry(credential); err != nil {
+		return nil, err
+	}
 	return i.broadcastCredential(ctx, credential, validated)
 }
 
@@ -424,7 +427,7 @@ func (i *Intent) broadcastTransaction(
 	ctx context.Context,
 	credential *mpp.Credential,
 	validated *validatedChargeCredential,
-) (*mpp.Receipt, error) {
+) (receipt *mpp.Receipt, err error) {
 	request := validated.request
 	rpc := validated.rpc
 	sender := validated.sender
@@ -433,7 +436,10 @@ func (i *Intent) broadcastTransaction(
 	releaseSponsoredClaim := false
 	defer func() {
 		if releaseSponsoredClaim {
-			_ = i.store.Delete(context.WithoutCancel(ctx), sponsoredClaimKey)
+			if releaseErr := i.store.Delete(context.WithoutCancel(ctx), sponsoredClaimKey); releaseErr != nil {
+				receipt = nil
+				err = withReplayReleaseError(err, releaseErr)
+			}
 		}
 	}()
 
@@ -507,6 +513,9 @@ func (i *Intent) broadcastTransaction(
 	} else if err := simulateTransactionExecution(ctx, rpc, tx); err != nil {
 		return nil, err
 	}
+	if err := validateChallengeExpiry(credential); err != nil {
+		return nil, err
+	}
 
 	serialized, err := tempotx.Serialize(tx, nil)
 	if err != nil {
@@ -567,6 +576,37 @@ func (i *Intent) broadcastTransaction(
 		mpp.WithReceiptMethod(tempo.MethodName),
 		mpp.WithExternalID(request.ExternalID),
 	), nil
+}
+
+func validateChallengeExpiry(credential *mpp.Credential) error {
+	if credential == nil {
+		return mpp.ErrMalformedCredential("credential is required")
+	}
+	expiresValue := credential.Challenge.Expires
+	if expiresValue == "" {
+		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "missing required expires")
+	}
+	expires, err := parseExpires(expiresValue)
+	if err != nil {
+		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "invalid expires format")
+	}
+	if !time.Now().UTC().Before(expires) {
+		return mpp.ErrPaymentExpired(expiresValue)
+	}
+	return nil
+}
+
+func withReplayReleaseError(settlementErr, releaseErr error) error {
+	detail := fmt.Sprintf("failed to release sponsored replay claim: %v", releaseErr)
+	if settlementErr == nil {
+		return mpp.ErrVerificationFailed(detail)
+	}
+	if paymentErr, ok := settlementErr.(*mpp.PaymentError); ok {
+		combined := *paymentErr
+		combined.Detail += "; " + detail
+		return &combined
+	}
+	return fmt.Errorf("%w; %s", settlementErr, detail)
 }
 
 func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error) {

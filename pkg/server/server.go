@@ -215,10 +215,7 @@ func (m *Mpp) BroadcastCredential(ctx context.Context, credential *mpp.Credentia
 	if err != nil {
 		return nil, err
 	}
-	if broadcasting, ok := intent.(BroadcastingIntent); ok {
-		return broadcasting.Broadcast(ctx, credential, request)
-	}
-	return intent.Verify(ctx, credential, request)
+	return broadcastCredential(ctx, intent, credential, request)
 }
 
 // VerifyCredential is a backwards-compatible alias for BroadcastCredential.

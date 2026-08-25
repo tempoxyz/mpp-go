@@ -188,8 +188,8 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return challengeResultError(challenge, err)
 	}
 
-	// 9. Hook-built intents synthesize Verify from validation and broadcast.
-	receipt, err := params.Intent.Verify(ctx, credential, params.Request)
+	// 9. Dispatch split intents through Broadcast and legacy intents through Verify.
+	receipt, err := broadcastCredential(ctx, params.Intent, credential, params.Request)
 	if err != nil {
 		if pe, ok := err.(*mpp.PaymentError); ok {
 			if pe.Status != http.StatusPaymentRequired {

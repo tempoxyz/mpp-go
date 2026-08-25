@@ -69,6 +69,42 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 
 }
 
+func TestVerifyOrChallenge_UsesPublicBroadcastingIntent(t *testing.T) {
+	request := map[string]any{"amount": "100", "currency": "0xabc", "recipient": "0xdef"}
+	challenge := mpp.NewChallenge(
+		"secret-key",
+		"api.example.com",
+		"tempo",
+		"charge",
+		request,
+		mpp.WithExpires(mpp.Expires.Minutes(5)),
+	)
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	intent := &publicSplitTestIntent{}
+
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        intent,
+		Request:       request,
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+		Expires:       challenge.Expires,
+	})
+	if !assert.NoError(t, err) || !assert.NotNil(t, result) {
+		return
+	}
+	if assert.NotNil(t, result.Receipt) {
+		assert.Equal(t, "0xpublic", result.Receipt.Reference)
+	}
+	assert.Equal(t, 1, intent.validateCalls)
+	assert.Equal(t, 1, intent.broadcastCalls)
+	assert.Zero(t, intent.verifyCalls)
+}
+
 func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
 	request := map[string]any{
 		"amount":    "100",

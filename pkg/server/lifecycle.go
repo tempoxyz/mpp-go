@@ -30,6 +30,20 @@ func validateCredential(
 	return validating.Validate(ctx, credential, request)
 }
 
+// broadcastCredential dispatches the split lifecycle when available and keeps
+// legacy intents on their combined Verify path.
+func broadcastCredential(
+	ctx context.Context,
+	intent Intent,
+	credential *mpp.Credential,
+	request map[string]any,
+) (*mpp.Receipt, error) {
+	if broadcasting, ok := intent.(BroadcastingIntent); ok {
+		return broadcasting.Broadcast(ctx, credential, request)
+	}
+	return intent.Verify(ctx, credential, request)
+}
+
 // prepareCredential authenticates the echoed stateless challenge, enforces its
 // server bindings and expiry, and resolves the intent request for dispatch.
 func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]any, error) {

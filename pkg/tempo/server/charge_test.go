@@ -3,6 +3,7 @@ package chargeserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -88,6 +89,7 @@ type mockRPC struct {
 
 type recordingStore struct {
 	inner            tempo.Store
+	deleteErr        error
 	deleteCalls      int
 	putCalls         int
 	putIfAbsentCalls int
@@ -113,6 +115,9 @@ func (s *recordingStore) PutIfAbsent(ctx context.Context, key, value string) (bo
 
 func (s *recordingStore) Delete(ctx context.Context, key string) error {
 	s.deleteCalls++
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	return s.inner.Delete(ctx, key)
 }
 
@@ -236,6 +241,62 @@ func TestIntentValidateTransactionRejectsFailedSimulationWithoutMutation(t *test
 	assert.Len(t, rpc.callRequests, 1)
 	assert.Zero(t, store.putIfAbsentCalls)
 	assert.Zero(t, store.deleteCalls)
+}
+
+func TestIntentBroadcastRejectsCredentialExpiringDuringValidation(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePull})
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	rpc.callRequests = nil
+	rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+		credential.Challenge.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+		return &temporpc.JSONRPCResponse{Result: rpc.callResult}, nil
+	}
+	store := newRecordingStore()
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
+	require.NoError(t, err)
+
+	_, err = intent.Broadcast(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "expired")
+	assert.Len(t, rpc.callRequests, 1)
+	assert.Empty(t, rpc.sentRawTxs)
+	assert.Zero(t, store.putIfAbsentCalls)
+	assert.Zero(t, store.deleteCalls)
+}
+
+func TestIntentBroadcastSurfacesSponsoredReplayReleaseFailure(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, []tempo.ChargeMode{tempo.ChargeModePull})
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	rpc.callRequests = nil
+	simulations := 0
+	rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+		simulations++
+		if simulations == 2 {
+			credential.Challenge.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+		}
+		return &temporpc.JSONRPCResponse{Result: rpc.callResult}, nil
+	}
+	store := newRecordingStore()
+	store.deleteErr = errors.New("delete unavailable")
+	intent, err := NewIntent(IntentConfig{
+		RPC:                rpc,
+		Store:              store,
+		FeePayerPrivateKey: feePayerKey,
+	})
+	require.NoError(t, err)
+
+	_, err = intent.Broadcast(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "expired")
+	require.ErrorContains(t, err, "failed to release sponsored replay claim: delete unavailable")
+	assert.Len(t, rpc.callRequests, 2)
+	assert.Empty(t, rpc.sentRawTxs)
+	assert.Equal(t, 1, store.putIfAbsentCalls)
+	assert.Equal(t, 1, store.deleteCalls)
 }
 
 func TestIntentValidatePushAndProofCredentialsDoesNotConsumeReplayState(t *testing.T) {
