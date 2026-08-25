@@ -20,6 +20,7 @@ func TestResolvePaymentPreferences(t *testing.T) {
 		&mockMethod{name: "tempo", intent: "charge"},
 		&mockMethod{name: "tempo", intent: "session"},
 		&mockMethod{name: "stripe", intent: "charge"},
+		&mockMethod{name: "custom", intent: "pre_authorize"},
 	}
 
 	tests := []struct {
@@ -31,8 +32,8 @@ func TestResolvePaymentPreferences(t *testing.T) {
 	}{
 		{
 			name:        "defaults and deduplicates",
-			wantHeader:  "tempo/charge, tempo/session, stripe/charge",
-			wantQuality: []float64{1, 1, 1},
+			wantHeader:  "tempo/charge, tempo/session, stripe/charge, custom/pre_authorize",
+			wantQuality: []float64{1, 1, 1, 1},
 		},
 		{
 			name: "configured q-values",
@@ -40,8 +41,8 @@ func TestResolvePaymentPreferences(t *testing.T) {
 				"tempo/charge":  0,
 				"stripe/charge": 0.125,
 			},
-			wantHeader:  "tempo/charge;q=0, tempo/session, stripe/charge;q=0.125",
-			wantQuality: []float64{0, 1, 0.125},
+			wantHeader:  "tempo/charge;q=0, tempo/session, stripe/charge;q=0.125, custom/pre_authorize",
+			wantQuality: []float64{0, 1, 0.125, 1},
 		},
 		{
 			name:       "unknown method",
@@ -104,16 +105,24 @@ func TestParseAcceptPayment_BestMatch(t *testing.T) {
 	}
 }
 
+func TestParseAcceptPayment_QuotedParametersAndCaseInsensitiveQuality(t *testing.T) {
+	preferences, err := parseAcceptPayment(`tempo/charge;profile="a,b;c";Q=0, stripe/charge`)
+	require.NoError(t, err)
+	require.Len(t, preferences, 2)
+	assert.Equal(t, float64(0), preferences[0].quality)
+	assert.Equal(t, "stripe", preferences[1].method)
+}
+
 func TestParseAcceptPayment_RejectsMalformedValues(t *testing.T) {
 	for _, value := range []string{
 		"",
 		"tempo",
-		"Tempo/charge",
 		"tempo/charge/extra",
 		"tempo/charge;q=2",
 		"tempo/charge;q=0.1234",
 		"tempo/charge;q",
 		"tempo/charge;bad name=value",
+		`tempo/charge;profile="unterminated`,
 		"tempo/charge,",
 	} {
 		t.Run(value, func(t *testing.T) {

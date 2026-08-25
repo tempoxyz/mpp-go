@@ -65,7 +65,10 @@ func resolvePaymentPreferences(methods []Method, configured PaymentPreferences) 
 }
 
 func parseAcceptPayment(header string) ([]paymentPreference, error) {
-	parts := strings.Split(header, ",")
+	parts, err := splitHeaderValue(header, ',')
+	if err != nil {
+		return nil, err
+	}
 	preferences := make([]paymentPreference, 0, len(parts))
 	for _, raw := range parts {
 		part := strings.TrimSpace(raw)
@@ -85,7 +88,10 @@ func parseAcceptPayment(header string) ([]paymentPreference, error) {
 }
 
 func parsePaymentPreference(value string, index int) (paymentPreference, error) {
-	parts := strings.Split(value, ";")
+	parts, err := splitHeaderValue(value, ';')
+	if err != nil {
+		return paymentPreference{}, err
+	}
 	method, intent, ok := strings.Cut(strings.TrimSpace(parts[0]), "/")
 	method = strings.TrimSpace(method)
 	intent = strings.TrimSpace(intent)
@@ -101,7 +107,7 @@ func parsePaymentPreference(value string, index int) (paymentPreference, error) 
 		if !ok || !validParameterName(name) || parameter == "" {
 			return paymentPreference{}, fmt.Errorf("mpp: invalid Accept-Payment parameter %q", raw)
 		}
-		if name != "q" {
+		if !strings.EqualFold(name, "q") {
 			continue
 		}
 		parsed, err := strconv.ParseFloat(parameter, 64)
@@ -118,6 +124,30 @@ func parsePaymentPreference(value string, index int) (paymentPreference, error) 
 		index:       index,
 		specificity: boolInt(method != "*") + boolInt(intent != "*"),
 	}, nil
+}
+
+func splitHeaderValue(value string, separator byte) ([]string, error) {
+	var parts []string
+	inQuote := false
+	escaped := false
+	start := 0
+	for i := range len(value) {
+		switch ch := value[i]; {
+		case escaped:
+			escaped = false
+		case inQuote && ch == '\\':
+			escaped = true
+		case ch == '"':
+			inQuote = !inQuote
+		case ch == separator && !inQuote:
+			parts = append(parts, strings.TrimSpace(value[start:i]))
+			start = i + 1
+		}
+	}
+	if inQuote || escaped {
+		return nil, fmt.Errorf("mpp: malformed quoted Accept-Payment parameter")
+	}
+	return append(parts, strings.TrimSpace(value[start:])), nil
 }
 
 func bestPaymentPreference(challenge *mpp.Challenge, preferences []paymentPreference) (paymentPreference, bool) {
@@ -190,10 +220,12 @@ func validPaymentToken(value string) bool {
 	}
 	for i := range len(value) {
 		ch := value[i]
-		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
 			continue
 		}
-		return false
+		if !strings.ContainsRune("!#$%&'*+-.^_`|~", rune(ch)) {
+			return false
+		}
 	}
 	return true
 }
