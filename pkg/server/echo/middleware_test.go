@@ -220,9 +220,9 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	assert.Equal(t, originalBody, paidResponse.Body.String())
 }
 
-func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string, opts ...server.Option) *server.Mpp {
 	t.Helper()
-	payment, err := server.New(method, realm, secretKey)
+	payment, err := server.New(method, realm, secretKey, opts...)
 	require.NoError(t, err)
 	return payment
 }

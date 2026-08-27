@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 type chargeTestMethod struct {
@@ -78,4 +81,46 @@ func TestMppCharge_RequiresChargeIntent(t *testing.T) {
 		return
 	}
 
+}
+
+func TestMppCharge_RequiresAuthAdvertisesPaymentAuthorizationHeader(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithRequiresAuth(true))
+	result, err := payment.Charge(context.Background(), ChargeParams{
+		Amount:        "0.50",
+		Authorization: "Bearer app-token",
+	})
+	require.NoError(t, err)
+	require.True(t, result.IsChallenge())
+	assert.Equal(t, mpp.HeaderPaymentAuthorization, result.Challenge.Header)
+	assert.Contains(t, result.Challenge.ToAuthenticate(payment.Realm()), `header="`+mpp.HeaderPaymentAuthorization+`"`)
+}
+
+func TestMppCharge_RequiresAuthVerifiesPaymentAuthorizationAndIgnoresBearer(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, chargeTestMethod{intents: map[string]Intent{"charge": verifyTestIntent{}}}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithRequiresAuth(true))
+	challengeResult, err := payment.Charge(context.Background(), ChargeParams{Amount: "0.50"})
+	require.NoError(t, err)
+	require.True(t, challengeResult.IsChallenge())
+
+	credential := challengeResult.Challenge.NewCredential(map[string]any{"type": "test"})
+
+	ignored, err := payment.Charge(context.Background(), ChargeParams{
+		Amount:        "0.50",
+		Authorization: credential.ToAuthorization(),
+	})
+	require.NoError(t, err)
+	assert.True(t, ignored.IsChallenge())
+
+	paid, err := payment.Charge(context.Background(), ChargeParams{
+		Amount:               "0.50",
+		Authorization:        "Bearer app-token",
+		PaymentAuthorization: credential.ToAuthorization(),
+	})
+	require.NoError(t, err)
+	require.False(t, paid.IsChallenge())
+	require.NotNil(t, paid.Receipt)
+	assert.Equal(t, "success", paid.Receipt.Status)
 }

@@ -398,3 +398,34 @@ func (w *optionalResponseWriter) Flush() {
 func (w *optionalResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, nil
 }
+
+func TestChargeMiddleware_RequiresAuthReadsPaymentAuthorizationAndPreservesBearer(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithRequiresAuth(true))
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "OK")
+	}))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	challengeResponse, err := http.Get(server.URL)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, mpp.HeaderPaymentAuthorization, challenge.Header)
+	assert.Contains(t, challengeResponse.Header.Get("WWW-Authenticate"), `header="`+mpp.HeaderPaymentAuthorization+`"`)
+
+	credential := challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"})
+	retry, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	retry.Header.Set("Authorization", "Bearer app-token")
+	retry.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+
+	paidResponse, err := http.DefaultClient.Do(retry)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	require.Equal(t, http.StatusOK, paidResponse.StatusCode)
+	assert.NotEmpty(t, paidResponse.Header.Get("Payment-Receipt"))
+}

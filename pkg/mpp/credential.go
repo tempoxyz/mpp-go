@@ -2,8 +2,9 @@ package mpp
 
 import "encoding/json"
 
-// Credential represents a client-submitted payment credential sent via the
-// Authorization header.
+// Credential represents a client-submitted payment proof. It is sent in
+// Authorization by default, or in Payment-Authorization when the challenge
+// advertised that header.
 type Credential struct {
 	Challenge ChallengeEcho  `json:"challenge"`
 	Payload   map[string]any `json:"payload,omitempty"`

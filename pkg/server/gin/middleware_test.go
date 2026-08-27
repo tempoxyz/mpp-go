@@ -100,6 +100,36 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestChargeMiddleware_RequiresAuthUsesPaymentAuthorization(t *testing.T) {
+	t.Parallel()
+
+	ginfw.SetMode(ginfw.TestMode)
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret", server.WithRequiresAuth(true))
+	router := ginfw.New()
+	router.GET("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
+		c.String(http.StatusOK, "OK")
+	})
+
+	challengeRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	challengeRequest.Header.Set("Authorization", "Bearer app-token")
+	challengeResponse := httptest.NewRecorder()
+	router.ServeHTTP(challengeResponse, challengeRequest)
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, mpp.HeaderPaymentAuthorization, challenge.Header)
+
+	credential := challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"})
+	paidRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	paidRequest.Header.Set("Authorization", "Bearer app-token")
+	paidRequest.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+	paidResponse := httptest.NewRecorder()
+	router.ServeHTTP(paidResponse, paidRequest)
+	require.Equal(t, http.StatusOK, paidResponse.Code)
+	assert.NotEmpty(t, paidResponse.Header().Get("Payment-Receipt"))
+}
+
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	t.Parallel()
 
@@ -204,9 +234,9 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	assert.Equal(t, originalBody, paidResponse.Body.String())
 }
 
-func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string, opts ...server.Option) *server.Mpp {
 	t.Helper()
-	payment, err := server.New(method, realm, secretKey)
+	payment, err := server.New(method, realm, secretKey, opts...)
 	require.NoError(t, err)
 	return payment
 }

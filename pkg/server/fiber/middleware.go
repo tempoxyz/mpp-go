@@ -32,6 +32,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 	return func(c *fiberfw.Ctx) error {
 		chargeParams := params
 		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
+		chargeParams.PaymentAuthorization = c.Get(mpp.HeaderPaymentAuthorization)
 		chargeParams.MppxScope = fiberScope(c)
 		if body := c.Body(); len(body) > 0 {
 			chargeParams.Body = append([]byte(nil), body...)

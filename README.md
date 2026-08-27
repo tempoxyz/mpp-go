@@ -83,6 +83,22 @@ func main() {
 }
 ```
 
+If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `server.WithRequiresAuth(true)`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
+
+```go
+payment, err := server.New(method, "api.example.com", secret, server.WithRequiresAuth(true))
+if err != nil {
+	log.Fatal(err)
+}
+
+handler := server.ChargeMiddleware(payment, server.ChargeParams{
+	Amount:      "0.50",
+	Description: "Paid content",
+})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": "paid content"})
+}))
+```
+
 ### Client
 
 ```go

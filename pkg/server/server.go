@@ -176,28 +176,71 @@ const minimumSecretKeyBytes = 32
 
 // Mpp is the server-side payment handler.
 type Mpp struct {
-	method    Method
-	realm     string
-	secretKey string
+	method       Method
+	realm        string
+	secretKey    string
+	requiresAuth bool
+}
+
+// Option configures an Mpp instance.
+type Option func(*Mpp)
+
+// WithRequiresAuth advertises header="Payment-Authorization" so Payment
+// credentials leave Authorization available for application authentication.
+func WithRequiresAuth(enabled bool) Option {
+	return func(m *Mpp) {
+		m.requiresAuth = enabled
+	}
 }
 
 // New creates an Mpp instance. It returns an error when secretKey is shorter
 // than minimumSecretKeyBytes, since a weak secret yields forgeable,
 // HMAC-bound challenge IDs.
-func New(method Method, realm, secretKey string) (*Mpp, error) {
+func New(method Method, realm, secretKey string, opts ...Option) (*Mpp, error) {
 	if len(secretKey) < minimumSecretKeyBytes {
 		return nil, fmt.Errorf("server: secret key must be at least %d bytes", minimumSecretKeyBytes)
 	}
-	return &Mpp{
+	m := &Mpp{
 		method:    method,
 		realm:     realm,
 		secretKey: secretKey,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m, nil
 }
 
 // Realm returns the WWW-Authenticate realm used by this payment handler.
 func (m *Mpp) Realm() string {
 	return m.realm
+}
+
+// RequiresAuth reports whether Payment credentials use Payment-Authorization.
+func (m *Mpp) RequiresAuth() bool {
+	return m.requiresAuth
+}
+
+// CredentialHeader returns the HTTP field this handler expects for Payment credentials.
+func (m *Mpp) CredentialHeader() string {
+	if m.requiresAuth {
+		return mpp.HeaderPaymentAuthorization
+	}
+	return mpp.HeaderAuthorization
+}
+
+func (m *Mpp) advertisedCredentialHeader() string {
+	if m.requiresAuth {
+		return mpp.HeaderPaymentAuthorization
+	}
+	return ""
+}
+
+func (m *Mpp) paymentCredentialValue(authorization, paymentAuthorization string) string {
+	if m.requiresAuth {
+		return paymentAuthorization
+	}
+	return authorization
 }
 
 // ValidateCredential validates an issued credential without consuming or broadcasting it.
@@ -227,6 +270,9 @@ func (m *Mpp) VerifyCredential(ctx context.Context, credential *mpp.Credential) 
 type ChargeParams struct {
 	// Authorization is the incoming Authorization header value.
 	Authorization string
+	// PaymentAuthorization is the incoming Payment-Authorization header value.
+	// Used when the handler was created with WithRequiresAuth(true).
+	PaymentAuthorization string
 	// Amount is the human-readable charge amount.
 	Amount string
 	// Currency overrides the method's default currency.
@@ -327,7 +373,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	}
 
 	result, err := VerifyOrChallenge(ctx, VerifyParams{
-		Authorization: params.Authorization,
+		Authorization: m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization),
 		Intent:        intent,
 		Request:       request,
 		Body:          params.Body,
@@ -337,6 +383,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		Description:   params.Description,
 		Meta:          params.Meta,
 		Expires:       params.Expires,
+		Header:        m.advertisedCredentialHeader(),
 	})
 	if err != nil {
 		if result != nil {

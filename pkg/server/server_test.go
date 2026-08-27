@@ -38,9 +38,9 @@ func TestNewAcceptsMinimumLengthSecret(t *testing.T) {
 
 // newTestServer constructs an Mpp for tests and fails the test if New rejects
 // the secret. Callers must pass a secret of at least minimumSecretKeyBytes.
-func newTestServer(t *testing.T, method Method, realm, secretKey string) *Mpp {
+func newTestServer(t *testing.T, method Method, realm, secretKey string, opts ...Option) *Mpp {
 	t.Helper()
-	payment, err := New(method, realm, secretKey)
+	payment, err := New(method, realm, secretKey, opts...)
 	require.NoError(t, err)
 	return payment
 }

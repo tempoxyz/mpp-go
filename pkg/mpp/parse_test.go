@@ -294,6 +294,7 @@ func TestParseChallenge(t *testing.T) {
 		WithDigest("sha-256=:abc123:"),
 		WithDescription("Pay for API access"),
 		WithMeta(map[string]string{"trace": "123", "route": "paid"}),
+		WithHeader(HeaderPaymentAuthorization),
 	)
 
 	tests := []struct {
@@ -382,6 +383,17 @@ func TestParseChallenge(t *testing.T) {
 			wantErr: `invalid request field`,
 		},
 		{
+			name:    "invalid credential header name",
+			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", header="not a header"`,
+			wantErr: `invalid HTTP header name`,
+		},
+		{
+			name: "omits default authorization header",
+			header: NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{}, WithHeader(HeaderAuthorization)).
+				ToAuthenticate("api.example.com"),
+			want: NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{}),
+		},
+		{
 			name:    "header too large",
 			header:  "Payment " + strings.Repeat("a", maxHeaderPayload),
 			wantErr: `WWW-Authenticate header exceeds maximum size`,
@@ -441,6 +453,18 @@ func TestParseCredential(t *testing.T) {
 		Source:  "did:pkh:eip155:42431:0x1234",
 	}
 
+	headerCredential := &Credential{
+		Challenge: ChallengeEcho{
+			ID:      "challenge-id",
+			Realm:   "api.example.com",
+			Method:  "tempo",
+			Intent:  "charge",
+			Request: b64EncodeAny(map[string]any{"amount": "100", "currency": "0xabc"}),
+			Header:  HeaderPaymentAuthorization,
+		},
+		Payload: map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
 	tests := []struct {
 		name    string
 		header  string
@@ -451,6 +475,11 @@ func TestParseCredential(t *testing.T) {
 			name:   "roundtrip payment credential",
 			header: credential.ToAuthorization(),
 			want:   credential,
+		},
+		{
+			name:   "roundtrip preserves credential header",
+			header: headerCredential.ToAuthorization(),
+			want:   headerCredential,
 		},
 		{
 			name:   "merged authorization header",
@@ -571,6 +600,10 @@ func assertChallengeEqual(t *testing.T, got, want *Challenge) {
 	}
 	if !assert.Equalf(t, want.Opaque, got.Opaque,
 		"challenge opaque mismatch: got %#v want %#v", got.Opaque, want.Opaque) {
+		return
+	}
+	if !assert.Equalf(t, want.Header, got.Header,
+		"challenge header mismatch: got %q want %q", got.Header, want.Header) {
 		return
 	}
 

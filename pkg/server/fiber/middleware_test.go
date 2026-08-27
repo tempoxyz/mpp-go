@@ -259,9 +259,9 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
 }
 
-func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string, opts ...server.Option) *server.Mpp {
 	t.Helper()
-	payment, err := server.New(method, realm, secretKey)
+	payment, err := server.New(method, realm, secretKey, opts...)
 	require.NoError(t, err)
 	return payment
 }

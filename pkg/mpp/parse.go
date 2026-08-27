@@ -222,6 +222,10 @@ func ParseChallenge(header string) (*Challenge, error) {
 	expires := params["expires"]
 	digest := params["digest"]
 	description := params["description"]
+	credentialHeader, err := parseAdvertisedCredentialHeader(params["header"])
+	if err != nil {
+		return nil, err
+	}
 
 	var opaque map[string]string
 	if opaqueB64, ok := params["opaque"]; ok && opaqueB64 != "" {
@@ -246,6 +250,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 		Expires:     expires,
 		Description: description,
 		Opaque:      opaque,
+		Header:      credentialHeader,
 	}, nil
 }
 
@@ -302,6 +307,7 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 		{key: "digest", value: c.Digest},
 		{key: "expires", value: c.Expires},
 		{key: "description", value: c.Description},
+		{key: "header", value: AdvertisedCredentialHeader(c.Header)},
 	} {
 		if err := add(param.key, param.value); err != nil {
 			return "", err
@@ -388,6 +394,11 @@ func ParseCredential(header string) (*Credential, error) {
 		Expires: anyStr(challengeMap["expires"]),
 		Digest:  anyStr(challengeMap["digest"]),
 	}
+	credentialHeader, err := parseAdvertisedCredentialHeader(anyStr(challengeMap["header"]))
+	if err != nil {
+		return nil, err
+	}
+	echo.Header = credentialHeader
 	if echo.ID == "" {
 		return nil, fmt.Errorf("mpp: credential challenge missing required field: id")
 	}
@@ -448,6 +459,9 @@ func FormatAuthorization(c *Credential) string {
 	}
 	if c.Challenge.Digest != "" {
 		challengeDict["digest"] = c.Challenge.Digest
+	}
+	if header := AdvertisedCredentialHeader(c.Challenge.Header); header != "" {
+		challengeDict["header"] = header
 	}
 	if c.Challenge.Opaque != nil {
 		if raw, ok := c.Challenge.Opaque["_raw"]; ok {
@@ -583,6 +597,18 @@ func isMethodName(value string) bool {
 		}
 	}
 	return value != ""
+}
+
+func isHTTPHeaderName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if !isTokenChar(value[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // B64Decode decodes a base64url (no padding) string into a map.

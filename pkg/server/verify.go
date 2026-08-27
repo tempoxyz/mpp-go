@@ -34,6 +34,9 @@ type VerifyParams struct {
 	Meta map[string]string
 	// Expires overrides the default Challenge expiry.
 	Expires string
+	// Header selects the HTTP field for the Payment credential. Empty defaults
+	// to Authorization. Payment-Authorization is advertised when set.
+	Header string
 }
 
 // VerifyResult is either a Challenge or a verified (Credential, Receipt) pair.
@@ -77,6 +80,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 	if params.Meta != nil {
 		opts = append(opts, mpp.WithMeta(params.Meta))
+	}
+	if params.Header != "" {
+		opts = append(opts, mpp.WithHeader(params.Header))
 	}
 	if params.Body != nil {
 		opts = append(opts, mpp.WithDigest(mpp.BodyDigest.Compute(params.Body)))
@@ -253,6 +259,9 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 	}
 	if cred.Challenge.Opaque != nil {
 		opts = append(opts, mpp.WithMeta(cred.Challenge.Opaque))
+	}
+	if cred.Challenge.Header != "" {
+		opts = append(opts, mpp.WithHeader(cred.Challenge.Header))
 	}
 	return opts
 }

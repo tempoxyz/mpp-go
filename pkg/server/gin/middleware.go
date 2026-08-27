@@ -30,6 +30,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 	return func(c *ginfw.Context) {
 		chargeParams := params
 		chargeParams.Authorization = c.GetHeader(mpp.HeaderAuthorization)
+		chargeParams.PaymentAuthorization = c.GetHeader(mpp.HeaderPaymentAuthorization)
 		chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
 		body, err := server.ReadRequestBody(c.Request)
 		if err != nil {

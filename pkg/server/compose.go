@@ -61,8 +61,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth := r.Header.Get(mpp.HeaderAuthorization)
-			paymentAuth, err := mpp.FindPaymentAuthorizationStrict(auth)
+			paymentAuth, err := composePaymentCredential(entries, r)
 			if err != nil {
 				WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
 				return
@@ -98,7 +97,8 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 			}
 
 			params := entry.params
-			params.Authorization = paymentAuth
+			params.Authorization = r.Header.Get(mpp.HeaderAuthorization)
+			params.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
 			if len(scope) > 0 {
 				params.MppxScope = scope
 			}
@@ -223,4 +223,38 @@ func (entry composedEntry) scopedRequest(scope map[string]string) (map[string]an
 		params.MppxScope = scope
 	}
 	return entry.mpp.buildChargeRequest(params)
+}
+
+func composePaymentCredential(entries []composedEntry, r *http.Request) (string, error) {
+	needsDefault := false
+	needsAuth := false
+	for _, entry := range entries {
+		if entry.mpp.requiresAuth {
+			needsAuth = true
+		} else {
+			needsDefault = true
+		}
+	}
+
+	var authorization, paymentAuthorization string
+	var err error
+	if needsDefault {
+		authorization, err = mpp.FindPaymentAuthorizationStrict(r.Header.Get(mpp.HeaderAuthorization))
+		if err != nil {
+			return "", err
+		}
+	}
+	if needsAuth {
+		paymentAuthorization, err = mpp.FindPaymentAuthorizationStrict(r.Header.Get(mpp.HeaderPaymentAuthorization))
+		if err != nil {
+			return "", err
+		}
+	}
+	if authorization != "" && paymentAuthorization != "" {
+		return "", fmt.Errorf("mpp: multiple Payment credentials")
+	}
+	if paymentAuthorization != "" {
+		return paymentAuthorization, nil
+	}
+	return authorization, nil
 }

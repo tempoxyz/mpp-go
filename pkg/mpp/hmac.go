@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -19,12 +20,17 @@ type GenerateChallengeIDInput struct {
 	Expires   string
 	Digest    string
 	Opaque    map[string]string
+	Header    string
 }
 
 // GenerateChallengeID produces an HMAC-SHA256 challenge ID from the given inputs.
 // The HMAC is computed over pipe-delimited fields:
 //
 //	realm|method|intent|request_b64|expires|digest|opaque_b64
+//
+// Challenges that advertise a credential header insert it immediately before
+// the final opaque slot. Authorization is the implicit default and is never
+// included, preserving the legacy binding.
 //
 // The result is base64url-encoded without padding.
 func GenerateChallengeID(opts GenerateChallengeIDInput) string {
@@ -42,13 +48,40 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 		requestB64,
 		opts.Expires,
 		opts.Digest,
-		opaqueB64,
 	}
+	if header := AdvertisedCredentialHeader(opts.Header); header != "" {
+		parts = append(parts, header)
+	}
+	parts = append(parts, opaqueB64)
 
 	mac := hmac.New(sha256.New, []byte(opts.SecretKey))
 	mac.Write([]byte(strings.Join(parts, "|")))
 
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// AdvertisedCredentialHeader returns a challenge header parameter value, or
+// empty for the implicit Authorization default.
+func AdvertisedCredentialHeader(header string) string {
+	if isDefaultCredentialHeader(header) {
+		return ""
+	}
+	return header
+}
+
+func isDefaultCredentialHeader(header string) bool {
+	return header == "" || strings.EqualFold(header, HeaderAuthorization)
+}
+
+func parseAdvertisedCredentialHeader(header string) (string, error) {
+	header = AdvertisedCredentialHeader(header)
+	if header == "" {
+		return "", nil
+	}
+	if !isHTTPHeaderName(header) {
+		return "", fmt.Errorf("mpp: invalid HTTP header name")
+	}
+	return header, nil
 }
 
 // ConstantTimeEqual returns true if a and b are equal, using constant-time

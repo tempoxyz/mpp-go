@@ -231,6 +231,52 @@ func TestTransport_RoundTrip_ReusesCredentialForRepeatedChallenge(t *testing.T) 
 	assert.Equal(t, authorizations[0], authorizations[1])
 }
 
+func TestTransport_RoundTrip_UsesAdvertisedPaymentAuthorizationHeader(t *testing.T) {
+	callCount := 0
+	var challenge *mpp.Challenge
+	var retryAuth, retryPaymentAuth string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Header.Get(mpp.HeaderPaymentAuthorization) == "" {
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			w.Write([]byte("pay me"))
+			return
+		}
+		retryAuth = r.Header.Get("Authorization")
+		retryPaymentAuth = r.Header.Get(mpp.HeaderPaymentAuthorization)
+		assert.Truef(t, strings.HasPrefix(retryPaymentAuth, "Payment "),
+			"expected Payment auth scheme, got %q", retryPaymentAuth)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("paid"))
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil, mpp.WithHeader(mpp.HeaderPaymentAuthorization))
+
+	cred := newTestCredential("tempo")
+	method := &mockMethod{name: "tempo", cred: cred}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	req.Header.Set("Authorization", "Bearer app-token")
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
+	}
+
+	defer resp.Body.Close()
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected 200, got %d", resp.StatusCode) {
+		return
+	}
+
+	assert.Equal(t, 2, callCount)
+	assert.Equal(t, "Bearer app-token", retryAuth)
+	assert.True(t, strings.HasPrefix(retryPaymentAuth, "Payment "))
+}
+
 func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
 	challenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", nil)
 

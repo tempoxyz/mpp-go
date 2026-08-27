@@ -677,3 +677,37 @@ func TestComposeMiddleware_PanicsOnMixedRealms(t *testing.T) {
 		ComposeConfig{Mpp: b, Params: ChargeParams{Amount: "2.00"}},
 	)
 }
+
+func TestComposeMiddleware_RequiresAuthAdvertisesAndAcceptsPaymentAuthorization(t *testing.T) {
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret, WithRequiresAuth(true))
+	methodB := newTestServer(t, composeTestMethod{name: "beta"}, composeRealm, composeSecret, WithRequiresAuth(true))
+
+	srv := composeTestServer(t,
+		ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}},
+		ComposeConfig{Mpp: methodB, Params: ChargeParams{Amount: "2.00"}},
+	)
+	defer srv.Close()
+
+	resp := getChallenge(t, srv.URL)
+	defer resp.Body.Close()
+	for _, value := range resp.Header.Values("WWW-Authenticate") {
+		challenge, err := mpp.ParseChallenge(value)
+		require.NoError(t, err)
+		assert.Equal(t, mpp.HeaderPaymentAuthorization, challenge.Header)
+		assert.Contains(t, value, `header="`+mpp.HeaderPaymentAuthorization+`"`)
+	}
+
+	betaChallenge := findChallenge(t, resp, "beta")
+	credential := betaChallenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc"})
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer app-token")
+	req.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+	paid, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer paid.Body.Close()
+	require.Equal(t, http.StatusOK, paid.StatusCode)
+
+	body, _ := io.ReadAll(paid.Body)
+	assert.Equal(t, "beta:0xreceipt-beta", string(body))
+}

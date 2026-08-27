@@ -66,14 +66,15 @@ func ReceiptFromContext(ctx context.Context) *mpp.Receipt {
 // ChargeMiddleware creates an http.Handler middleware for the charge intent.
 //
 // It calls Mpp.Charge with the provided ChargeParams, injects the incoming
-// Authorization header automatically, returns a 402 challenge when payment is
-// required, and stores the verified Credential and Receipt in the request
-// context on success.
+// Authorization and Payment-Authorization headers automatically, returns a 402
+// challenge when payment is required, and stores the verified Credential and
+// Receipt in the request context on success.
 func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			chargeParams := params
 			chargeParams.Authorization = r.Header.Get(mpp.HeaderAuthorization)
+			chargeParams.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
 			chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
 			body, err := ReadRequestBody(r)
 			if err != nil {

@@ -125,7 +125,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 		}
-		request.Header.Set(mpp.HeaderAuthorization, cred.ToAuthorization())
+		request.Header.Set(selected.challenge.CredentialHeader(), cred.ToAuthorization())
 	}
 }
 

@@ -19,6 +19,10 @@ type Challenge struct {
 	Expires     string            `json:"expires,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Opaque      map[string]string `json:"opaque,omitempty"`
+	// Header is the HTTP field for the Payment credential. Empty means the
+	// implicit default, Authorization. When set, it is advertised as the
+	// challenge header parameter and bound into the challenge ID.
+	Header string `json:"header,omitempty"`
 }
 
 // ChallengeEcho is the subset of a Challenge echoed back in a Credential.
@@ -31,6 +35,7 @@ type ChallengeEcho struct {
 	Expires string            `json:"expires,omitempty"`
 	Digest  string            `json:"digest,omitempty"`
 	Opaque  map[string]string `json:"opaque,omitempty"`
+	Header  string            `json:"header,omitempty"`
 }
 
 // ChallengeOption configures optional fields when creating a new Challenge.
@@ -41,6 +46,7 @@ type challengeConfig struct {
 	digest      string
 	description string
 	opaque      map[string]string
+	header      string
 }
 
 // WithExpires sets the expiration timestamp on a Challenge.
@@ -63,6 +69,12 @@ func WithMeta(meta map[string]string) ChallengeOption {
 	return func(c *challengeConfig) { c.opaque = meta }
 }
 
+// WithHeader sets the HTTP field that must carry the Payment credential.
+// Authorization is the implicit default and is not advertised on the wire.
+func WithHeader(header string) ChallengeOption {
+	return func(c *challengeConfig) { c.header = AdvertisedCredentialHeader(header) }
+}
+
 // NewChallenge creates a new Challenge with an HMAC-bound ID. The secretKey
 // and realm are used to compute the ID via GenerateChallengeID.
 func NewChallenge(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) *Challenge {
@@ -82,6 +94,7 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 		Expires:   cfg.expires,
 		Digest:    cfg.digest,
 		Opaque:    cfg.opaque,
+		Header:    cfg.header,
 	})
 
 	return &Challenge{
@@ -95,6 +108,7 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 		Expires:     cfg.expires,
 		Description: cfg.description,
 		Opaque:      cfg.opaque,
+		Header:      cfg.header,
 	}
 }
 
@@ -115,6 +129,7 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 		Expires     string         `json:"expires,omitempty"`
 		Description string         `json:"description,omitempty"`
 		Opaque      any            `json:"opaque,omitempty"`
+		Header      string         `json:"header,omitempty"`
 	}{
 		ID:          c.ID,
 		Method:      c.Method,
@@ -125,6 +140,7 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 		Expires:     c.Expires,
 		Description: c.Description,
 		Opaque:      opaqueForJSON(c.Opaque),
+		Header:      AdvertisedCredentialHeader(c.Header),
 	})
 }
 
@@ -142,6 +158,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		Expires     string          `json:"expires,omitempty"`
 		Description string          `json:"description,omitempty"`
 		Opaque      json.RawMessage `json:"opaque,omitempty"`
+		Header      string          `json:"header,omitempty"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
@@ -152,6 +169,10 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	opaque, err := decodeJSONOpaque(decoded.Opaque)
+	if err != nil {
+		return err
+	}
+	header, err := parseAdvertisedCredentialHeader(decoded.Header)
 	if err != nil {
 		return err
 	}
@@ -167,6 +188,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		Expires:     decoded.Expires,
 		Description: decoded.Description,
 		Opaque:      opaque,
+		Header:      header,
 	}
 	return nil
 }
@@ -199,8 +221,18 @@ func (c *Challenge) Verify(secretKey, realm string) bool {
 		Expires:   c.Expires,
 		Digest:    c.Digest,
 		Opaque:    c.Opaque,
+		Header:    c.Header,
 	})
 	return ConstantTimeEqual(c.ID, expected)
+}
+
+// CredentialHeader returns the HTTP field a client must use for the payment
+// credential. Challenges that omit header default to Authorization.
+func (c *Challenge) CredentialHeader() string {
+	if AdvertisedCredentialHeader(c.Header) == "" {
+		return HeaderAuthorization
+	}
+	return c.Header
 }
 
 // ToEcho returns the ChallengeEcho representation suitable for inclusion
@@ -219,6 +251,7 @@ func (c *Challenge) ToEcho() ChallengeEcho {
 		Expires: c.Expires,
 		Digest:  c.Digest,
 		Opaque:  c.Opaque,
+		Header:  AdvertisedCredentialHeader(c.Header),
 	}
 }
 
@@ -232,6 +265,7 @@ func (e ChallengeEcho) toChallenge() Challenge {
 		Digest:     e.Digest,
 		Expires:    e.Expires,
 		Opaque:     e.Opaque,
+		Header:     AdvertisedCredentialHeader(e.Header),
 	}
 }
 
