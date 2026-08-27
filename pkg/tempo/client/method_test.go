@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -83,24 +84,6 @@ func TestCreateCredentialScenarios(t *testing.T) {
 			wantBroadcasts: 0,
 		},
 		{
-			name: "hash credential rejected for explicit memo challenge",
-			config: Config{
-				ChainID:        42431,
-				CredentialType: tempo.CredentialTypeHash,
-			},
-			rpc: &mockRPC{chainID: 42431},
-			params: tempo.ChargeRequestParams{
-				Amount:    "0.50",
-				Currency:  testCurrency,
-				Recipient: testRecipient,
-				Decimals:  6,
-				ChainID:   42431,
-				Memo:      "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-			},
-			wantErr:        "hash credentials cannot be used with explicit memo challenges",
-			wantBroadcasts: 0,
-		},
-		{
 			name: "chain id mismatch",
 			config: Config{
 				ChainID: 42431,
@@ -165,6 +148,58 @@ func TestCreateCredentialScenarios(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestCreateCredentialHashWithExplicitMemo(t *testing.T) {
+	t.Parallel()
+
+	params := tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+		Memo:      "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+	}
+	request, err := tempo.NormalizeChargeRequest(params)
+	if !assert.NoErrorf(t, err, "NormalizeChargeRequest() error = %v", err) {
+		return
+	}
+	rpc := &mockRPC{chainID: 42431}
+	method, err := New(Config{
+		ChainID:        42431,
+		CredentialType: tempo.CredentialTypeHash,
+		PrivateKey:     testPrivateKey,
+		RPC:            rpc,
+	})
+	if !assert.NoErrorf(t, err, "New() error = %v", err) {
+		return
+	}
+
+	challenge := buildChallenge(t, params)
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	if !assert.NoErrorf(t, err, "CreateCredential() error = %v", err) {
+		return
+	}
+	payload, err := tempo.ParseChargeCredentialPayload(credential.Payload)
+	if !assert.NoErrorf(t, err, "ParseChargeCredentialPayload() error = %v", err) {
+		return
+	}
+	if !assert.Equal(t, tempo.CredentialTypeHash, payload.Type) ||
+		!assert.Equal(t, "0xabc123", payload.Hash) ||
+		!assert.Len(t, rpc.sentRawTxs, 1) {
+		return
+	}
+	tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	if !assert.NoErrorf(t, err, "Deserialize() error = %v", err) ||
+		!assert.Len(t, tx.Calls, 1) {
+		return
+	}
+	if !assert.True(t, tempo.MatchTransferCalldata(
+		hexutil.Encode(tx.Calls[0].Data), request, challenge.Realm, challenge.ID,
+	), "MatchTransferCalldata() = false, want explicit memo transfer") {
+		return
 	}
 }
 

@@ -278,9 +278,6 @@ func (i *Intent) validateHash(
 ) error {
 	request := validated.request
 	source := validated.source
-	if request.MethodDetails.Memo != "" {
-		return mpp.ErrInvalidPayload("hash credentials are not supported when the primary transfer uses an explicit memo")
-	}
 	if source == nil {
 		return mpp.ErrInvalidPayload("hash credential must include a source")
 	}
