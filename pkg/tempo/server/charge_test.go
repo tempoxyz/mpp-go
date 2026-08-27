@@ -1098,17 +1098,27 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 
 func TestChargeFlow_HashCredentialAcceptsExplicitPrimaryMemo(t *testing.T) {
 	ctx := context.Background()
-	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+	method := NewMethod(MethodConfig{
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+	})
+	requestMap, err := method.BuildChargeRequest(server.ChargeParams{
 		Amount:         "0.50",
-		Currency:       testCurrency,
-		Recipient:      testRecipient,
-		Decimals:       6,
-		ChainID:        42431,
 		Memo:           "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 	})
 	if !assert.NoErrorf(t, err,
-		"NormalizeChargeRequest() error = %v", err) {
+		"BuildChargeRequest() error = %v", err) {
+		return
+	}
+	request, err := tempo.ParseChargeRequest(requestMap)
+	if !assert.NoErrorf(t, err,
+		"ParseChargeRequest() error = %v", err) {
+		return
+	}
+	if !assert.Equal(t, []tempo.ChargeMode{tempo.ChargeModePush}, request.MethodDetails.SupportedModes) {
 		return
 	}
 

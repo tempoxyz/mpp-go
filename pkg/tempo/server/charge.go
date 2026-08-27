@@ -285,6 +285,9 @@ func (i *Intent) validateHash(
 	if err != nil {
 		return err
 	}
+	// Explicit memos are application-provided correlation values. Receipt
+	// matching requires their exact value; generated attribution memos provide
+	// challenge binding when the application does not provide one.
 	if !receiptMatches(receiptMap, credential, request, source.address) {
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}

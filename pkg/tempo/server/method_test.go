@@ -124,7 +124,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "explicit primary memo forces pull mode",
+			name: "explicit primary memo preserves push mode",
 			config: MethodConfig{
 				Currency:  "0x20c0000000000000000000000000000000000001",
 				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
@@ -139,8 +139,8 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 				t.Helper()
 				{
 					got := len(request.MethodDetails.SupportedModes)
-					if !assert.Falsef(t, got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePull,
-						"request.MethodDetails.SupportedModes = %#v, want [pull]", request.MethodDetails.SupportedModes) {
+					if !assert.Falsef(t, got != 1 || request.MethodDetails.SupportedModes[0] != tempo.ChargeModePush,
+						"request.MethodDetails.SupportedModes = %#v, want [push]", request.MethodDetails.SupportedModes) {
 						return
 					}
 				}
