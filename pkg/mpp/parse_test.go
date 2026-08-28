@@ -209,6 +209,21 @@ func TestFormatAuthenticateStrict(t *testing.T) {
 	assert.Contains(t, got, `description="Pay \"premium\" path C:\\tempo\\api"`)
 }
 
+func TestFormatAuthenticateStrictRejectsLossyJCSRequest(t *testing.T) {
+	t.Parallel()
+
+	challenge := &Challenge{
+		ID:      "challenge-id",
+		Method:  "tempo",
+		Intent:  "charge",
+		Request: map[string]any{"amount": json.Number("1234567890123456789")},
+	}
+	_, err := challenge.ToAuthenticateStrict("api.example.com")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid challenge request")
+	assert.Empty(t, challenge.ToAuthenticate("api.example.com"))
+}
+
 func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
 	t.Parallel()
 
@@ -669,13 +684,11 @@ func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
 		realm  = "api"
 	)
 
-	// A challenge the server issued must verify after the round trip through the
-	// WWW-Authenticate header, whatever the magnitude of the amounts it carries.
+	// A challenge with JCS-safe integer values must verify after a round trip
+	// through the WWW-Authenticate header.
 	for _, amount := range []int64{
 		1000,
 		9007199254740991,
-		9007199254740993,
-		1234567890123456789,
 	} {
 		request := map[string]any{"amount": amount, "asset": "usdc"}
 		issued := NewChallenge(secret, realm, "tempo", "charge", request)

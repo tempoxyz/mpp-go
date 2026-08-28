@@ -33,11 +33,27 @@ type GenerateChallengeIDInput struct {
 //
 // The result is base64url-encoded without padding.
 func GenerateChallengeID(opts GenerateChallengeIDInput) string {
-	requestB64 := b64EncodeRequest(opts.Request)
+	id, err := GenerateChallengeIDWithError(opts)
+	if err != nil {
+		panic(fmt.Sprintf("mpp: invalid challenge request: %v", err))
+	}
+	return id
+}
+
+// GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID and
+// rejects request values that cannot be represented exactly by JCS.
+func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error) {
+	requestB64, err := b64EncodeRequestWithError(opts.Request)
+	if err != nil {
+		return "", err
+	}
 
 	opaqueB64 := ""
 	if opts.Opaque != nil {
-		opaqueB64 = b64EncodeSortedStringMap(opts.Opaque)
+		opaqueB64, err = b64EncodeSortedStringMapWithError(opts.Opaque)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	parts := []string{
@@ -56,7 +72,7 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 	mac := hmac.New(sha256.New, []byte(opts.SecretKey))
 	mac.Write([]byte(strings.Join(parts, "|")))
 
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
 // AdvertisedCredentialHeader returns a challenge header parameter value, or
@@ -92,9 +108,14 @@ func ConstantTimeEqual(a, b string) bool {
 // b64EncodeSortedStringMap encodes a map[string]string as RFC 8785 canonical
 // JSON, then base64url without padding.
 func b64EncodeSortedStringMap(m map[string]string) string {
+	encoded, _ := b64EncodeSortedStringMapWithError(m)
+	return encoded
+}
+
+func b64EncodeSortedStringMapWithError(m map[string]string) (string, error) {
 	encoded, err := encodeCanonicalJSON(m)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(encoded)
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
 }

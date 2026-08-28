@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestChallengeBoundValuesUseJCS(t *testing.T) {
@@ -52,10 +53,10 @@ func TestChallengeBoundValuesUseJCS(t *testing.T) {
 	}
 }
 
-func TestChallengeBoundJSONEqualUsesJCSNumberSemantics(t *testing.T) {
+func TestChallengeBoundJSONEqualRejectsLossyJCSNumbers(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t,
+	assert.False(t,
 		ChallengeBoundJSONEqual(
 			map[string]any{"amount": int64(1234567890123456789)},
 			map[string]any{"amount": json.Number("1234567890123456800")},
@@ -67,6 +68,25 @@ func TestChallengeBoundJSONEqualUsesJCSNumberSemantics(t *testing.T) {
 			map[string]any{"amount": "101"},
 		),
 	)
+}
+
+func TestNewChallengeWithErrorRejectsLossyJCSNumbers(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []any{
+		int64(1234567890123456789),
+		json.Number("1234567890123456789"),
+		json.Number("1e400"),
+	} {
+		_, err := NewChallengeWithError(
+			"secret",
+			"api.example.com",
+			"tempo",
+			"charge",
+			map[string]any{"amount": value},
+		)
+		require.Error(t, err, "value %#v must not be bound to a JCS challenge", value)
+	}
 }
 
 func TestChallengeWireAndIDUseSameJCSValues(t *testing.T) {

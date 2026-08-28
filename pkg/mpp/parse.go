@@ -299,7 +299,11 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 
 	reqB64 := c.RequestB64
 	if reqB64 == "" {
-		reqB64 = b64EncodeRequest(c.Request)
+		var err error
+		reqB64, err = b64EncodeRequestWithError(c.Request)
+		if err != nil {
+			return "", fmt.Errorf("mpp: invalid challenge request: %w", err)
+		}
 	}
 	for _, param := range []struct {
 		key   string
@@ -326,14 +330,19 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 }
 
 func b64EncodeRequest(request map[string]any) string {
+	encoded, _ := b64EncodeRequestWithError(request)
+	return encoded
+}
+
+func b64EncodeRequestWithError(request map[string]any) (string, error) {
 	if request == nil {
 		request = map[string]any{}
 	}
 	encoded, err := encodeCanonicalJSON(request)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(encoded)
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
 func escapeQuoted(value string) string {

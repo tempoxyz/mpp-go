@@ -309,25 +309,14 @@ func TestCredentialJSONUnmarshalNormalizesChallengeRequest(t *testing.T) {
 	}
 }
 
-func TestChallengeAndCredentialJSONRoundTripPreservesLargeIntegerRequest(t *testing.T) {
-	challenge := NewChallenge(
+func TestChallengeJSONRoundTripRejectsLossyLargeIntegerRequest(t *testing.T) {
+	_, err := NewChallengeWithError(
 		"secret",
 		"api.example.com",
 		"tempo",
 		"charge",
 		map[string]any{"amount": int64(1234567890123456789)},
 	)
-
-	challengeJSON, err := json.Marshal(challenge)
-	require.NoError(t, err)
-	var decodedChallenge Challenge
-	require.NoError(t, json.Unmarshal(challengeJSON, &decodedChallenge))
-	assert.Equal(t, challenge.RequestB64, decodedChallenge.RequestB64)
-	assert.True(t, decodedChallenge.Verify("secret", "api.example.com"))
-
-	credentialJSON, err := json.Marshal(challenge.NewCredential(map[string]any{"type": "hash"}))
-	require.NoError(t, err)
-	var decodedCredential Credential
-	require.NoError(t, json.Unmarshal(credentialJSON, &decodedCredential))
-	assert.Equal(t, challenge.RequestB64, decodedCredential.Challenge.Request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not exactly representable by JCS")
 }
