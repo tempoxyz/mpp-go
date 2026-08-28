@@ -55,7 +55,7 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 		return nil, nil, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err))
 	}
 	echoed := &credential.Challenge
-	echoedChallenge := mpp.NewChallenge(
+	echoedChallenge, err := mpp.NewChallengeWithError(
 		m.secretKey,
 		echoed.Realm,
 		echoed.Method,
@@ -63,6 +63,9 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 		echoedRequest,
 		echoedChallengeOpts(credential)...,
 	)
+	if err != nil {
+		return nil, nil, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err))
+	}
 	if !mpp.ConstantTimeEqual(echoed.ID, echoedChallenge.ID) {
 		return nil, nil, mpp.ErrInvalidChallenge(echoed.ID, "challenge was not issued by this server")
 	}

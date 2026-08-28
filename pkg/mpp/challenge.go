@@ -78,14 +78,28 @@ func WithHeader(header string) ChallengeOption {
 // NewChallenge creates a new Challenge with an HMAC-bound ID. The secretKey
 // and realm are used to compute the ID via GenerateChallengeID.
 func NewChallenge(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) *Challenge {
+	challenge, err := NewChallengeWithError(secretKey, realm, method, intent, request, opts...)
+	if err != nil {
+		panic(fmt.Sprintf("mpp: invalid challenge request: %v", err))
+	}
+	return challenge
+}
+
+// NewChallengeWithError creates a new Challenge with an HMAC-bound ID. It
+// rejects request values that JCS cannot represent without changing their
+// numeric value.
+func NewChallengeWithError(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) (*Challenge, error) {
 	cfg := &challengeConfig{}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	requestB64 := b64EncodeRequest(request)
+	requestB64, err := b64EncodeRequestWithError(request)
+	if err != nil {
+		return nil, err
+	}
 
-	id := GenerateChallengeID(GenerateChallengeIDInput{
+	id, err := GenerateChallengeIDWithError(GenerateChallengeIDInput{
 		SecretKey: secretKey,
 		Realm:     realm,
 		Method:    method,
@@ -96,6 +110,9 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 		Opaque:    cfg.opaque,
 		Header:    cfg.header,
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	return &Challenge{
 		ID:          id,
@@ -109,7 +126,7 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 		Description: cfg.description,
 		Opaque:      cfg.opaque,
 		Header:      cfg.header,
-	}
+	}, nil
 }
 
 // MarshalJSON emits the standard JSON challenge shape with a decoded request
@@ -212,7 +229,7 @@ func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
 // Verify checks whether the challenge ID matches the expected HMAC for the
 // given secretKey and realm. Uses constant-time comparison.
 func (c *Challenge) Verify(secretKey, realm string) bool {
-	expected := GenerateChallengeID(GenerateChallengeIDInput{
+	expected, err := GenerateChallengeIDWithError(GenerateChallengeIDInput{
 		SecretKey: secretKey,
 		Realm:     realm,
 		Method:    c.Method,
@@ -223,6 +240,9 @@ func (c *Challenge) Verify(secretKey, realm string) bool {
 		Opaque:    c.Opaque,
 		Header:    c.Header,
 	})
+	if err != nil {
+		return false
+	}
 	return ConstantTimeEqual(c.ID, expected)
 }
 
@@ -310,7 +330,7 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 	if err != nil {
 		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
 	}
-	if !JSONEqual(decoded, decodedB64) {
+	if !ChallengeBoundJSONEqual(decoded, decodedB64) {
 		return nil, "", fmt.Errorf("mpp: challenge request and requestB64 do not match")
 	}
 	return decoded, requestB64, nil
@@ -336,7 +356,11 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 	if request == nil {
 		request = map[string]any{}
 	}
-	return request, b64EncodeRequest(request), nil
+	requestB64, err := b64EncodeRequestWithError(request)
+	if err != nil {
+		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	return request, requestB64, nil
 }
 
 func decodeJSONOpaque(raw json.RawMessage) (map[string]string, error) {

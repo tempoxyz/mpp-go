@@ -88,7 +88,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		opts = append(opts, mpp.WithDigest(mpp.BodyDigest.Compute(params.Body)))
 	}
 
-	challenge := mpp.NewChallenge(
+	challenge, err := mpp.NewChallengeWithError(
 		params.SecretKey,
 		params.Realm,
 		params.Method,
@@ -96,6 +96,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		params.Request,
 		opts...,
 	)
+	if err != nil {
+		return nil, mpp.ErrBadRequest(fmt.Sprintf("invalid challenge request: %v", err))
+	}
 
 	// 1. No authorization header — issue challenge.
 	if params.Authorization == "" {
@@ -127,7 +130,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		)
 	}
 
-	echoedChallenge := mpp.NewChallenge(
+	echoedChallenge, err := mpp.NewChallengeWithError(
 		params.SecretKey,
 		credential.Challenge.Realm,
 		credential.Challenge.Method,
@@ -135,6 +138,12 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		echoedRequest,
 		echoedChallengeOpts(credential)...,
 	)
+	if err != nil {
+		return challengeResultError(
+			challenge,
+			mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err)),
+		)
+	}
 
 	if !mpp.ConstantTimeEqual(credential.Challenge.ID, echoedChallenge.ID) {
 		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
@@ -155,7 +164,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return challengeResultError(challenge, mpp.ErrInvalidChallenge(echoed.ID, "intent mismatch"))
 	}
 
-	if !mpp.JSONEqual(echoedRequest, params.Request) {
+	if !mpp.ChallengeBoundJSONEqual(echoedRequest, params.Request) {
 		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential request does not match this route's requirements",

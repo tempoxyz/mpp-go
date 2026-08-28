@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -69,8 +71,8 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 
 }
 
-func TestVerifyOrChallenge_VerifiesLargeIntegerRequest(t *testing.T) {
-	const amount int64 = 1234567890123456789
+func TestVerifyOrChallenge_VerifiesLargeIntegerStringRequest(t *testing.T) {
+	const amount = "1234567890123456789"
 	request := map[string]any{"amount": amount, "currency": "0xabc", "recipient": "0xdef"}
 	params := VerifyParams{
 		Intent:    verifyTestIntent{},
@@ -95,6 +97,52 @@ func TestVerifyOrChallenge_VerifiesLargeIntegerRequest(t *testing.T) {
 		return
 	}
 	assert.Equal(t, "0xreceipt", result.Receipt.Reference)
+}
+
+func TestVerifyOrChallengeRejectsLossyJCSRequest(t *testing.T) {
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Intent:    verifyTestIntent{},
+		Request:   map[string]any{"amount": int64(1234567890123456789)},
+		Realm:     "api.example.com",
+		SecretKey: "secret-key",
+		Method:    "tempo",
+	})
+
+	assert.Nil(t, result)
+	var paymentErr *mpp.PaymentError
+	require.ErrorAs(t, err, &paymentErr)
+	assert.Equal(t, http.StatusBadRequest, paymentErr.Status)
+	assert.Contains(t, paymentErr.Detail, "invalid challenge request")
+}
+
+func TestVerifyOrChallengeRejectsLossyEchoedJCSRequest(t *testing.T) {
+	credential := &mpp.Credential{
+		Challenge: mpp.ChallengeEcho{
+			ID:      "challenge-id",
+			Realm:   "api.example.com",
+			Method:  "tempo",
+			Intent:  "charge",
+			Request: base64.RawURLEncoding.EncodeToString([]byte(`{"amount":1234567890123456789}`)),
+			Expires: mpp.Expires.Minutes(5),
+		},
+		Payload: map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
+		Authorization: credential.ToAuthorization(),
+		Intent:        verifyTestIntent{},
+		Request:       map[string]any{"amount": "100"},
+		Realm:         "api.example.com",
+		SecretKey:     "secret-key",
+		Method:        "tempo",
+	})
+
+	require.NotNil(t, result)
+	require.NotNil(t, result.Challenge)
+	var paymentErr *mpp.PaymentError
+	require.ErrorAs(t, err, &paymentErr)
+	assert.Equal(t, mpp.ErrorTypeMalformedCredential, paymentErr.Type)
+	assert.Contains(t, paymentErr.Detail, "invalid echoed request")
 }
 
 func TestVerifyOrChallenge_UsesPublicBroadcastingIntent(t *testing.T) {
