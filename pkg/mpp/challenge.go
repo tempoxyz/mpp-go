@@ -310,7 +310,7 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 	if err != nil {
 		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
 	}
-	if !JSONEqual(decoded, decodedB64) {
+	if !ChallengeBoundJSONEqual(decoded, decodedB64) {
 		return nil, "", fmt.Errorf("mpp: challenge request and requestB64 do not match")
 	}
 	return decoded, requestB64, nil

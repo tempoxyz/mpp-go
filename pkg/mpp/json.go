@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/gowebpki/jcs"
 )
 
 // JSONEqual compares two JSON-like values using Go's stable JSON encoding.
@@ -28,6 +30,31 @@ func encodeStableJSON(value any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// encodeCanonicalJSON serializes a value using RFC 8785 JSON Canonicalization
+// Scheme (JCS). Challenge-bound request and opaque values use this encoding so
+// their HMAC inputs are reproducible across SDKs.
+func encodeCanonicalJSON(value any) ([]byte, error) {
+	encoded, err := encodeStableJSON(value)
+	if err != nil {
+		return nil, err
+	}
+	return jcs.Transform(encoded)
+}
+
+// ChallengeBoundJSONEqual compares values using the RFC 8785 representation
+// used to bind challenge requests and opaque values into their HMAC IDs.
+func ChallengeBoundJSONEqual(left, right any) bool {
+	leftJSON, err := encodeCanonicalJSON(left)
+	if err != nil {
+		return false
+	}
+	rightJSON, err := encodeCanonicalJSON(right)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(leftJSON, rightJSON)
 }
 
 // ExtractAuthorizationScheme returns the first authorization value that matches

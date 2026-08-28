@@ -329,7 +329,11 @@ func b64EncodeRequest(request map[string]any) string {
 	if request == nil {
 		request = map[string]any{}
 	}
-	return b64EncodeAny(request)
+	encoded, err := encodeCanonicalJSON(request)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
 func escapeQuoted(value string) string {

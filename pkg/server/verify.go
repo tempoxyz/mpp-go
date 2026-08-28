@@ -155,7 +155,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return challengeResultError(challenge, mpp.ErrInvalidChallenge(echoed.ID, "intent mismatch"))
 	}
 
-	if !mpp.JSONEqual(echoedRequest, params.Request) {
+	if !mpp.ChallengeBoundJSONEqual(echoedRequest, params.Request) {
 		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential request does not match this route's requirements",

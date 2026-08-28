@@ -281,7 +281,7 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 		if err != nil {
 			return composedEntry{}, false, err
 		}
-		if mpp.JSONEqual(echoedRequest, request) && reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
+		if mpp.ChallengeBoundJSONEqual(echoedRequest, request) && reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
 			return entry, true, nil
 		}
 	}
