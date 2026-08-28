@@ -69,6 +69,34 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 
 }
 
+func TestVerifyOrChallenge_VerifiesLargeIntegerRequest(t *testing.T) {
+	const amount int64 = 1234567890123456789
+	request := map[string]any{"amount": amount, "currency": "0xabc", "recipient": "0xdef"}
+	params := VerifyParams{
+		Intent:    verifyTestIntent{},
+		Request:   request,
+		Realm:     "api.example.com",
+		SecretKey: "secret-key",
+		Method:    "tempo",
+	}
+
+	issued, err := VerifyOrChallenge(context.Background(), params)
+	if !assert.NoError(t, err) || !assert.NotNil(t, issued.Challenge) {
+		return
+	}
+	credential := &mpp.Credential{
+		Challenge: issued.Challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	params.Authorization = credential.ToAuthorization()
+	result, err := VerifyOrChallenge(context.Background(), params)
+	if !assert.NoError(t, err) || !assert.NotNil(t, result.Receipt) {
+		return
+	}
+	assert.Equal(t, "0xreceipt", result.Receipt.Reference)
+}
+
 func TestVerifyOrChallenge_UsesPublicBroadcastingIntent(t *testing.T) {
 	request := map[string]any{"amount": "100", "currency": "0xabc", "recipient": "0xdef"}
 	challenge := mpp.NewChallenge(

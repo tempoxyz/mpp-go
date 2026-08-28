@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -598,11 +599,22 @@ func B64Decode(s string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode: %w", err)
 	}
+	m, err := decodeJSONMap(raw)
+	if err != nil {
+		return nil, fmt.Errorf("json decode: %w", err)
+	}
+	return m, nil
+}
+
+func decodeJSONMap(raw []byte) (map[string]any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var m map[string]any
 	if err := decoder.Decode(&m); err != nil {
-		return nil, fmt.Errorf("json decode: %w", err)
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("unexpected trailing data")
 	}
 	return m, nil
 }

@@ -295,8 +295,8 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 		return decoded, requestB64, nil
 	}
 
-	var request map[string]any
-	if err := json.Unmarshal(trimmed, &request); err != nil {
+	request, err := decodeJSONMap(trimmed)
+	if err != nil {
 		return nil, "", fmt.Errorf("mpp: request must be an object or base64url string: %w", err)
 	}
 	if request == nil {

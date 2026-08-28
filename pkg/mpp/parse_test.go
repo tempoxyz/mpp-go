@@ -1,6 +1,7 @@
 package mpp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -619,6 +620,14 @@ func TestB64DecodePreservesLargeIntegers(t *testing.T) {
 		assert.Equal(t, literal, fmt.Sprint(decoded["amount"]),
 			"amount %s must survive a decode without being rounded through float64", literal)
 	}
+}
+
+func TestB64DecodeRejectsTrailingJSON(t *testing.T) {
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(`{"amount":1}{"amount":2}`))
+
+	_, err := B64Decode(encoded)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected trailing data")
 }
 
 func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
