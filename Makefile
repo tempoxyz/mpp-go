@@ -3,12 +3,9 @@
 # Default target
 all: check
 
-# Builds all runnable examples
+# Builds every example package to catch compile drift in CI and locally.
 build_examples:
-	@mkdir -p bin
-	go build -o bin/charge-basic ./examples/charge-basic
-	go build -o bin/charge-hash ./examples/charge-hash
-	go build -o bin/charge-fee-payer ./examples/charge-fee-payer
+	go build ./examples/...
 
 # Cleans generated artifacts
 clean:
@@ -51,7 +48,7 @@ docs:
 # Show available targets
 help:
 	@echo "Available targets:"
-	@echo "  build_examples  Build the example binaries into ./bin"
+	@echo "  build_examples  Build all example packages (compile check)"
 	@echo "  clean           Remove build artifacts and coverage files"
 	@echo "  test            Run unit tests"
 	@echo "  test-coverage   Run unit tests with coverage report"
