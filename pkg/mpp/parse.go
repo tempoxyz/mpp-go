@@ -270,13 +270,13 @@ func FormatAuthenticateStrict(c *Challenge, realm string) (string, error) {
 	return formatAuthenticate(c, realm, true)
 }
 
-func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, error) {
+func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error) {
 	var parts []string
 	add := func(k, v string) error {
 		if v == "" {
 			return nil
 		}
-		if rejectCRLF && strings.ContainsAny(v, "\r\n") {
+		if strict && strings.ContainsAny(v, "\r\n") {
 			return fmt.Errorf("mpp: invalid %s auth-param: contains CR or LF", k)
 		}
 		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
@@ -305,6 +305,14 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 			return "", fmt.Errorf("mpp: invalid challenge request: %w", err)
 		}
 	}
+	credentialHeader := AdvertisedCredentialHeader(c.Header)
+	if strict {
+		validatedHeader, err := parseAdvertisedCredentialHeader(c.Header)
+		if err != nil {
+			return "", err
+		}
+		credentialHeader = validatedHeader
+	}
 	for _, param := range []struct {
 		key   string
 		value string
@@ -313,7 +321,7 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 		{key: "digest", value: c.Digest},
 		{key: "expires", value: c.Expires},
 		{key: "description", value: c.Description},
-		{key: "header", value: AdvertisedCredentialHeader(c.Header)},
+		{key: "header", value: credentialHeader},
 	} {
 		if err := add(param.key, param.value); err != nil {
 			return "", err
