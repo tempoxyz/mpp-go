@@ -240,14 +240,18 @@ func TestReceiptRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	receipt := Success(
+		"tempo",
 		"ref-123",
-		WithReceiptMethod("tempo"),
 		WithExternalID("ext-123"),
 		WithSubscriptionID("sub-123"),
 		WithExtra(map[string]any{"settled": true}),
 	)
 	if !assert.Equalf(t, "success", receipt.Status,
 		"receipt.Status = %q, want %q", receipt.Status, "success") {
+		return
+	}
+	if !assert.Equalf(t, "tempo", receipt.Method,
+		"receipt.Method = %q, want %q", receipt.Method, "tempo") {
 		return
 	}
 	if !assert.Equalf(t, time.UTC, receipt.Timestamp.Location(),

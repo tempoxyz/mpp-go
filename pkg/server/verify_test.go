@@ -17,7 +17,7 @@ type verifyTestIntent struct{}
 func (verifyTestIntent) Name() string { return "charge" }
 
 func (verifyTestIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
-	return mpp.Success("0xreceipt", mpp.WithReceiptMethod("tempo")), nil
+	return mpp.Success("tempo", "0xreceipt"), nil
 }
 
 func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {

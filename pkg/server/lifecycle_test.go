@@ -53,7 +53,7 @@ func (i *publicSplitTestIntent) Broadcast(
 		return nil, err
 	}
 	i.broadcastCalls++
-	return mpp.Success("0xpublic", mpp.WithReceiptMethod("tempo")), nil
+	return mpp.Success("tempo", "0xpublic"), nil
 }
 
 func (i *publicSplitTestIntent) Verify(
@@ -62,7 +62,7 @@ func (i *publicSplitTestIntent) Verify(
 	map[string]any,
 ) (*mpp.Receipt, error) {
 	i.verifyCalls++
-	return mpp.Success("0xlegacy"), nil
+	return mpp.Success("tempo", "0xlegacy"), nil
 }
 
 func (i *splitTestIntent) Name() string { return "charge" }
@@ -96,7 +96,7 @@ func (i *splitTestIntent) Broadcast(
 	if i.broadcastErr != nil {
 		return nil, i.broadcastErr
 	}
-	return mpp.Success("0xsplit", mpp.WithReceiptMethod("tempo")), nil
+	return mpp.Success("tempo", "0xsplit"), nil
 }
 
 func newSplitTestServerIntent(t *testing.T, hooks *splitTestIntent) Intent {
@@ -226,13 +226,13 @@ func TestNewIntentSynthesizesVerify(t *testing.T) {
 func TestNewIntentValidatesHookShape(t *testing.T) {
 	t.Parallel()
 	verify := func(context.Context, *mpp.Credential, map[string]any) (*mpp.Receipt, error) {
-		return mpp.Success("0xlegacy"), nil
+		return mpp.Success("tempo", "0xlegacy"), nil
 	}
 	validate := func(context.Context, *mpp.Credential, map[string]any) (*Validation, error) {
 		return &Validation{}, nil
 	}
 	broadcast := func(context.Context, *mpp.Credential, map[string]any) (*mpp.Receipt, error) {
-		return mpp.Success("0xsplit"), nil
+		return mpp.Success("tempo", "0xsplit"), nil
 	}
 	tests := []struct {
 		name      string

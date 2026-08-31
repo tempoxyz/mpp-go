@@ -407,7 +407,7 @@ func (i *Intent) broadcastCredential(
 		if !accepted {
 			return nil, mpp.ErrVerificationFailed("transaction hash already used")
 		}
-		return mpp.Success(hash, mpp.WithReceiptMethod(tempo.MethodName), mpp.WithExternalID(validated.request.ExternalID)), nil
+		return mpp.Success(tempo.MethodName, hash, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeProof:
 		challengeID := credential.Challenge.ID
 		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(challengeID), challengeID)
@@ -417,7 +417,7 @@ func (i *Intent) broadcastCredential(
 		if !accepted {
 			return nil, mpp.ErrVerificationFailed("proof credential already used")
 		}
-		return mpp.Success(challengeID, mpp.WithReceiptMethod(tempo.MethodName), mpp.WithExternalID(validated.request.ExternalID)), nil
+		return mpp.Success(tempo.MethodName, challengeID, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeTransaction:
 		return i.broadcastTransaction(ctx, credential, validated)
 	default:
@@ -578,8 +578,8 @@ func (i *Intent) broadcastTransaction(
 		}
 	}
 	return mpp.Success(
+		tempo.MethodName,
 		txHash,
-		mpp.WithReceiptMethod(tempo.MethodName),
 		mpp.WithExternalID(request.ExternalID),
 	), nil
 }
