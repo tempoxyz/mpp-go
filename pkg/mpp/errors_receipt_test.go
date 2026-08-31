@@ -403,6 +403,60 @@ func TestParsePaymentReceiptRequiresMethodAndTimestamp(t *testing.T) {
 	}
 }
 
+// TestParsePaymentReceiptPreservesMethodExtensionFields asserts that a
+// method-defined top-level receipt field survives a parse -> format round trip.
+// draft-ietf-httpauth-payment §5.3 states "Payment method specifications MAY
+// define additional fields for receipts", and the canonical mppx schema keeps
+// unknown fields rather than dropping them. originTxHash is the extension named
+// in the issue's suggested test. Refs Agricola finding AGR-2026-047.
+func TestParsePaymentReceiptPreservesMethodExtensionFields(t *testing.T) {
+	t.Parallel()
+
+	wire := b64EncodeAny(map[string]any{
+		"status":       "success",
+		"method":       "tempo",
+		"timestamp":    "2026-01-01T00:00:00Z",
+		"reference":    "ref-123",
+		"originTxHash": "0xdeadbeef",
+	})
+
+	parsed, err := ParseReceipt(wire)
+	if !assert.NoErrorf(t, err, "ParseReceipt() error = %v", err) {
+		return
+	}
+	// The extension is accessible on the parsed receipt so consumers can inspect it.
+	if !assert.Equalf(t, "0xdeadbeef", parsed.Extensions["originTxHash"],
+		"parsed.Extensions[originTxHash] = %#v, want 0xdeadbeef", parsed.Extensions["originTxHash"]) {
+		return
+	}
+	// A known base field must never leak into Extensions.
+	if !assert.NotContainsf(t, parsed.Extensions, "reference",
+		"parsed.Extensions must not contain base field reference") {
+		return
+	}
+
+	// The extension is re-emitted at the top level of the wire (not nested
+	// under "extra"), matching the canonical shape.
+	decoded, err := B64Decode(FormatReceipt(parsed))
+	if !assert.NoErrorf(t, err, "B64Decode(FormatReceipt(parsed)) error = %v", err) {
+		return
+	}
+	if !assert.Equalf(t, "0xdeadbeef", decoded["originTxHash"],
+		"formatted receipt originTxHash = %#v, want top-level 0xdeadbeef", decoded["originTxHash"]) {
+		return
+	}
+
+	// And it survives a full parse -> format -> parse round trip unchanged.
+	roundtripped, err := ParseReceipt(FormatReceipt(parsed))
+	if !assert.NoErrorf(t, err, "ParseReceipt(FormatReceipt(parsed)) error = %v", err) {
+		return
+	}
+	if !assert.Equalf(t, "0xdeadbeef", roundtripped.Extensions["originTxHash"],
+		"roundtripped.Extensions[originTxHash] = %#v, want 0xdeadbeef", roundtripped.Extensions["originTxHash"]) {
+		return
+	}
+}
+
 func TestChallengeVerifyAndToEcho(t *testing.T) {
 	t.Parallel()
 

@@ -563,6 +563,21 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 		}
 	}
 
+	// Preserve method-defined top-level extension fields. Payment method
+	// specifications MAY define additional receipt fields (draft-ietf-httpauth-payment
+	// §5.3); the canonical mppx schema keeps them across a parse/format round trip
+	// rather than dropping them. Everything outside the known base keys is retained.
+	var extensions map[string]any
+	for k, v := range data {
+		if _, known := receiptBaseFields[k]; known {
+			continue
+		}
+		if extensions == nil {
+			extensions = make(map[string]any)
+		}
+		extensions[k] = v
+	}
+
 	return &Receipt{
 		Status:         status,
 		Timestamp:      ts,
@@ -571,7 +586,21 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 		ExternalID:     externalID,
 		SubscriptionID: subscriptionID,
 		Extra:          extra,
+		Extensions:     extensions,
 	}, nil
+}
+
+// receiptBaseFields is the set of top-level Payment-Receipt keys the parser
+// maps onto named Receipt fields. Any other top-level key is a method-defined
+// extension and is preserved via Receipt.Extensions.
+var receiptBaseFields = map[string]struct{}{
+	"status":         {},
+	"timestamp":      {},
+	"reference":      {},
+	"method":         {},
+	"externalId":     {},
+	"subscriptionId": {},
+	"extra":          {},
 }
 
 // FormatPaymentReceipt formats a Receipt as a Payment-Receipt header value.
@@ -594,6 +623,15 @@ func FormatPaymentReceipt(r *Receipt) string {
 	}
 	if len(r.Extra) > 0 {
 		data["extra"] = r.Extra
+	}
+	// Re-emit method-defined extension fields at the top level, matching the
+	// canonical wire shape. Base fields always win, so reserved keys are never
+	// overwritten by an Extensions entry.
+	for k, v := range r.Extensions {
+		if _, reserved := receiptBaseFields[k]; reserved {
+			continue
+		}
+		data[k] = v
 	}
 	return b64EncodeAny(data)
 }
