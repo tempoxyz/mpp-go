@@ -33,7 +33,7 @@ type composeTestIntent struct {
 func (i composeTestIntent) Name() string { return "charge" }
 
 func (i composeTestIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
-	return mpp.Success("0xreceipt-"+i.method, mpp.WithReceiptMethod(i.method)), nil
+	return mpp.Success(i.method, "0xreceipt-"+i.method), nil
 }
 
 const (

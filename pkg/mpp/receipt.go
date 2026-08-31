@@ -27,11 +27,6 @@ type Receipt struct {
 // ReceiptOption configures optional fields when creating a Receipt.
 type ReceiptOption func(*Receipt)
 
-// WithReceiptMethod sets the payment method on a Receipt.
-func WithReceiptMethod(method string) ReceiptOption {
-	return func(r *Receipt) { r.Method = method }
-}
-
 // WithExternalID sets the external transaction ID on a Receipt.
 func WithExternalID(id string) ReceiptOption {
 	return func(r *Receipt) { r.ExternalID = id }
@@ -47,12 +42,14 @@ func WithExtra(extra map[string]any) ReceiptOption {
 	return func(r *Receipt) { r.Extra = extra }
 }
 
-// Success creates a new successful Receipt with the given reference and options.
-func Success(reference string, opts ...ReceiptOption) *Receipt {
+// Success creates a new successful Receipt with the given method, reference,
+// and options.
+func Success(method, reference string, opts ...ReceiptOption) *Receipt {
 	r := &Receipt{
 		Status:    "success",
 		Timestamp: time.Now().UTC(),
 		Reference: reference,
+		Method:    method,
 	}
 	for _, o := range opts {
 		o(r)

@@ -352,7 +352,7 @@ func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {
 		w,
 		httptest.NewRequest(http.MethodGet, "/", nil),
 		&mpp.Credential{},
-		mpp.Success("0xreceipt"),
+		mpp.Success("tempo", "0xreceipt"),
 	)
 
 	if !w.flushed {
