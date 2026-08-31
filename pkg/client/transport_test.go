@@ -744,3 +744,134 @@ func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 	}
 
 }
+
+func TestTransport_RoundTrip_AuthorizeDeclinesPayment(t *testing.T) {
+	var challenge *mpp.Challenge
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte("pay me"))
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	tr.Authorize = func(_ context.Context, _ *mpp.Challenge) error {
+		return context.Canceled
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
+	}
+
+	defer resp.Body.Close()
+	if !assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
+		"expected the original 402, got %d", resp.StatusCode) {
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !assert.Equalf(t, "pay me", string(body),
+		"expected the untouched 402 body, got %q", string(body)) {
+		return
+	}
+	if !assert.EqualValuesf(t, 0, method.calls,
+		"CreateCredential must not run after Authorize declines, got %d calls", method.calls) {
+		return
+	}
+	if !assert.EqualValuesf(t, 1, callCount,
+		"expected no retry after declined payment, got %d server calls", callCount) {
+		return
+	}
+}
+
+func TestTransport_RoundTrip_AuthorizeSeesMatchedChallenge(t *testing.T) {
+	var challenge *mpp.Challenge
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.WriteHeader(http.StatusPaymentRequired)
+			w.Write([]byte("pay me"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("paid"))
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", map[string]any{"amount": "1000"})
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	var seen *mpp.Challenge
+	tr.Authorize = func(_ context.Context, ch *mpp.Challenge) error {
+		seen = ch
+		return nil
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
+	}
+
+	defer resp.Body.Close()
+	if !assert.Equalf(t, http.StatusOK, resp.StatusCode,
+		"expected payment to proceed with an approving hook, got %d", resp.StatusCode) {
+		return
+	}
+	if !assert.NotNilf(t, seen, "Authorize was never called") {
+		return
+	}
+	if !assert.Equalf(t, challenge.ID, seen.ID,
+		"Authorize saw challenge %q, want the matched challenge %q", seen.ID, challenge.ID) {
+		return
+	}
+	if !assert.Equalf(t, "tempo", seen.Method,
+		"Authorize saw method %q, want tempo", seen.Method) {
+		return
+	}
+	if !assert.EqualValuesf(t, 1, method.calls,
+		"expected exactly one CreateCredential call, got %d", method.calls) {
+		return
+	}
+}
+
+func TestClient_WithAuthorize(t *testing.T) {
+	var challenge *mpp.Challenge
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte("pay me"))
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	c := New([]Method{method}, WithAuthorize(func(_ context.Context, _ *mpp.Challenge) error {
+		return context.Canceled
+	}))
+
+	resp, err := c.Get(context.Background(), srv.URL)
+	if !assert.NoErrorf(t, err,
+		"unexpected error: %v", err) {
+		return
+	}
+	defer resp.Body.Close()
+	if !assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
+		"expected the original 402 through Client.Do, got %d", resp.StatusCode) {
+		return
+	}
+	if !assert.EqualValuesf(t, 0, method.calls,
+		"CreateCredential must not run after WithAuthorize declines, got %d calls", method.calls) {
+		return
+	}
+}
