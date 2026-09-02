@@ -41,8 +41,13 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 }
 
 // GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID and
-// rejects request values that cannot be represented exactly by JCS.
+// rejects invalid advertised credential headers or request values that cannot
+// be represented exactly by JCS.
 func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error) {
+	header, err := parseAdvertisedCredentialHeader(opts.Header)
+	if err != nil {
+		return "", err
+	}
 	requestB64, err := b64EncodeRequestWithError(opts.Request)
 	if err != nil {
 		return "", err
@@ -64,7 +69,7 @@ func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error)
 		opts.Expires,
 		opts.Digest,
 	}
-	if header := AdvertisedCredentialHeader(opts.Header); header != "" {
+	if header != "" {
 		parts = append(parts, header)
 	}
 	parts = append(parts, opaqueB64)

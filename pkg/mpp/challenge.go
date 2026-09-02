@@ -86,8 +86,8 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 }
 
 // NewChallengeWithError creates a new Challenge with an HMAC-bound ID. It
-// rejects request values that JCS cannot represent without changing their
-// numeric value.
+// rejects invalid advertised credential headers and request values that JCS
+// cannot represent without changing their numeric value.
 func NewChallengeWithError(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) (*Challenge, error) {
 	cfg := &challengeConfig{}
 	for _, o := range opts {
