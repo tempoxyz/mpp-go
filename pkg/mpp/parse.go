@@ -14,7 +14,9 @@ import (
 const maxHeaderPayload = 16 * 1024
 
 // parseAuthParams parses a comma-separated list of key=value or key="value"
-// pairs from an auth-param list (RFC 9110 §11.2).
+// pairs from an auth-param list (RFC 9110 §11.2). Parameter names are matched
+// case-insensitively and returned lowercased, so callers look them up in lower
+// case; each name may occur only once per challenge. Values are returned as-is.
 func parseAuthParams(s string) (map[string]string, error) {
 	params := make(map[string]string)
 	for i := 0; i < len(s); {
@@ -33,6 +35,10 @@ func parseAuthParams(s string) (map[string]string, error) {
 		if key == "" {
 			return nil, fmt.Errorf("mpp: malformed auth-param")
 		}
+		// RFC 9110 §11.2 matches the auth-param name token case-insensitively.
+		// Normalize the name only: values stay verbatim, since they carry
+		// case-sensitive data such as challenge IDs and base64url payloads.
+		key = strings.ToLower(key)
 
 		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 			i++
