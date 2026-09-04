@@ -84,6 +84,62 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 
 }
 
+func TestAsInt64(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     any
+		wantValue int64
+		wantOK    bool
+		wantErr   string
+	}{
+		{name: "int", input: 42431, wantValue: 42431, wantOK: true},
+		{name: "int64", input: int64(42431), wantValue: 42431, wantOK: true},
+		{name: "whole number float", input: float64(42431), wantValue: 42431, wantOK: true},
+		{name: "fractional float", input: float64(42431.5), wantErr: "chainId must be an integer"},
+		{name: "valid string", input: "42431", wantValue: 42431, wantOK: true},
+		{name: "malformed string", input: "42431abc", wantErr: `invalid chainId "42431abc"`},
+		{name: "empty string", input: ""},
+		{name: "unsupported type", input: true},
+		{name: "nil", input: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok, err := asInt64(tt.input)
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantValue, got)
+		})
+	}
+}
+
+func TestParseChargeRequest_RejectsInvalidChainID(t *testing.T) {
+	t.Parallel()
+
+	for _, chainID := range []any{float64(42431.5), "42431abc"} {
+		input := map[string]any{
+			"amount":    "100",
+			"currency":  "0x20c0000000000000000000000000000000000001",
+			"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+			"methodDetails": map[string]any{
+				"chainId": chainID,
+			},
+		}
+
+		_, err := ParseChargeRequest(input)
+		assert.Error(t, err)
+	}
+}
+
 func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {
 	t.Parallel()
 
