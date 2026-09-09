@@ -39,6 +39,9 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	app := fiberfw.New()
 
 	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
+		if c.Get("X-Downstream-Error") != "" {
+			return c.Status(http.StatusInternalServerError).SendString("failed")
+		}
 		credential := Credential(c)
 		receipt := Receipt(c)
 		if !assert.Falsef(t, credential == nil || receipt == nil,
@@ -114,6 +117,15 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 			return
 		}
 	}
+
+	failedRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	failedRequest.Header.Set("Authorization", credential.ToAuthorization())
+	failedRequest.Header.Set("X-Downstream-Error", "true")
+	failedResponse, err := app.Test(failedRequest)
+	require.NoError(t, err)
+	defer failedResponse.Body.Close()
+	require.Equal(t, http.StatusInternalServerError, failedResponse.StatusCode)
+	assert.Empty(t, failedResponse.Header.Get(mpp.HeaderPaymentReceipt))
 
 }
 

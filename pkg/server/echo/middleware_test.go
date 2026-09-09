@@ -49,6 +49,9 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	})
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e.GET("/paid", func(c echofw.Context) error {
+		if c.Request().Header.Get("X-Downstream-Error") != "" {
+			return c.String(http.StatusInternalServerError, "failed")
+		}
 		credential := Credential(c)
 		receipt := Receipt(c)
 		if !assert.Falsef(t, credential == nil || receipt == nil,
@@ -117,6 +120,14 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
 		return
 	}
+
+	failedRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	failedRequest.Header.Set("Authorization", credential.ToAuthorization())
+	failedRequest.Header.Set("X-Downstream-Error", "true")
+	failedResponse := httptest.NewRecorder()
+	e.ServeHTTP(failedResponse, failedRequest)
+	require.Equal(t, http.StatusInternalServerError, failedResponse.Code)
+	assert.Empty(t, failedResponse.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {

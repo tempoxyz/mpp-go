@@ -61,8 +61,13 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			c.SetRequest(c.Request().WithContext(ctx))
 			c.Set(credentialKey, result.Credential)
 			c.Set(receiptKey, result.Receipt)
-			c.Response().Header().Set(mpp.HeaderPaymentReceipt, result.Receipt.ToPaymentReceipt())
-			return next(c)
+			writer, complete := server.DeferPaymentReceipt(c.Response().Writer, result.Receipt)
+			c.Response().Writer = writer
+			err = next(c)
+			if err == nil {
+				complete()
+			}
+			return err
 		}
 	}
 }

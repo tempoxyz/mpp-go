@@ -159,6 +159,39 @@ func TestGenerateChallengeIDCrossSDKCompatibilityVectors(t *testing.T) {
 	}
 }
 
+func TestGenerateChallengeIDRejectsReservedDelimiter(t *testing.T) {
+	base := GenerateChallengeIDInput{
+		SecretKey: "test-secret-key-minimum-32-byte-secret",
+		Realm:     "api.example.com",
+		Method:    "tempo",
+		Intent:    "charge",
+		Request:   map[string]any{"amount": "1"},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*GenerateChallengeIDInput)
+	}{
+		{"realm", func(in *GenerateChallengeIDInput) { in.Realm = "api|example.com" }},
+		{"method", func(in *GenerateChallengeIDInput) { in.Method = "tem|po" }},
+		{"intent", func(in *GenerateChallengeIDInput) { in.Intent = "cha|rge" }},
+		{"expires", func(in *GenerateChallengeIDInput) { in.Expires = "soon|later" }},
+		{"digest", func(in *GenerateChallengeIDInput) { in.Digest = "sha-256=a|b" }},
+		{"header", func(in *GenerateChallengeIDInput) { in.Header = "X-Payment|Authorization" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := base
+			tt.mutate(&in)
+			_, err := GenerateChallengeIDWithError(in)
+			if err == nil {
+				t.Fatal("GenerateChallengeIDWithError() error = nil")
+			}
+		})
+	}
+}
+
 func TestGenerateChallengeIDGoldenVectors(t *testing.T) {
 	t.Parallel()
 
