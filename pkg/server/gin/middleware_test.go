@@ -38,6 +38,10 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	router := ginfw.New()
 	router.GET("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
+		if c.GetHeader("X-Downstream-Error") != "" {
+			c.String(http.StatusInternalServerError, "failed")
+			return
+		}
 		credential := Credential(c)
 		receipt := Receipt(c)
 		if !assert.Falsef(t, credential == nil || receipt == nil,
@@ -98,6 +102,14 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		assert.Failf(t, "", "response body = %q, want %q", got, "did:key:z6Mkrdemo:0xreceipt")
 		return
 	}
+
+	failedRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	failedRequest.Header.Set("Authorization", credential.ToAuthorization())
+	failedRequest.Header.Set("X-Downstream-Error", "true")
+	failedResponse := httptest.NewRecorder()
+	router.ServeHTTP(failedResponse, failedRequest)
+	require.Equal(t, http.StatusInternalServerError, failedResponse.Code)
+	assert.Empty(t, failedResponse.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
 func TestChargeMiddleware_RequiresAuthUsesPaymentAuthorization(t *testing.T) {

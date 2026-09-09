@@ -363,6 +363,22 @@ func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {
 	}
 }
 
+func TestServeVerifiedOmitsReceiptFromFailedResponse(t *testing.T) {
+	w := httptest.NewRecorder()
+	serveVerified(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "failed", http.StatusInternalServerError)
+		}),
+		w,
+		httptest.NewRequest(http.MethodGet, "/", nil),
+		&mpp.Credential{},
+		mpp.Success("tempo", "0xreceipt"),
+	)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Empty(t, w.Header().Get(mpp.HeaderPaymentReceipt))
+}
+
 type optionalResponseWriter struct {
 	header  http.Header
 	body    bytes.Buffer

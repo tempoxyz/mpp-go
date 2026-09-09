@@ -41,8 +41,25 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 }
 
 // GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID and
-// rejects request values that cannot be represented exactly by JCS.
+// rejects ambiguous fields and request values that JCS cannot represent exactly.
 func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error) {
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{"realm", opts.Realm},
+		{"method", opts.Method},
+		{"intent", opts.Intent},
+		{"expires", opts.Expires},
+		{"digest", opts.Digest},
+		{"header", AdvertisedCredentialHeader(opts.Header)},
+	}
+	for _, field := range fields {
+		if strings.Contains(field.value, "|") {
+			return "", fmt.Errorf("mpp: challenge %s contains reserved delimiter", field.name)
+		}
+	}
+
 	requestB64, err := b64EncodeRequestWithError(opts.Request)
 	if err != nil {
 		return "", err

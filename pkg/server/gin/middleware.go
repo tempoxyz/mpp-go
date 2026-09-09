@@ -1,6 +1,8 @@
 package ginadapter
 
 import (
+	"net/http"
+
 	ginfw "github.com/gin-gonic/gin"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -64,7 +66,46 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		c.Request = c.Request.WithContext(ctx)
 		c.Set(credentialKey, result.Credential)
 		c.Set(receiptKey, result.Receipt)
-		c.Writer.Header().Set(mpp.HeaderPaymentReceipt, result.Receipt.ToPaymentReceipt())
+		writer := &paymentReceiptWriter{
+			ResponseWriter: c.Writer,
+			receipt:        result.Receipt.ToPaymentReceipt(),
+		}
+		c.Writer = writer
 		c.Next()
+		if !writer.Written() {
+			writer.WriteHeaderNow()
+		}
 	}
+}
+
+type paymentReceiptWriter struct {
+	ginfw.ResponseWriter
+	receipt string
+}
+
+func (w *paymentReceiptWriter) WriteHeaderNow() {
+	if w.Written() {
+		return
+	}
+	w.prepare(w.Status())
+	w.ResponseWriter.WriteHeaderNow()
+}
+
+func (w *paymentReceiptWriter) Write(body []byte) (int, error) {
+	w.WriteHeaderNow()
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *paymentReceiptWriter) WriteString(body string) (int, error) {
+	w.WriteHeaderNow()
+	return w.ResponseWriter.WriteString(body)
+}
+
+func (w *paymentReceiptWriter) prepare(status int) {
+	if status >= http.StatusBadRequest {
+		w.Header().Del(mpp.HeaderPaymentReceipt)
+		return
+	}
+	w.Header().Set("Cache-Control", "private")
+	w.Header().Set(mpp.HeaderPaymentReceipt, w.receipt)
 }

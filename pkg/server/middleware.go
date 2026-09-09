@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 
@@ -121,14 +124,74 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {
 	ctx := ContextWithPayment(r.Context(), credential, receipt)
+	wrapped, complete := DeferPaymentReceipt(w, receipt)
+	next.ServeHTTP(wrapped, r.WithContext(ctx))
+	complete()
+}
 
-	// Mark the paid response as private so shared caches never serve a
-	// Payment-Receipt to a different client. This mirrors the MPP spec
-	// (mpp.dev/protocol) and the rust reference implementation.
-	w.Header().Set("Cache-Control", "private")
-	w.Header().Set(mpp.HeaderPaymentReceipt, receipt.ToPaymentReceipt())
+// DeferPaymentReceipt returns a writer that adds the receipt only when a
+// successful response status is committed. Call complete after the handler
+// returns to commit an otherwise empty successful response.
+func DeferPaymentReceipt(w http.ResponseWriter, receipt *mpp.Receipt) (http.ResponseWriter, func()) {
+	wrapped := &paymentReceiptWriter{ResponseWriter: w, receipt: receipt.ToPaymentReceipt()}
+	return wrapped, func() {
+		if !wrapped.wroteHeader {
+			wrapped.WriteHeader(http.StatusOK)
+		}
+	}
+}
 
-	next.ServeHTTP(w, r.WithContext(ctx))
+type paymentReceiptWriter struct {
+	http.ResponseWriter
+	receipt     string
+	wroteHeader bool
+}
+
+func (w *paymentReceiptWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		w.Header().Del(mpp.HeaderPaymentReceipt)
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.wroteHeader = true
+	setPaymentReceiptForStatus(w.Header(), status, w.receipt)
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *paymentReceiptWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *paymentReceiptWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *paymentReceiptWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("http.ResponseWriter does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (w *paymentReceiptWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func setPaymentReceiptForStatus(header http.Header, status int, receipt string) {
+	if status >= http.StatusBadRequest {
+		header.Del(mpp.HeaderPaymentReceipt)
+		return
+	}
+	header.Set("Cache-Control", "private")
+	header.Set(mpp.HeaderPaymentReceipt, receipt)
 }
 
 // WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry challenge.
