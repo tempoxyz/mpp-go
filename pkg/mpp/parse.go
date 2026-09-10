@@ -264,19 +264,24 @@ func FormatAuthenticate(c *Challenge, realm string) string {
 	return header
 }
 
-// FormatAuthenticateStrict formats a Challenge as an authentication header value
-// and rejects values that cannot be safely represented in quoted auth-params.
+// FormatAuthenticateStrict formats a Challenge as an authentication header value.
+// It rejects values that cannot be safely represented in quoted auth-params, and
+// empty required auth-params (id, realm, method, intent, request), which would
+// otherwise be omitted and yield a challenge ParseChallenge rejects.
 func FormatAuthenticateStrict(c *Challenge, realm string) (string, error) {
 	return formatAuthenticate(c, realm, true)
 }
 
-func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, error) {
+func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error) {
 	var parts []string
-	add := func(k, v string) error {
+	add := func(k, v string, required bool) error {
 		if v == "" {
+			if strict && required {
+				return fmt.Errorf("mpp: missing required %s auth-param", k)
+			}
 			return nil
 		}
-		if rejectCRLF && strings.ContainsAny(v, "\r\n") {
+		if strict && strings.ContainsAny(v, "\r\n") {
 			return fmt.Errorf("mpp: invalid %s auth-param: contains CR or LF", k)
 		}
 		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
@@ -284,15 +289,16 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 	}
 
 	for _, param := range []struct {
-		key   string
-		value string
+		key      string
+		value    string
+		required bool
 	}{
-		{key: "id", value: c.ID},
-		{key: "realm", value: realm},
-		{key: "method", value: c.Method},
-		{key: "intent", value: c.Intent},
+		{key: "id", value: c.ID, required: true},
+		{key: "realm", value: realm, required: true},
+		{key: "method", value: c.Method, required: true},
+		{key: "intent", value: c.Intent, required: true},
 	} {
-		if err := add(param.key, param.value); err != nil {
+		if err := add(param.key, param.value, param.required); err != nil {
 			return "", err
 		}
 	}
@@ -306,22 +312,23 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 		}
 	}
 	for _, param := range []struct {
-		key   string
-		value string
+		key      string
+		value    string
+		required bool
 	}{
-		{key: "request", value: reqB64},
+		{key: "request", value: reqB64, required: true},
 		{key: "digest", value: c.Digest},
 		{key: "expires", value: c.Expires},
 		{key: "description", value: c.Description},
 		{key: "header", value: AdvertisedCredentialHeader(c.Header)},
 	} {
-		if err := add(param.key, param.value); err != nil {
+		if err := add(param.key, param.value, param.required); err != nil {
 			return "", err
 		}
 	}
 
 	if c.Opaque != nil {
-		if err := add("opaque", b64EncodeSortedStringMap(c.Opaque)); err != nil {
+		if err := add("opaque", b64EncodeSortedStringMap(c.Opaque), false); err != nil {
 			return "", err
 		}
 	}
