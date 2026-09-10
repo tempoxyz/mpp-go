@@ -61,15 +61,54 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 		if i < len(s) && s[i] != ',' {
 			// Legacy challenges may contain unescaped quotes in the optional
-			// description. Keep the value up to the quote and ignore the
-			// malformed, non-semantic suffix.
+			// description. Keep the value up to the quote and skip the
+			// malformed, non-semantic remainder of it. Only that value is
+			// discarded: the canonical order puts description ahead of digest,
+			// expires, header and opaque, which carry meaning.
 			if key == "description" {
-				break
+				i = resyncToNextAuthParam(s, i)
+				continue
 			}
 			return nil, fmt.Errorf("mpp: malformed auth-param separator")
 		}
 	}
 	return params, nil
+}
+
+// resyncToNextAuthParam finds where the next auth-param begins after a
+// malformed value at i, so the parameters following it are still read. It skips
+// commas that fall inside the malformed remainder rather than separating
+// parameters, and returns len(s) when nothing parseable follows.
+func resyncToNextAuthParam(s string, i int) int {
+	for i < len(s) {
+		comma := strings.IndexByte(s[i:], ',')
+		if comma < 0 {
+			return len(s)
+		}
+		i += comma + 1
+		if startsAuthParam(s, i) {
+			return i
+		}
+	}
+	return len(s)
+}
+
+// startsAuthParam reports whether s[i:] begins with a key followed by "=".
+func startsAuthParam(s string, i int) bool {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	start := i
+	for i < len(s) && isAuthParamKeyChar(s[i]) {
+		i++
+	}
+	if i == start {
+		return false
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i < len(s) && s[i] == '='
 }
 
 // SplitAuthenticate splits a potentially merged authentication header value into
