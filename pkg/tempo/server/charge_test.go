@@ -1272,8 +1272,7 @@ func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.
 	{
 
 		_, err := intent.Verify(ctx, credential, request.Map())
-		if !assert.NoErrorf(t, err,
-			"second Verify() error = %v", err) {
+		if !assert.ErrorContains(t, err, "transaction hash already used") {
 			return
 		}
 	}
@@ -1284,7 +1283,7 @@ func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.
 
 }
 
-func TestChargeFlow_TransactionCredentialRefetchesReservedHashAfterReceiptFailure(t *testing.T) {
+func TestChargeFlow_TransactionCredentialRejectsReservedHashAfterReceiptFailure(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
 	rpc := newMockRPC(request)
@@ -1340,13 +1339,12 @@ func TestChargeFlow_TransactionCredentialRefetchesReservedHashAfterReceiptFailur
 	{
 
 		_, err := intent.Verify(ctx, credential, request.Map())
-		if !assert.NoErrorf(t, err,
-			"second Verify() error = %v", err) {
+		if !assert.ErrorContains(t, err, "transaction hash already used") {
 			return
 		}
 	}
 	if !assert.Lenf(t, rpc.sentRawTxs, 1,
-		"expected retry to refetch without rebroadcast, got %d broadcasts", len(rpc.sentRawTxs)) {
+		"expected retry to fail without rebroadcast, got %d broadcasts", len(rpc.sentRawTxs)) {
 		return
 	}
 
@@ -1847,4 +1845,49 @@ func addressTopic(address string) string {
 
 func init() {
 	_, _ = temposigner.NewSigner(testPrivateKey)
+}
+
+func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
+	for _, explicitMemo := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicitMemo=%t", explicitMemo), func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			if explicitMemo {
+				request.MethodDetails.Memo = "0x" + strings.Repeat("ab", 32)
+			}
+			credential, err := newClientMethod(t, newMockRPC(request), tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			raw := credential.Payload["signature"].(string)
+			hash, err := tempotx.ComputeHash(raw)
+			require.NoError(t, err)
+			tx, err := tempotx.Deserialize(raw)
+			require.NoError(t, err)
+			sender, err := tempotx.VerifySignature(tx)
+			require.NoError(t, err)
+			store := tempo.NewMemoryStore()
+			start := make(chan struct{})
+			results := make(chan error, 8)
+			for range 8 {
+				rpc := newMockRPC(request)
+				rpc.receipts[hash.Hex()] = buildReceipt(raw, request, sender)
+				intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
+				require.NoError(t, err)
+				go func() {
+					<-start
+					_, err := intent.Verify(ctx, credential, request.Map())
+					results <- err
+				}()
+			}
+			close(start)
+			successes := 0
+			for range 8 {
+				if err := <-results; err == nil {
+					successes++
+				} else {
+					assert.ErrorContains(t, err, "transaction hash already used")
+				}
+			}
+			assert.Equal(t, 1, successes)
+		})
+	}
 }

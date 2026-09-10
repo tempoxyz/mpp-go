@@ -529,36 +529,30 @@ func (i *Intent) broadcastTransaction(
 	}
 
 	reservedHash := ""
-	txHash := ""
-	shouldBroadcast := true
 	if !request.MethodDetails.FeePayer {
 		computedHash, err := tempotx.ComputeHash(serialized)
 		if err != nil {
 			return nil, mpp.ErrVerificationFailed("failed to compute transaction hash")
 		}
 		reservedHash = computedHash.Hex()
-		txHash = reservedHash
 		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(reservedHash), reservedHash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
-			shouldBroadcast = false
+			return nil, mpp.ErrVerificationFailed("transaction hash already used")
 		}
 	}
 
-	if shouldBroadcast {
-		if request.MethodDetails.FeePayer {
-			releaseSponsoredClaim = false
+	if request.MethodDetails.FeePayer {
+		releaseSponsoredClaim = false
+	}
+	txHash, err := rpc.SendRawTransaction(ctx, serialized)
+	if err != nil {
+		if reservedHash != "" {
+			_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
 		}
-		var err error
-		txHash, err = rpc.SendRawTransaction(ctx, serialized)
-		if err != nil {
-			if reservedHash != "" {
-				_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
-			}
-			return nil, mpp.ErrVerificationFailed("transaction submission failed")
-		}
+		return nil, mpp.ErrVerificationFailed("transaction submission failed")
 	}
 
 	receiptMap, err := fetchReceipt(ctx, rpc, txHash)
