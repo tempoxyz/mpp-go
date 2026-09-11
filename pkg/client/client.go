@@ -45,6 +45,7 @@ type Client struct {
 	methods            []Method
 	httpClient         *http.Client
 	paymentPreferences PaymentPreferences
+	authorize          func(ctx context.Context, challenge *mpp.Challenge) error
 }
 
 // Option configures the Client.
@@ -63,6 +64,13 @@ func WithHTTPClient(c *http.Client) Option {
 func WithPaymentPreferences(preferences PaymentPreferences) Option {
 	return func(c *Client) {
 		c.paymentPreferences = clonePaymentPreferences(preferences)
+	}
+}
+
+// WithAuthorize sets a hook consulted before each payment; see Transport.Authorize.
+func WithAuthorize(fn func(ctx context.Context, challenge *mpp.Challenge) error) Option {
+	return func(cl *Client) {
+		cl.authorize = fn
 	}
 }
 
@@ -90,6 +98,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	req = req.WithContext(withPaymentOrigin(req.Context(), origin))
 
 	transport := NewTransport(c.methods, inner, WithTransportPaymentPreferences(c.paymentPreferences))
+	transport.Authorize = c.authorize
 
 	// Use a copy of the http.Client with our payment-aware transport.
 	hc := *c.httpClient
