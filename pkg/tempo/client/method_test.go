@@ -40,7 +40,7 @@ func (m *mockRPC) GetTransactionCount(context.Context, string) (uint64, error) {
 
 func (m *mockRPC) SendRawTransaction(_ context.Context, serialized string) (string, error) {
 	m.sentRawTxs = append(m.sentRawTxs, serialized)
-	return "0xabc123", nil
+	return "0x2120c5a4e1f6b7d9c3a8e2f4b6d8a0c2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4", nil
 }
 
 func (m *mockRPC) SendRequest(_ context.Context, method string, _ ...interface{}) (*temporpc.JSONRPCResponse, error) {
@@ -187,7 +187,7 @@ func TestCreateCredentialHashWithExplicitMemo(t *testing.T) {
 		return
 	}
 	if !assert.Equal(t, tempo.CredentialTypeHash, payload.Type) ||
-		!assert.Equal(t, "0xabc123", payload.Hash) ||
+		!assert.Equal(t, "0x2120c5a4e1f6b7d9c3a8e2f4b6d8a0c2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4", payload.Hash) ||
 		!assert.Len(t, rpc.sentRawTxs, 1) {
 		return
 	}
