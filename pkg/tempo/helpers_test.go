@@ -1,12 +1,14 @@
 package tempo
 
 import (
+	"encoding/json"
 	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
@@ -82,6 +84,60 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 		return
 	}
 
+}
+
+func TestParseChargeRequest_KeepsChainIDFromWireChallenge(t *testing.T) {
+	t.Parallel()
+
+	request, err := NormalizeChargeRequest(ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  "0x20c0000000000000000000000000000000000001",
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Decimals:  6,
+		ChainID:   42431,
+	})
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
+	}
+
+	// Challenge JSON is decoded with json.Number, so the chainId a client or
+	// relay sees after parsing the header is not the int64 Map() produced.
+	issued := mpp.NewChallenge("secret", "api.example.com", MethodName, IntentCharge, request.Map())
+	received, err := mpp.ParseChallenge(issued.ToAuthenticate("api.example.com"))
+	if !assert.NoErrorf(t, err,
+		"ParseChallenge() error = %v", err) {
+		return
+	}
+	if _, ok := received.Request["methodDetails"].(map[string]any)["chainId"].(json.Number); !assert.True(t, ok,
+		"wire chainId should decode as json.Number") {
+		return
+	}
+
+	parsed, err := ParseChargeRequest(received.Request)
+	if !assert.NoErrorf(t, err,
+		"ParseChargeRequest() error = %v", err) {
+		return
+	}
+	if !assert.NotNil(t, parsed.MethodDetails.ChainID,
+		"ParseChargeRequest() dropped methodDetails.chainId from the wire challenge") {
+		return
+	}
+	assert.Equal(t, int64(42431), *parsed.MethodDetails.ChainID)
+}
+
+func TestParseChargeRequest_RejectsNonIntegerJSONNumberChainID(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseChargeRequest(map[string]any{
+		"amount":    "500000",
+		"currency":  "0x20c0000000000000000000000000000000000001",
+		"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		"methodDetails": map[string]any{
+			"chainId": json.Number("1.5"),
+		},
+	})
+	assert.ErrorContains(t, err, "invalid chainId")
 }
 
 func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {

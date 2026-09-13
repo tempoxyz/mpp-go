@@ -256,6 +256,38 @@ func TestCreateCredentialRejectsUnknownChallengeChainWithoutRPC(t *testing.T) {
 
 }
 
+func TestCreateCredentialRejectsWireChallengeChainConflict(t *testing.T) {
+	t.Parallel()
+
+	method, err := New(Config{
+		ChainID:    42431,
+		PrivateKey: testPrivateKey,
+		RPC:        &mockRPC{chainID: 42431},
+	})
+	if !assert.NoErrorf(t, err,
+		"New() error = %v", err) {
+		return
+	}
+
+	// Round-trip the challenge through the WWW-Authenticate header so the
+	// chainId arrives the way a real client sees it (json.Number, not int64).
+	issued := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   1,
+	})
+	challenge, err := mpp.ParseChallenge(issued.ToAuthenticate(testRealm))
+	if !assert.NoErrorf(t, err,
+		"ParseChallenge() error = %v", err) {
+		return
+	}
+
+	_, err = method.CreateCredential(context.Background(), challenge)
+	assert.ErrorContains(t, err, "challenge chain id mismatch")
+}
+
 func buildChallenge(t *testing.T, params tempo.ChargeRequestParams) *mpp.Challenge {
 	t.Helper()
 
