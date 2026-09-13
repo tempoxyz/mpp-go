@@ -2,6 +2,7 @@ package tempo
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -424,6 +425,14 @@ func asInt64(value any) (int64, bool, error) {
 			return 0, false, fmt.Errorf("tempo: chainId must be an integer")
 		}
 		return int64(typed), true, nil
+	case json.Number:
+		// Decoded challenge JSON keeps numbers as json.Number (see
+		// mpp.B64Decode), so this is the type every wire-parsed chainId has.
+		result, err := typed.Int64()
+		if err != nil {
+			return 0, false, fmt.Errorf("tempo: invalid chainId %q", typed.String())
+		}
+		return result, true, nil
 	case string:
 		if typed == "" {
 			return 0, false, nil

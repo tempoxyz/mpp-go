@@ -1,6 +1,7 @@
 package mpp
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -142,6 +143,12 @@ func toInt(v any) (int, error) {
 			return 0, fmt.Errorf("non-integer float64: %v", n)
 		}
 		return int(n), nil
+	case json.Number:
+		parsed, err := n.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("non-integer json.Number: %v", n)
+		}
+		return int(parsed), nil
 	default:
 		return 0, fmt.Errorf("unsupported type %T", v)
 	}
