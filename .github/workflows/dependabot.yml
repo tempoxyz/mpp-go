@@ -16,6 +16,8 @@ jobs:
     outputs:
       updated: ${{ steps.changelog.outputs.updated }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Add changelog for Go updates
         id: changelog
         shell: bash
