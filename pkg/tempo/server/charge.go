@@ -285,9 +285,7 @@ func (i *Intent) validateHash(
 	if err != nil {
 		return err
 	}
-	// Explicit memos are application-provided correlation values. Receipt
-	// matching requires their exact value; generated attribution memos provide
-	// challenge binding when the application does not provide one.
+	// The primary transfer must carry a challenge-bound attribution memo.
 	if !receiptMatches(receiptMap, credential, request, source.address) {
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
@@ -907,11 +905,6 @@ type decodedTransfer struct {
 func expectedTransfers(request tempo.ChargeRequest) []expectedTransfer {
 	transfers := make([]expectedTransfer, 0, len(request.MethodDetails.Splits)+1)
 	primaryAmount, _ := new(big.Int).SetString(request.Amount, 10)
-	if request.MethodDetails.Memo != "" {
-		// memo assigned after split subtraction below
-	} else {
-		// attribution assigned after split subtraction below
-	}
 	for _, split := range request.MethodDetails.Splits {
 		splitAmount, ok := new(big.Int).SetString(split.Amount, 10)
 		if ok {
@@ -925,11 +918,10 @@ func expectedTransfers(request tempo.ChargeRequest) []expectedTransfer {
 		}
 		transfers = append(transfers, splitTransfer)
 	}
-	primary := expectedTransfer{amount: primaryAmount.String(), recipient: request.Recipient}
-	if request.MethodDetails.Memo != "" {
-		primary.memo = request.MethodDetails.Memo
-	} else {
-		primary.requireAttribution = true
+	primary := expectedTransfer{
+		amount:             primaryAmount.String(),
+		recipient:          request.Recipient,
+		requireAttribution: true,
 	}
 	return append([]expectedTransfer{primary}, transfers...)
 }

@@ -54,11 +54,7 @@ func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challen
 	if !strings.EqualFold(toAddress, request.Recipient) || amount.String() != request.Amount {
 		return false
 	}
-	expectedMemo := request.MethodDetails.Memo
 	memo := "0x" + dataHex[136:200]
-	if expectedMemo != "" {
-		return strings.EqualFold(memo, expectedMemo)
-	}
 	return VerifyAttributionServer(memo, realm) && VerifyAttributionChallenge(memo, challengeID)
 }
 
