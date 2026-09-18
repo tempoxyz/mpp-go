@@ -58,7 +58,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		c.Locals(credentialKey, result.Credential)
 		c.Locals(receiptKey, result.Receipt)
 		err = c.Next()
-		if err != nil || c.Response().StatusCode() >= fiberfw.StatusBadRequest {
+		if err != nil || c.Response().StatusCode() < fiberfw.StatusOK || c.Response().StatusCode() >= fiberfw.StatusMultipleChoices {
 			c.Response().Header.Del(mpp.HeaderPaymentReceipt)
 			return err
 		}

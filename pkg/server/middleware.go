@@ -130,7 +130,7 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 }
 
 // DeferPaymentReceipt returns a writer that adds the receipt only when a
-// successful response status is committed. Call complete after the handler
+// 2xx response status is committed. Call complete after the handler
 // returns to commit an otherwise empty successful response.
 func DeferPaymentReceipt(w http.ResponseWriter, receipt *mpp.Receipt) (http.ResponseWriter, func()) {
 	wrapped := &paymentReceiptWriter{ResponseWriter: w, receipt: receipt.ToPaymentReceipt()}
@@ -186,7 +186,7 @@ func (w *paymentReceiptWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func (w *paymentReceiptWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func setPaymentReceiptForStatus(header http.Header, status int, receipt string) {
-	if status >= http.StatusBadRequest {
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		header.Del(mpp.HeaderPaymentReceipt)
 		return
 	}
