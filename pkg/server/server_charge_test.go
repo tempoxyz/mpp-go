@@ -29,7 +29,6 @@ func TestMppCharge_UsesMetaAsChallengeMeta(t *testing.T) {
 		ExternalID: "ext-123",
 		FeePayer:   true,
 		ChainID:    42431,
-		Memo:       "0x" + strings.Repeat("ab", 32),
 		Meta:       map[string]string{"trace": "abc123"},
 	})
 	if !assert.NoErrorf(t, err,
@@ -64,10 +63,7 @@ func TestMppCharge_UsesMetaAsChallengeMeta(t *testing.T) {
 		"result.Challenge.Request[chainId] = %#v, want %d", result.Challenge.Request["chainId"], 42431) {
 		return
 	}
-	if !assert.Equalf(t, "0x"+strings.Repeat("ab", 32), result.Challenge.Request["memo"],
-		"result.Challenge.Request[memo] = %#v", result.Challenge.Request["memo"]) {
-		return
-	}
+	assert.NotContains(t, result.Challenge.Request, "memo")
 
 }
 

@@ -287,8 +287,6 @@ type ChargeParams struct {
 	Expires string
 	// Description is exposed in the server-generated Challenge.
 	Description string
-	// Memo sets a Tempo transfer memo when the method supports it.
-	Memo string
 	// Splits adds Tempo split-payment transfers under methodDetails.splits.
 	Splits []tempo.SplitParams
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
@@ -345,9 +343,6 @@ func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
 	}
 	if params.ChainID != 0 {
 		request["chainId"] = params.ChainID
-	}
-	if params.Memo != "" {
-		request["memo"] = params.Memo
 	}
 	applyMppxScope(request, params.MppxScope)
 	return request, nil
