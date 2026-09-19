@@ -52,6 +52,9 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		if c.Request().Header.Get("X-Downstream-Error") != "" {
 			return c.String(http.StatusInternalServerError, "failed")
 		}
+		if c.Request().Header.Get("X-Downstream-Redirect") != "" {
+			return c.Redirect(http.StatusFound, "/elsewhere")
+		}
 		credential := Credential(c)
 		receipt := Receipt(c)
 		if !assert.Falsef(t, credential == nil || receipt == nil,
@@ -128,6 +131,15 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	e.ServeHTTP(failedResponse, failedRequest)
 	require.Equal(t, http.StatusInternalServerError, failedResponse.Code)
 	assert.Empty(t, failedResponse.Header().Get(mpp.HeaderPaymentReceipt))
+
+	redirectRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	redirectRequest.Header.Set("Authorization", credential.ToAuthorization())
+	redirectRequest.Header.Set("X-Downstream-Redirect", "true")
+	redirectResponse := httptest.NewRecorder()
+	e.ServeHTTP(redirectResponse, redirectRequest)
+	require.Equal(t, http.StatusFound, redirectResponse.Code)
+	assert.Equal(t, "/elsewhere", redirectResponse.Header().Get("Location"))
+	assert.Empty(t, redirectResponse.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
 func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
