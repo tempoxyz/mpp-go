@@ -22,8 +22,6 @@ type Config struct {
 	FeePayer bool
 	// FeePayerURL points at a remote co-signer when the server does not sign locally.
 	FeePayerURL string
-	// Memo overrides the default attribution memo generation.
-	Memo string
 	// SupportedModes limits the credential submission modes advertised to clients.
 	SupportedModes []tempo.ChargeMode
 	// RPC overrides the Tempo JSON-RPC client used for verification.
@@ -54,7 +52,6 @@ func MethodFromConfig(config Config) (*Method, error) {
 		ChainID:        config.ChainID,
 		FeePayer:       config.FeePayer,
 		FeePayerURL:    config.FeePayerURL,
-		Memo:           config.Memo,
 		SupportedModes: append([]tempo.ChargeMode(nil), config.SupportedModes...),
 	}
 	if methodConfig.Intent == nil {

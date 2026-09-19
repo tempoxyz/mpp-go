@@ -153,10 +153,7 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
 	}
 
-	memo := request.MethodDetails.Memo
-	if memo == "" {
-		memo = tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
-	}
+	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 
 	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, int64(chainID))
 	if err != nil {
