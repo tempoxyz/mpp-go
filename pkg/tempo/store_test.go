@@ -147,9 +147,9 @@ func TestStoreKeys(t *testing.T) {
 			want: "mppx:charge:proof:challenge-1",
 		},
 		{
-			name: "sponsored key prefixes challenge id",
-			got:  ChargeSponsoredChallengeStoreKey("challenge-1"),
-			want: "mppx:charge:sponsor:challenge-1",
+			name: "sponsored key lowercases transaction hash",
+			got:  ChargeSponsoredTransactionStoreKey("0xABC123"),
+			want: "mppx:charge:sponsor:0xabc123",
 		},
 	}
 

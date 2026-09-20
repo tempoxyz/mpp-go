@@ -449,17 +449,22 @@ func (i *Intent) broadcastTransaction(
 		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
 			return nil, err
 		}
-		sponsoredClaimKey = tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)
-		accepted, err := i.store.PutIfAbsent(
-			ctx,
-			sponsoredClaimKey,
-			credential.Challenge.ID,
-		)
+		// Reserve the payer-signed envelope rather than the challenge ID: the
+		// ID is a deterministic HMAC over the challenge fields, so distinct
+		// payers presented the same challenge (identical route, request and
+		// millisecond expiry) must not lock each other out. Byte-identical
+		// resubmissions still collide here before any co-signing happens.
+		clientTxHash, err := credentialTransactionHash(validated.payload.Signature)
+		if err != nil {
+			return nil, mpp.ErrMalformedCredential("failed to decode fee payer transaction")
+		}
+		sponsoredClaimKey = tempo.ChargeSponsoredTransactionStoreKey(clientTxHash)
+		accepted, err := i.store.PutIfAbsent(ctx, sponsoredClaimKey, clientTxHash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
+			return nil, mpp.ErrVerificationFailed("sponsored transaction already used")
 		}
 		releaseSponsoredClaim = true
 		requestFeeToken := common.HexToAddress(request.Currency)
@@ -630,6 +635,16 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 // envelope (0x76) and the fee-payer signing form (0x78). tempo-go v0.5 only
 // decodes 0x76, so the 0x78 body is validated and converted to the equivalent
 // awaiting-fee-payer shape before delegating the remaining decoding.
+// credentialTransactionHash returns the keccak256 hash of a hex-encoded
+// transaction credential, independent of its 0x prefix or hex casing.
+func credentialTransactionHash(serialized string) (string, error) {
+	encoded, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(serialized, "0x"), "0X"))
+	if err != nil {
+		return "", fmt.Errorf("decode transaction: %w", err)
+	}
+	return crypto.Keccak256Hash(encoded).Hex(), nil
+}
+
 func deserializeTransactionCredential(serialized string) (*tempotx.Tx, bool, error) {
 	hexValue := serialized
 	if strings.HasPrefix(hexValue, "0x") || strings.HasPrefix(hexValue, "0X") {
