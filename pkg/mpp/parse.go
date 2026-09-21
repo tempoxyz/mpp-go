@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // maxHeaderPayload is the maximum accepted header payload size (16 KB).
@@ -208,21 +211,57 @@ func readAuthParamValue(input string, start int) (string, int, error) {
 
 func readQuotedAuthParamValue(input string, start int) (string, int, error) {
 	var builder strings.Builder
-	escaped := false
-	for i := start; i < len(input); i++ {
-		switch ch := input[i]; {
-		case escaped:
-			builder.WriteByte(ch)
-			escaped = false
-		case ch == '\\':
-			escaped = true
-		case ch == '"':
+	for i := start; i < len(input); {
+		switch ch := input[i]; ch {
+		case '\\':
+			i++
+			if i >= len(input) {
+				return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+			}
+			if r, next, ok := readUnicodeEscape(input, i); ok {
+				builder.WriteRune(r)
+				i = next
+				continue
+			}
+			builder.WriteByte(input[i])
+			i++
+		case '"':
 			return builder.String(), i + 1, nil
 		default:
 			builder.WriteByte(ch)
+			i++
 		}
 	}
 	return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+}
+
+func readUnicodeEscape(input string, i int) (rune, int, bool) {
+	unit, next, ok := readEscapedCodeUnit(input, i)
+	if !ok {
+		return 0, 0, false
+	}
+	if !utf16.IsSurrogate(rune(unit)) {
+		return rune(unit), next, true
+	}
+	if next < len(input) && input[next] == '\\' {
+		if low, after, ok := readEscapedCodeUnit(input, next+1); ok {
+			if r := utf16.DecodeRune(rune(unit), rune(low)); r != utf8.RuneError {
+				return r, after, true
+			}
+		}
+	}
+	return utf8.RuneError, next, true
+}
+
+func readEscapedCodeUnit(input string, i int) (uint16, int, bool) {
+	if i >= len(input) || input[i] != 'u' || i+5 > len(input) {
+		return 0, 0, false
+	}
+	value, err := strconv.ParseUint(input[i+1:i+5], 16, 16)
+	if err != nil {
+		return 0, 0, false
+	}
+	return uint16(value), i + 5, true
 }
 
 // ParseChallenge parses a Payment challenge from a WWW-Authenticate header value.
@@ -365,7 +404,11 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 		}
 	}
 
-	return SchemePayment + " " + strings.Join(parts, ", "), nil
+	header := SchemePayment + " " + strings.Join(parts, ", ")
+	if len(header) > maxHeaderPayload {
+		return "", fmt.Errorf("mpp: WWW-Authenticate header exceeds maximum size")
+	}
+	return header, nil
 }
 
 func b64EncodeRequest(request map[string]any) string {
@@ -388,8 +431,33 @@ func escapeQuoted(value string) string {
 	// Strip CR and LF unconditionally so the non-strict FormatAuthenticate can
 	// never emit a header value that splits the HTTP response. FormatAuthenticateStrict
 	// rejects such values earlier with an error; this keeps the default path safe too.
-	value = strings.NewReplacer("\r", "", "\n", "").Replace(value)
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
+	var builder strings.Builder
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			builder.WriteByte(value[0])
+			value = value[1:]
+			continue
+		}
+		value = value[size:]
+		switch r {
+		case '\r', '\n':
+			continue
+		case '\\':
+			builder.WriteString(`\\`)
+		case '"':
+			builder.WriteString(`\"`)
+		default:
+			if r <= 0xff {
+				builder.WriteRune(r)
+				continue
+			}
+			for _, unit := range utf16.Encode([]rune{r}) {
+				fmt.Fprintf(&builder, `\u%04x`, unit)
+			}
+		}
+	}
+	return builder.String()
 }
 
 // ParseCredential parses a Payment credential from an Authorization header value.
