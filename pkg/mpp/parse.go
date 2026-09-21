@@ -365,7 +365,11 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 		}
 	}
 
-	return SchemePayment + " " + strings.Join(parts, ", "), nil
+	header := SchemePayment + " " + strings.Join(parts, ", ")
+	if len(header) > maxHeaderPayload {
+		return "", fmt.Errorf("mpp: WWW-Authenticate header exceeds maximum size")
+	}
+	return header, nil
 }
 
 func b64EncodeRequest(request map[string]any) string {
@@ -389,7 +393,14 @@ func escapeQuoted(value string) string {
 	// never emit a header value that splits the HTTP response. FormatAuthenticateStrict
 	// rejects such values earlier with an error; this keeps the default path safe too.
 	var builder strings.Builder
-	for _, r := range value {
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			builder.WriteByte(value[0])
+			value = value[1:]
+			continue
+		}
+		value = value[size:]
 		switch r {
 		case '\r', '\n':
 			continue
