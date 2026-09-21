@@ -209,6 +209,97 @@ func TestFormatAuthenticateStrict(t *testing.T) {
 	assert.Contains(t, got, `description="Pay \"premium\" path C:\\tempo\\api"`)
 }
 
+func TestFormatAuthenticateEscapesUnicodeAsUTF16(t *testing.T) {
+	t.Parallel()
+
+	challenge := NewChallenge(
+		"secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "100"},
+		WithDescription("Payment — coffee ☕ 😀"),
+	)
+
+	header, err := challenge.ToAuthenticateStrict("api.example.com")
+	require.NoError(t, err)
+	assert.Contains(t, header, `description="Payment \u2014 coffee \u2615 \ud83d\ude00"`)
+
+	parsed, err := ParseChallenge(header)
+	require.NoError(t, err)
+	assert.Equal(t, challenge.Description, parsed.Description)
+}
+
+func TestFormatAuthenticatePreservesRawLatin1Bytes(t *testing.T) {
+	t.Parallel()
+
+	description := string([]byte{'c', 'a', 'f', 0xe9})
+	challenge := NewChallenge(
+		"secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "100"},
+		WithDescription(description),
+	)
+
+	header, err := challenge.ToAuthenticateStrict("api.example.com")
+	require.NoError(t, err)
+	assert.Contains(t, header, `description="`+description+`"`)
+
+	parsed, err := ParseChallenge(header)
+	require.NoError(t, err)
+	assert.Equal(t, description, parsed.Description)
+}
+
+func TestFormatAuthenticateRejectsExpandedHeaderAboveLimit(t *testing.T) {
+	t.Parallel()
+
+	challenge := NewChallenge(
+		"secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "100"},
+		WithDescription(strings.Repeat("😀", 1400)),
+	)
+
+	header, err := challenge.ToAuthenticateStrict("api.example.com")
+	require.ErrorContains(t, err, "exceeds maximum size")
+	assert.Empty(t, header)
+	assert.Empty(t, challenge.ToAuthenticate("api.example.com"))
+}
+
+func TestParseChallengeDecodesUnicodeEscapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		escaped string
+		want    string
+	}{
+		{name: "bmp", escaped: `em dash \u2014 and coffee \u2615`, want: "em dash — and coffee ☕"},
+		{name: "astral", escaped: `grinning \ud83d\ude00 face`, want: "grinning 😀 face"},
+		{name: "raw latin-1", escaped: "café naïve", want: "café naïve"},
+		{name: "lone high surrogate", escaped: `lone \ud83d here`, want: "lone \uFFFD here"},
+		{name: "lone low surrogate", escaped: `lone \ude00 here`, want: "lone \uFFFD here"},
+		{name: "doubled backslash", escaped: `not an escape \\u2014`, want: `not an escape \u2014`},
+		{name: "truncated escape", escaped: `short \u12 tail`, want: "short u12 tail"},
+		{name: "ASCII escape", escaped: `api\u0061`, want: "apia"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			header := `Payment id="ch_1", realm="api.example.com", method="tempo", intent="charge", ` +
+				`request="eyJhbW91bnQiOiIxMDAifQ", description="` + tt.escaped + `"`
+			got, err := ParseChallenge(header)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.Description)
+		})
+	}
+}
+
 func TestFormatAuthenticateStrictRejectsLossyJCSRequest(t *testing.T) {
 	t.Parallel()
 
