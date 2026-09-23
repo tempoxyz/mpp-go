@@ -241,9 +241,9 @@ func ParseChargeCredentialPayload(input map[string]any) (ChargeCredentialPayload
 	typeValue := CredentialType(asString(input["type"]))
 	switch typeValue {
 	case CredentialTypeHash:
-		hash := asString(input["hash"])
-		if hash == "" {
-			return ChargeCredentialPayload{}, fmt.Errorf("tempo: hash credential payload is missing hash")
+		hash, err := normalizeTransactionHash(asString(input["hash"]))
+		if err != nil {
+			return ChargeCredentialPayload{}, err
 		}
 		return ChargeCredentialPayload{Type: typeValue, Hash: hash}, nil
 	case CredentialTypeTransaction:
@@ -387,6 +387,25 @@ func parseUnitsString(value string, decimals int) (string, error) {
 		return "0", nil
 	}
 	return combined, nil
+}
+
+// normalizeTransactionHash canonicalizes a transaction hash to 0x-prefixed
+// lowercase hex. Nodes resolve `0xH`, `H` and mixed-case spellings to the
+// same transaction, so the replay-protection key has to be derived from one
+// canonical form rather than the string the client sent.
+func normalizeTransactionHash(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("tempo: hash credential payload is missing hash")
+	}
+	if len(raw) >= 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X') {
+		raw = raw[2:]
+	}
+	decoded, err := hex.DecodeString(raw)
+	if err != nil || len(decoded) != common.HashLength {
+		return "", fmt.Errorf("tempo: hash credential payload has an invalid transaction hash")
+	}
+	return common.BytesToHash(decoded).Hex(), nil
 }
 
 func asString(value any) string {

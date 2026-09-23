@@ -234,6 +234,28 @@ func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
 
 }
 
+func TestParseChargeCredentialPayload_CanonicalizesHash(t *testing.T) {
+	t.Parallel()
+
+	canonical := "0x2120c5a4e1f6b7d9c3a8e2f4b6d8a0c2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4"
+	for _, spelling := range []string{
+		canonical,
+		strings.TrimPrefix(canonical, "0x"),
+		"0X" + strings.ToUpper(strings.TrimPrefix(canonical, "0x")),
+		"  " + canonical + "  ",
+	} {
+		payload, err := ParseChargeCredentialPayload(map[string]any{"type": "hash", "hash": spelling})
+		if !assert.NoErrorf(t, err,
+			"ParseChargeCredentialPayload(%q) error = %v", spelling, err) {
+			continue
+		}
+		assert.Equalf(t, canonical, payload.Hash,
+			"ParseChargeCredentialPayload(%q).Hash", spelling)
+		assert.Equalf(t, ChargeStoreKey(canonical), ChargeStoreKey(payload.Hash),
+			"store key for %q", spelling)
+	}
+}
+
 func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
 	t.Parallel()
 
@@ -245,8 +267,8 @@ func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
 	}{
 		{
 			name:  "hash payload",
-			input: map[string]any{"type": "hash", "hash": "0xabc123"},
-			want:  ChargeCredentialPayload{Type: CredentialTypeHash, Hash: "0xabc123"},
+			input: map[string]any{"type": "hash", "hash": "0x2120c5a4e1f6b7d9c3a8e2f4b6d8a0c2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4"},
+			want:  ChargeCredentialPayload{Type: CredentialTypeHash, Hash: "0x2120c5a4e1f6b7d9c3a8e2f4b6d8a0c2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4"},
 		},
 		{
 			name:  "transaction payload",
@@ -262,6 +284,16 @@ func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
 			name:    "missing hash",
 			input:   map[string]any{"type": "hash"},
 			wantErr: "missing hash",
+		},
+		{
+			name:    "hash too short",
+			input:   map[string]any{"type": "hash", "hash": "0xabc123"},
+			wantErr: "invalid transaction hash",
+		},
+		{
+			name:    "hash not hex",
+			input:   map[string]any{"type": "hash", "hash": "0x" + strings.Repeat("zz", 32)},
+			wantErr: "invalid transaction hash",
 		},
 		{
 			name:    "unsupported type",

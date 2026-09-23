@@ -37,7 +37,7 @@ const (
 	testCurrency    = "0x20c0000000000000000000000000000000000001"
 	testRecipient   = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
 	testRealm       = "api.example.com"
-	testReceiptHash = "0xabc123"
+	testReceiptHash = "0x2120c5a4e1f6b7d9c3a8e2f4b6d8a0c2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4"
 )
 
 func TestDecodeCallTransferRejectsPaddedCalldata(t *testing.T) {
@@ -1093,6 +1093,56 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
 		assert.Failf(t, "", "Verify() error = %v", err)
 		return
+	}
+}
+
+func TestChargeFlow_HashCredentialRejectsReplayWithAlternateSpelling(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:         "0.50",
+		Currency:       testCurrency,
+		Recipient:      testRecipient,
+		Decimals:       6,
+		ChainID:        42431,
+		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+	})
+	if !assert.NoErrorf(t, err,
+		"NormalizeChargeRequest() error = %v", err) {
+		return
+	}
+
+	rpc := newMockRPC(request)
+	// Nodes look receipts up by value, so every spelling of the hash resolves
+	// to the same receipt; the replay key must not depend on the spelling.
+	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		normalized := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(hash, "0x"), "0X"))
+		return &temporpc.JSONRPCResponse{Result: rpc.receipts["0x"+normalized]}, nil
+	}
+	challenge := buildChallenge(t, request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, challenge)
+	if !assert.NoErrorf(t, err,
+		"CreateCredential() error = %v", err) {
+		return
+	}
+
+	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	if !assert.NoErrorf(t, err,
+		"NewIntent() error = %v", err) {
+		return
+	}
+	if _, err := intent.Verify(ctx, credential, request.Map()); err != nil {
+		assert.Failf(t, "", "Verify() error = %v", err)
+		return
+	}
+
+	for name, spelling := range map[string]string{
+		"unprefixed": strings.TrimPrefix(testReceiptHash, "0x"),
+		"uppercase":  "0X" + strings.ToUpper(strings.TrimPrefix(testReceiptHash, "0x")),
+	} {
+		replay := *credential
+		replay.Payload = map[string]any{"type": "hash", "hash": spelling}
+		_, err := intent.Verify(ctx, &replay, request.Map())
+		assert.ErrorContainsf(t, err, "already used", "%s replay should be rejected", name)
 	}
 }
 
