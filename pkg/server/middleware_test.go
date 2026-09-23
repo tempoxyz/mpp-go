@@ -232,6 +232,61 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	assert.Equal(t, originalBody, string(body))
 }
 
+type invalidPayloadMethod struct{}
+
+func (invalidPayloadMethod) Name() string { return "tempo" }
+
+func (invalidPayloadMethod) Intents() map[string]Intent {
+	return map[string]Intent{"charge": invalidPayloadIntent{}}
+}
+
+type invalidPayloadIntent struct{}
+
+func (invalidPayloadIntent) Name() string { return "charge" }
+
+func (invalidPayloadIntent) Verify(_ context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
+	return nil, mpp.ErrInvalidPayload(`credential type "hash" is not allowed for this challenge`)
+}
+
+func TestChargeMiddlewareReturnsPaymentRequiredOnInvalidPayload(t *testing.T) {
+	payment := newTestServer(t, invalidPayloadMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Fail(t, "handler should not be called")
+	}))
+
+	challengeReq := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	challengeResp := httptest.NewRecorder()
+	handler.ServeHTTP(challengeResp, challengeReq)
+	require.Equal(t, http.StatusPaymentRequired, challengeResp.Code)
+
+	challenge, err := mpp.ParseChallenge(challengeResp.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	req.Header.Set("Authorization", credential.ToAuthorization())
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	// The core spec lists invalid-payload as a 402, so a client can retry the
+	// fresh challenge with a payload the server accepts.
+	require.Equal(t, http.StatusPaymentRequired, resp.Code)
+	_, err = mpp.ParseChallenge(resp.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+
+	var problem struct {
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, "https://paymentauth.org/problems/invalid-payload", problem.Type)
+	assert.Equal(t, http.StatusPaymentRequired, problem.Status)
+}
+
 func TestChargeMiddlewareReturnsFreshChallengeOnVerificationFailure(t *testing.T) {
 	payment := newTestServer(t, verificationFailedMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
