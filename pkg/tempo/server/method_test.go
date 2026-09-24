@@ -124,7 +124,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "explicit primary memo preserves push mode",
+			name: "preserves push mode",
 			config: MethodConfig{
 				Currency:  "0x20c0000000000000000000000000000000000001",
 				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
@@ -132,7 +132,6 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 			params: mppserver.ChargeParams{
 				Amount:         "0.50",
-				Memo:           "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 				SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
 			},
 			assertions: func(t *testing.T, request tempo.ChargeRequest) {

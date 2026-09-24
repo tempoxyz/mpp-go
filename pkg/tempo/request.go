@@ -64,8 +64,6 @@ type MethodDetails struct {
 	FeePayer bool
 	// FeePayerURL points at a remote fee-payer signer.
 	FeePayerURL string
-	// Memo overrides the default attribution memo for the primary transfer.
-	Memo string
 	// Splits lists any additional transfers included in the charge.
 	Splits []Split
 	// SupportedModes restricts which credential submission modes are allowed.
@@ -108,8 +106,6 @@ type ChargeRequestParams struct {
 	FeePayer bool
 	// FeePayerURL points at a remote fee-payer signer.
 	FeePayerURL string
-	// Memo overrides the default attribution memo for the primary transfer.
-	Memo string
 	// Splits lists any additional transfers included in the charge.
 	Splits []SplitParams
 	// SupportedModes restricts which credential submission modes are allowed.
@@ -153,10 +149,6 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err != nil {
 		return ChargeRequest{}, err
 	}
-	memo, err := normalizeMemo(params.Memo)
-	if err != nil {
-		return ChargeRequest{}, err
-	}
 	if err := validateSupportedModes(params.SupportedModes); err != nil {
 		return ChargeRequest{}, err
 	}
@@ -173,7 +165,6 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 		MethodDetails: MethodDetails{
 			FeePayer:       params.FeePayer,
 			FeePayerURL:    params.FeePayerURL,
-			Memo:           memo,
 			Splits:         splits,
 			SupportedModes: append([]ChargeMode(nil), params.SupportedModes...),
 		},
@@ -217,10 +208,6 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		}
 		request.MethodDetails.FeePayer = asBool(raw["feePayer"])
 		request.MethodDetails.FeePayerURL = asString(raw["feePayerUrl"])
-		request.MethodDetails.Memo, err = normalizeMemo(asString(raw["memo"]))
-		if err != nil {
-			return ChargeRequest{}, err
-		}
 		request.MethodDetails.Splits, err = parseSplits(raw["splits"])
 		if err != nil {
 			return ChargeRequest{}, err
@@ -316,9 +303,6 @@ func (r ChargeRequest) Map() map[string]any {
 	}
 	if r.MethodDetails.FeePayerURL != "" {
 		methodDetails["feePayerUrl"] = r.MethodDetails.FeePayerURL
-	}
-	if r.MethodDetails.Memo != "" {
-		methodDetails["memo"] = r.MethodDetails.Memo
 	}
 	if len(r.MethodDetails.Splits) > 0 {
 		splits := make([]map[string]any, 0, len(r.MethodDetails.Splits))

@@ -151,7 +151,7 @@ func TestCreateCredentialScenarios(t *testing.T) {
 	}
 }
 
-func TestCreateCredentialHashWithExplicitMemo(t *testing.T) {
+func TestCreateCredentialHashWithAttributionMemo(t *testing.T) {
 	t.Parallel()
 
 	params := tempo.ChargeRequestParams{
@@ -160,7 +160,6 @@ func TestCreateCredentialHashWithExplicitMemo(t *testing.T) {
 		Recipient: testRecipient,
 		Decimals:  6,
 		ChainID:   42431,
-		Memo:      "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 	}
 	request, err := tempo.NormalizeChargeRequest(params)
 	if !assert.NoErrorf(t, err, "NormalizeChargeRequest() error = %v", err) {
@@ -178,6 +177,7 @@ func TestCreateCredentialHashWithExplicitMemo(t *testing.T) {
 	}
 
 	challenge := buildChallenge(t, params)
+	challenge.Request["methodDetails"].(map[string]any)["memo"] = "0x" + strings.Repeat("ab", 32)
 	credential, err := method.CreateCredential(context.Background(), challenge)
 	if !assert.NoErrorf(t, err, "CreateCredential() error = %v", err) {
 		return
@@ -198,7 +198,7 @@ func TestCreateCredentialHashWithExplicitMemo(t *testing.T) {
 	}
 	if !assert.True(t, tempo.MatchTransferCalldata(
 		hexutil.Encode(tx.Calls[0].Data), request, challenge.Realm, challenge.ID,
-	), "MatchTransferCalldata() = false, want explicit memo transfer") {
+	), "MatchTransferCalldata() = false, want challenge-bound attribution transfer") {
 		return
 	}
 }

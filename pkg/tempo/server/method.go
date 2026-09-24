@@ -25,8 +25,6 @@ type MethodConfig struct {
 	FeePayer bool
 	// FeePayerURL points at a remote co-signer when the server does not sign locally.
 	FeePayerURL string
-	// Memo overrides the default attribution memo generation.
-	Memo string
 	// SupportedModes limits the credential submission modes advertised to clients.
 	SupportedModes []tempo.ChargeMode
 }
@@ -40,7 +38,6 @@ type Method struct {
 	chainID              int64
 	feePayer             bool
 	feePayerURL          string
-	memo                 string
 	supportedModes       []tempo.ChargeMode
 	supportsUnknownChain bool
 }
@@ -74,7 +71,6 @@ func NewMethod(config MethodConfig) *Method {
 		chainID:              chainID,
 		feePayer:             config.FeePayer,
 		feePayerURL:          config.FeePayerURL,
-		memo:                 config.Memo,
 		supportedModes:       append([]tempo.ChargeMode(nil), config.SupportedModes...),
 		supportsUnknownChain: intent.rpc != nil || intent.rpcURL != "",
 	}
@@ -113,10 +109,6 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	if chainID != 0 && !tempo.IsKnownChainID(chainID) && !m.supportsUnknownChain {
 		return nil, fmt.Errorf("tempo server: unknown chain id %d; configure Intent.RPC or Intent.RPCURL explicitly", chainID)
 	}
-	memo := params.Memo
-	if memo == "" {
-		memo = m.memo
-	}
 	feePayerURL := params.FeePayerURL
 	if feePayerURL == "" {
 		feePayerURL = m.feePayerURL
@@ -131,7 +123,6 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		ChainID:        chainID,
 		FeePayer:       params.FeePayer || m.feePayer,
 		FeePayerURL:    feePayerURL,
-		Memo:           memo,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
 		SupportedModes: resolvedModes(params.SupportedModes, m.supportedModes),
 	})
