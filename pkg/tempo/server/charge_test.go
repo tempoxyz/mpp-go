@@ -30,6 +30,8 @@ import (
 const (
 	// testPrivateKey is the fixed payer key used across Tempo charge tests.
 	testPrivateKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	// secondPayerPrivateKey signs credentials for a payer distinct from testPrivateKey.
+	secondPayerPrivateKey = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
 	// feePayerKey is the co-signer key used for sponsored-transaction tests.
 	feePayerKey = "0xdd83cd66cd98801a07e0b7c1a5b02364b369e696da7c0ab444acffea5cca86fc"
 	// accessKey is a deterministic test-only key authorized by testPrivateKey.
@@ -1427,7 +1429,7 @@ func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T)
 	}
 }
 
-func TestChargeFlow_FeePayerTransactionUsesChallengeOnceAfterRevert(t *testing.T) {
+func TestChargeFlow_FeePayerTransactionUsesEnvelopeOnceAfterRevert(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
 	rpc := newMockRPC(request)
@@ -1463,8 +1465,8 @@ func TestChargeFlow_FeePayerTransactionUsesChallengeOnceAfterRevert(t *testing.T
 	{
 
 		_, err := intent.Verify(ctx, credential, request.Map())
-		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "challenge already used"),
-			"second Verify() error = %v, want reused challenge rejection", err) {
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "sponsored transaction already used"),
+			"second Verify() error = %v, want reused envelope rejection", err) {
 			return
 		}
 	}
@@ -1473,6 +1475,58 @@ func TestChargeFlow_FeePayerTransactionUsesChallengeOnceAfterRevert(t *testing.T
 		return
 	}
 
+}
+
+func TestChargeFlow_FeePayerDistinctPayersShareChallenge(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	// Give every broadcast its own hash so the post-receipt hash reservation
+	// does not conflate the two payments.
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		hash := crypto.Keccak256Hash(common.FromHex(raw)).Hex()
+		return hash, buildReceipt(raw, request, sender), nil
+	}
+	challenge := buildChallenge(t, request)
+
+	firstPayer := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
+	firstCredential, err := firstPayer.CreateCredential(ctx, challenge)
+	require.NoError(t, err)
+
+	secondPayer, err := chargeclient.New(chargeclient.Config{
+		PrivateKey:     secondPayerPrivateKey,
+		RPC:            rpc,
+		ChainID:        42431,
+		CredentialType: tempo.CredentialTypeTransaction,
+	})
+	require.NoError(t, err)
+	secondCredential, err := secondPayer.CreateCredential(ctx, challenge)
+	require.NoError(t, err)
+	require.NotEqual(t, firstCredential, secondCredential)
+
+	store := newRecordingStore()
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store, FeePayerPrivateKey: feePayerKey})
+	require.NoError(t, err)
+
+	// Two payers answering the same challenge each get sponsored.
+	_, err = intent.Verify(ctx, firstCredential, request.Map())
+	require.NoError(t, err)
+	_, err = intent.Verify(ctx, secondCredential, request.Map())
+	require.NoError(t, err)
+	require.Len(t, rpc.sentRawTxs, 2)
+
+	// Resubmitting an envelope is still rejected before any co-signing.
+	_, err = intent.Verify(ctx, firstCredential, request.Map())
+	require.ErrorContains(t, err, "sponsored transaction already used")
+	require.Len(t, rpc.sentRawTxs, 2)
 }
 
 func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.T) {
