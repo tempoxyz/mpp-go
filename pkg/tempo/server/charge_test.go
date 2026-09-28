@@ -1607,6 +1607,50 @@ func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
 
 }
 
+func TestChargeFlow_SponsorsOUSDByDefault(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: tempo.MainnetOUSDAddress,
+		Recipient: testRecipient, Decimals: 6, ChainID: 4217, FeePayer: true,
+	})
+	if !assert.NoError(t, err) {
+		return
+	}
+	rpc := newMockRPC(request)
+	rpc.chainID = 4217
+	clientMethod, err := chargeclient.New(chargeclient.Config{
+		PrivateKey: testPrivateKey, RPC: rpc, ChainID: 4217,
+		CredentialType: tempo.CredentialTypeTransaction,
+	})
+	if !assert.NoError(t, err) {
+		return
+	}
+	credential, err := clientMethod.CreateCredential(ctx, buildChallenge(t, request))
+	if !assert.NoError(t, err) {
+		return
+	}
+	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	if !assert.NoError(t, err) {
+		return
+	}
+	_, err = intent.Verify(ctx, credential, request.Map())
+	assert.NoError(t, err)
+	assert.Len(t, rpc.sentRawTxs, 1)
+}
+
+func TestChargeFlow_CustomFeePayerPolicyCanExcludeOUSD(t *testing.T) {
+	intent, err := NewIntent(IntentConfig{
+		FeePayerPolicies: map[string]FeePayerPolicy{
+			tempo.MainnetUSDCAddress: defaultFeePayerPolicy(),
+		},
+	})
+	if !assert.NoError(t, err) {
+		return
+	}
+	_, err = intent.feePayerPolicyFor(tempo.MainnetOUSDAddress)
+	assert.Error(t, err)
+}
+
 func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
 	ctx := context.Background()
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{

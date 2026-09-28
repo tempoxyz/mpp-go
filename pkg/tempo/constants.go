@@ -26,6 +26,8 @@ const (
 	TransferCalldataLength = 4 + 32 + 32
 	// TransferWithMemoCalldataLength is the exact byte length of transferWithMemo(address,uint256,bytes32).
 	TransferWithMemoCalldataLength = 4 + 32 + 32 + 32
+	// MainnetOUSDAddress is the OUSD token contract on Tempo mainnet.
+	MainnetOUSDAddress = "0x20c0000000000000000000006a37DA5C996874BE"
 	// MainnetUSDCAddress is Circle's USDC contract on Tempo mainnet.
 	MainnetUSDCAddress = "0x20C000000000000000000000b9537d11c60E8b50"
 )
