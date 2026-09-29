@@ -35,8 +35,9 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 			assertions: func(t *testing.T, request tempo.ChargeRequest) {
 				t.Helper()
-				if !assert.Equalf(t, tempotx.AlphaUSDAddress.Hex(), request.Currency,
-					"request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex()) {
+				// Moderato's first default offer is OUSD (followed by pathUSD).
+				if !assert.Equalf(t, tempo.OUSDAddress, request.Currency,
+					"request.Currency = %q, want %q", request.Currency, tempo.OUSDAddress) {
 					return
 				}
 				if !assert.Falsef(t, request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != tempotx.ChainIdModerato,

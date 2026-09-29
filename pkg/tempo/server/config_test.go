@@ -37,8 +37,9 @@ func TestMethodFromConfigBuildsMethod(t *testing.T) {
 		"request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato) {
 		return
 	}
-	if !assert.Equalf(t, tempotx.AlphaUSDAddress.Hex(), request.Currency,
-		"request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex()) {
+	// Moderato's first default offer is OUSD (followed by pathUSD).
+	if !assert.Equalf(t, tempo.OUSDAddress, request.Currency,
+		"request.Currency = %q, want %q", request.Currency, tempo.OUSDAddress) {
 		return
 	}
 

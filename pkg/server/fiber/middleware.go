@@ -41,7 +41,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		result, err := m.Charge(c.UserContext(), chargeParams)
 		if err != nil {
 			if result != nil && result.Challenge != nil {
-				WritePaymentErrorWithChallenge(c, err, result.Challenge, m.Realm())
+				WritePaymentErrorWithChallenges(c, err, result.Challenges, m.Realm())
 				return nil
 			}
 			WritePaymentError(c, err)
@@ -49,7 +49,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		}
 
 		if result.Challenge != nil {
-			WriteChallenge(c, result.Challenge, m.Realm())
+			WriteChallenges(c, result.Challenges, m.Realm())
 			return nil
 		}
 
@@ -91,14 +91,23 @@ func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Ch
 		WritePaymentError(c, err)
 		return
 	}
+	WritePaymentErrorWithChallenges(c, err, []*mpp.Challenge{challenge}, realm)
+}
 
-	header, headerErr := challenge.ToAuthenticateStrict(realm)
+// WritePaymentErrorWithChallenges serializes an MPP error with fresh retry
+// challenges, one WWW-Authenticate field value per challenge in order.
+func WritePaymentErrorWithChallenges(c *fiberfw.Ctx, err error, challenges []*mpp.Challenge, realm string) {
+	if len(challenges) == 0 {
+		WritePaymentError(c, err)
+		return
+	}
+	headers, challengeID, headerErr := authenticateHeaders(challenges, realm)
 	if headerErr != nil {
-		WritePaymentError(c, mpp.ErrInvalidChallenge(challenge.ID, headerErr.Error()))
+		WritePaymentError(c, mpp.ErrInvalidChallenge(challengeID, headerErr.Error()))
 		return
 	}
 
-	c.Set(mpp.HeaderWWWAuthenticate, header)
+	setAuthenticateHeaders(c, headers)
 	WritePaymentError(c, err)
 }
 
@@ -107,20 +116,54 @@ func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Ch
 // This is the Fiber equivalent of [server.WriteChallenge]. Fiber is built on
 // fasthttp and cannot use http.ResponseWriter directly.
 func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
-	header, err := challenge.ToAuthenticateStrict(realm)
+	WriteChallenges(c, []*mpp.Challenge{challenge}, realm)
+}
+
+// WriteChallenges serializes a 402 response offering every challenge, one
+// WWW-Authenticate field value per challenge in presentation order.
+//
+// This is the Fiber equivalent of [server.WriteChallenges].
+func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) {
+	if len(challenges) == 0 {
+		WritePaymentError(c, mpp.ErrBadRequest("no challenges could be generated"))
+		return
+	}
+	headers, _, err := authenticateHeaders(challenges, realm)
 	if err != nil {
 		WritePaymentError(c, mpp.ErrBadRequest(err.Error()))
 		return
 	}
 
-	c.Set(mpp.HeaderWWWAuthenticate, header)
+	setAuthenticateHeaders(c, headers)
 	c.Set("Content-Type", "application/problem+json")
 	c.Set("Cache-Control", "no-store")
 
-	problem := mpp.ErrPaymentRequired(realm, challenge.Description)
+	problem := mpp.ErrPaymentRequired(realm, challenges[0].Description)
 	body, _ := json.Marshal(problem.ProblemDetails(""))
 
 	c.Status(fiberfw.StatusPaymentRequired).Send(body) //nolint:errcheck // matches server.WriteChallenge behavior
+}
+
+// authenticateHeaders serializes every challenge before any header is written
+// so a later failure cannot leave a partial set of offers. On failure it also
+// returns the ID of the challenge that could not be serialized.
+func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, string, error) {
+	headers := make([]string, 0, len(challenges))
+	for _, challenge := range challenges {
+		header, err := challenge.ToAuthenticateStrict(realm)
+		if err != nil {
+			return nil, challenge.ID, err
+		}
+		headers = append(headers, header)
+	}
+	return headers, "", nil
+}
+
+func setAuthenticateHeaders(c *fiberfw.Ctx, values []string) {
+	c.Response().Header.Del(mpp.HeaderWWWAuthenticate)
+	for _, value := range values {
+		c.Response().Header.Add(mpp.HeaderWWWAuthenticate, value)
+	}
 }
 
 // WritePaymentError serializes MPP verification errors as problem details.

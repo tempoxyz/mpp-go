@@ -1,0 +1,9 @@
+---
+github.com/tempoxyz/mpp-go: minor
+---
+
+Offer ordered Tempo charge currencies from the server. By default the Tempo server method now issues one charge Challenge per accepted currency: OUSD then USDC.e on mainnet, and OUSD then pathUSD on Moderato. Unknown chains keep their previous single default. Added `MethodConfig.Currencies` and `Config.Currencies` for an ordered list that replaces the defaults, and deprecated the singular `Currency`, which still restricts acceptance to that one token. Setting both fields, passing an empty list, or passing an invalid address is rejected. Added `tempo.OUSDAddress`, `tempo.PathUSDAddress`, and `tempo.DefaultCurrenciesForChain`; `tempo.DefaultCurrencyForChain` and the default fee-payer policy values are unchanged.
+
+Added `server.ChargeOffersBuilder`, `ChargeResult.Challenges`, `server.WriteChallenges`, and `server.WritePaymentErrorWithChallenges` (plus Fiber equivalents). `Mpp.Charge`, `ChargeMiddleware`, `ComposeMiddleware`, and the Echo, Gin, and Fiber adapters advertise every offer in order and verify a Credential against the offer it echoes. A per-request `ChargeParams.Currency` still issues a single offer.
+
+Decoupled the local fee payer's fee token from the charge currency, matching mppx. A local fee payer now pays gas in the new `IntentConfig.FeeToken` / `Config.FeeToken` when set, otherwise in the first allowed fee token it holds a balance of (falling back to the first allowed token), and applies that token's fee-payer policy. Allowed fee tokens are the configured `FeePayerPolicies` tokens, or by default pathUSD plus USDC.e on mainnet and pathUSD on Moderato, so sponsored OUSD charges pay gas in pathUSD or USDC.e. Client-supplied fee tokens must be allowed. A local fee payer on Moderato therefore no longer pays gas in AlphaUSD by default; list it in `FeePayerPolicies` to keep it. Remote fee payers (`FeePayerURL`) are unchanged and still pay in the charge currency.

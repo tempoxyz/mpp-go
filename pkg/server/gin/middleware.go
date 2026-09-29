@@ -47,7 +47,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		result, err := m.Charge(c.Request.Context(), chargeParams)
 		if err != nil {
 			if result != nil && result.Challenge != nil {
-				server.WritePaymentErrorWithChallenge(c.Writer, err, result.Challenge, m.Realm())
+				server.WritePaymentErrorWithChallenges(c.Writer, err, result.Challenges, m.Realm())
 				c.Abort()
 				return
 			}
@@ -57,7 +57,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		}
 
 		if result.Challenge != nil {
-			server.WriteChallenge(c.Writer, result.Challenge, m.Realm())
+			server.WriteChallenges(c.Writer, result.Challenges, m.Realm())
 			c.Abort()
 			return
 		}
