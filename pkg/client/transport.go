@@ -2,8 +2,10 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"sort"
@@ -81,6 +83,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	baseRequest, preferences := t.prepareRequest(req)
 	credentials := make(map[credentialKey]*mpp.Credential)
 	request := baseRequest
+	var sentCredential credentialKey
 
 	for retries := 0; ; retries++ {
 		resp, err := t.inner.RoundTrip(request)
@@ -103,6 +106,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 
+		if isInvalidPayloadResponse(resp) {
+			delete(credentials, sentCredential)
+		}
 		drainAndClose(resp.Body)
 
 		key := credentialKey{
@@ -126,7 +132,22 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 		}
 		request.Header.Set(selected.challenge.CredentialHeader(), cred.ToAuthorization())
+		sentCredential = key
 	}
+}
+
+// isInvalidPayloadResponse inspects only responses that will be consumed for a
+// retry. Other 402 responses retain cached credentials to avoid paying twice.
+func isInvalidPayloadResponse(resp *http.Response) bool {
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/problem+json" || resp.Body == nil {
+		return false
+	}
+	var problem struct {
+		Type mpp.ErrorType `json:"type"`
+	}
+	err = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&problem)
+	return err == nil && problem.Type == mpp.ErrorTypeInvalidPayload
 }
 
 func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {
