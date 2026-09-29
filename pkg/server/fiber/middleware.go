@@ -2,6 +2,7 @@ package fiberadapter
 
 import (
 	"encoding/json"
+	"errors"
 
 	fiberfw "github.com/gofiber/fiber/v2"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -131,7 +132,8 @@ func WritePaymentError(c *fiberfw.Ctx, err error) {
 	c.Set("Content-Type", "application/problem+json")
 	c.Set("Cache-Control", "no-store")
 
-	if pe, ok := err.(*mpp.PaymentError); ok {
+	var pe *mpp.PaymentError
+	if errors.As(err, &pe) {
 		body, _ := json.Marshal(pe.ProblemDetails(""))
 		c.Status(pe.Status).Send(body) //nolint:errcheck // matches server.WritePaymentError behavior
 		return
