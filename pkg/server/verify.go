@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -206,7 +207,8 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	// 9. Dispatch split intents through Broadcast and legacy intents through Verify.
 	receipt, err := broadcastCredential(ctx, params.Intent, credential, params.Request)
 	if err != nil {
-		if pe, ok := err.(*mpp.PaymentError); ok {
+		var pe *mpp.PaymentError
+		if errors.As(err, &pe) {
 			if pe.Status != http.StatusPaymentRequired {
 				return nil, pe
 			}

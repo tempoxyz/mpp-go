@@ -269,7 +269,8 @@ func WritePaymentError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 
-	if pe, ok := err.(*mpp.PaymentError); ok {
+	var pe *mpp.PaymentError
+	if errors.As(err, &pe) {
 		w.WriteHeader(pe.Status)
 		json.NewEncoder(w).Encode(pe.ProblemDetails(""))
 		return
