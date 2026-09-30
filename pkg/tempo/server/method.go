@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 // MethodConfig configures a Tempo payment method for server-side charging.
@@ -62,7 +63,8 @@ var _ mppserver.ChargeOffersBuilder = (*Method)(nil)
 //
 // Without Currency or Currencies, the method accepts
 // tempo.DefaultCurrenciesForChain for the configured chain, or for the chain
-// inferred from the intent's RPC URL when ChainID is zero. NewMethod panics
+// inferred from the intent's RPC URL when ChainID is zero. With no custom RPC,
+// it defaults to mainnet. NewMethod panics
 // when the currency configuration is invalid (see MethodConfig.Currencies);
 // use MethodFromConfig to receive the error instead.
 func NewMethod(config MethodConfig) *Method {
@@ -77,6 +79,9 @@ func NewMethod(config MethodConfig) *Method {
 	chainID := config.ChainID
 	if chainID == 0 {
 		chainID = tempo.InferChainIDFromRPCURL(intent.rpcURL)
+		if intent.rpc == nil && intent.rpcURL == "" {
+			chainID = tempotx.ChainIdMainnet
+		}
 	}
 	currencies, err := resolveCurrencies(config.Currency, config.Currencies, chainID)
 	if err != nil {

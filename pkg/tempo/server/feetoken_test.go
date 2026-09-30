@@ -374,3 +374,12 @@ type staticCallRPC struct {
 func (r *staticCallRPC) SendRequest(context.Context, string, ...interface{}) (*temporpc.JSONRPCResponse, error) {
 	return &temporpc.JSONRPCResponse{Result: r.result}, nil
 }
+
+func TestFeeTokenRequiresLocalFeePayer(t *testing.T) {
+	for _, url := range []string{"", "https://sponsor.example.test"} {
+		t.Run(url, func(t *testing.T) {
+			_, err := MethodFromConfig(Config{FeeToken: usdceAddress, FeePayerURL: url})
+			require.ErrorContains(t, err, "FeeToken requires a local fee payer")
+		})
+	}
+}

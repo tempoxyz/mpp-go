@@ -147,6 +147,9 @@ func NewIntent(config IntentConfig) (*Intent, error) {
 		if !common.IsHexAddress(config.FeeToken) {
 			return nil, fmt.Errorf("tempo server: invalid fee token %q", config.FeeToken)
 		}
+		if feePayerSigner == nil {
+			return nil, fmt.Errorf("tempo server: FeeToken requires a local fee payer signer")
+		}
 		feeToken = common.HexToAddress(config.FeeToken)
 	}
 	return &Intent{

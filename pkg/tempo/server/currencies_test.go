@@ -95,10 +95,10 @@ func TestNewMethodDefaultCurrencies(t *testing.T) {
 			want:        []string{tempotx.AlphaUSDAddress.Hex()},
 		},
 		{
-			name:        "zero config keeps legacy single default",
+			name:        "zero config offers mainnet defaults",
 			config:      MethodConfig{},
-			wantChainID: 0,
-			want:        []string{tempotx.AlphaUSDAddress.Hex()},
+			wantChainID: tempotx.ChainIdMainnet,
+			want:        []string{ousdAddress, usdceAddress},
 		},
 	}
 
@@ -671,4 +671,10 @@ func checksummed(values ...string) []string {
 		out = append(out, common.HexToAddress(value).Hex())
 	}
 	return out
+}
+
+func TestMethodFromConfigDefaultOffers(t *testing.T) {
+	method, err := MethodFromConfig(Config{Recipient: testRecipient})
+	require.NoError(t, err)
+	assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))
 }
