@@ -71,7 +71,11 @@ func (s *MemoryStore) Delete(_ context.Context, key string) error {
 
 // ChargeStoreKey normalizes a replay-protection key for a Tempo transaction hash.
 func ChargeStoreKey(hash string) string {
-	return ReplayKeyPrefix + strings.ToLower(hash)
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if !strings.HasPrefix(hash, "0x") {
+		hash = "0x" + hash
+	}
+	return ReplayKeyPrefix + hash
 }
 
 // ChargeSponsoredChallengeStoreKey normalizes a replay-protection key for a
