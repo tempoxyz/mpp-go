@@ -2,7 +2,10 @@ package chargeserver
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -13,6 +16,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
+	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
@@ -380,6 +384,63 @@ func TestFeeTokenRequiresLocalFeePayer(t *testing.T) {
 		t.Run(url, func(t *testing.T) {
 			_, err := MethodFromConfig(Config{FeeToken: usdceAddress, FeePayerURL: url})
 			require.ErrorContains(t, err, "FeeToken requires a local fee payer")
+		})
+	}
+}
+
+func TestRemoteSponsoredOUSDUsesIndependentFeeToken(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		chainID  int64
+		feeToken common.Address
+	}{
+		{"mainnet USDC.e", tempotx.ChainIdMainnet, usdceToken},
+		{"mainnet pathUSD", tempotx.ChainIdMainnet, pathUSDToken},
+		{"moderato pathUSD", tempotx.ChainIdModerato, pathUSDToken},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			signer, err := temposigner.NewSigner(feePayerKey)
+			require.NoError(t, err)
+			calls := 0
+			sponsor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var body struct {
+					Method string
+					Params []string
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, "eth_signRawTransaction", body.Method)
+				require.Len(t, body.Params, 1)
+				tx, err := tempotx.Deserialize(body.Params[0])
+				require.NoError(t, err)
+				tx.From, err = tempotx.VerifySignature(tx)
+				require.NoError(t, err)
+				tx.FeeToken = tt.feeToken
+				tx.AwaitingFeePayer = false
+				require.NoError(t, tempotx.AddFeePayerSignature(tx, signer))
+				raw, err := tempotx.Serialize(tx, nil)
+				require.NoError(t, err)
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": raw}))
+			}))
+			defer sponsor.Close()
+			rpc := newOffersRPC(tt.chainID)
+			intent, err := NewIntent(IntentConfig{RPC: rpc})
+			require.NoError(t, err)
+			payment := newTestServer(t, NewMethod(MethodConfig{
+				Intent: intent, Recipient: testRecipient, ChainID: tt.chainID,
+				FeePayer: true, FeePayerURL: sponsor.URL,
+			}), testRealm, offersSecret)
+			offers := issueOffers(t, payment, mppserver.ChargeParams{Amount: "0.50"})
+			require.Equal(t, checksummed(ousdAddress)[0], offers[0].Request["currency"])
+			credential := payWithTransaction(t, rpc, offers[0])
+			result, err := payment.Charge(context.Background(), mppserver.ChargeParams{
+				Amount: "0.50", Authorization: credential.ToAuthorization(),
+			})
+			require.NoError(t, err)
+			require.False(t, result.IsChallenge())
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, tt.feeToken, broadcastFeeToken(t, rpc))
+			assert.Equal(t, []common.Address{ousdToken}, sentTokens(t, rpc.sentRawTxs[0]))
 		})
 	}
 }

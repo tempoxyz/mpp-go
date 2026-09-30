@@ -397,17 +397,18 @@ func (i *Intent) validateTransaction(
 	tx.From = sender
 
 	if request.MethodDetails.FeePayer {
-		// A local fee payer pays gas in its own allowed fee token, like mppx;
-		// remote fee payers keep paying in the charge currency.
-		feeToken := common.HexToAddress(request.Currency)
+		allowed, err := i.allowedFeeTokens(ctx, validated.rpc, request)
+		if err != nil {
+			return err
+		}
+		if feePayerForm && tx.FeeToken != (common.Address{}) && !slices.Contains(allowed, tx.FeeToken) {
+			return mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+		}
+		feeToken := allowed[0]
+		if tx.FeeToken != (common.Address{}) {
+			feeToken = tx.FeeToken
+		}
 		if i.feePayerSigner != nil {
-			allowed, err := i.allowedFeeTokens(ctx, validated.rpc, request)
-			if err != nil {
-				return err
-			}
-			if feePayerForm && tx.FeeToken != (common.Address{}) && !slices.Contains(allowed, tx.FeeToken) {
-				return mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
-			}
 			feeToken, err = i.resolveFeeToken(ctx, validated.rpc, allowed)
 			if err != nil {
 				return err
@@ -434,9 +435,6 @@ func (i *Intent) validateTransaction(
 		}
 		if !feePayerForm && tx.FeeToken != (common.Address{}) {
 			return mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
-		}
-		if i.feePayerSigner == nil && feePayerForm && tx.FeeToken != (common.Address{}) && tx.FeeToken != feeToken {
-			return mpp.ErrInvalidPayload("fee payer transaction fee token does not match the charge request")
 		}
 	} else if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
 		return err
@@ -516,9 +514,8 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
 		releaseSponsoredClaim = true
-		feeToken := common.HexToAddress(request.Currency)
+		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
-			feeToken = validated.feeToken
 			tx.FeeToken = feeToken
 			tx.AwaitingFeePayer = false
 			if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
@@ -533,6 +530,14 @@ func (i *Intent) broadcastTransaction(
 			if err != nil {
 				return nil, mpp.ErrVerificationFailed("fee payer returned an invalid transaction")
 			}
+			allowed, err := i.allowedFeeTokens(ctx, rpc, request)
+			if err != nil {
+				return nil, err
+			}
+			if !slices.Contains(allowed, tx.FeeToken) {
+				return nil, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+			}
+			feeToken = tx.FeeToken
 		} else {
 			return nil, mpp.ErrVerificationFailed("fee payer challenge requires a configured fee payer signer or fee payer URL")
 		}
@@ -550,7 +555,7 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrVerificationFailed("co-signed transaction must clear the awaiting fee payer marker")
 		}
 		if tx.FeeToken != feeToken {
-			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the charge request")
+			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the selected fee token")
 		}
 		coSignedSender, err := verifyTransactionSender(tx)
 		if err != nil {

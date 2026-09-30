@@ -507,7 +507,7 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSigner(t *testing.T) {
 		}
 
 		coSignedTx.From = sender
-		coSignedTx.FeeToken = common.HexToAddress(request.Currency)
+		coSignedTx.FeeToken = common.HexToAddress(tempo.PathUSDAddress)
 		coSignedTx.AwaitingFeePayer = false
 		{
 			err := tempotx.AddFeePayerSignature(coSignedTx, feePayerSigner)
