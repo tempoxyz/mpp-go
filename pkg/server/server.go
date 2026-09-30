@@ -170,6 +170,15 @@ type ChargeRequestBuilder interface {
 	BuildChargeRequest(params ChargeParams) (map[string]any, error)
 }
 
+// ChargeOffersBuilder lets a method issue several ordered charge offers for one
+// charge, for example one per accepted currency. Charge issues one Challenge
+// per returned request and verifies a Credential against the offer it echoes.
+// When a method implements both interfaces, BuildChargeRequests takes
+// precedence for Charge.
+type ChargeOffersBuilder interface {
+	BuildChargeRequests(params ChargeParams) ([]map[string]any, error)
+}
+
 // minimumSecretKeyBytes is the shortest secret key accepted for HMAC-bound
 // challenge IDs. It matches the canonical mppx reference (assertSecretKey).
 const minimumSecretKeyBytes = 32
@@ -306,7 +315,12 @@ type ChargeParams struct {
 // ChargeResult is either a Challenge or a verified (Credential, Receipt) pair.
 type ChargeResult struct {
 	// Challenge is returned when the client still needs to satisfy the payment.
+	// With several offers it is the offer the submitted Credential echoed, or
+	// the first offer otherwise.
 	Challenge *mpp.Challenge
+	// Challenges lists every offered Challenge in presentation order whenever
+	// Challenge is set. It contains a single element for single-offer methods.
+	Challenges []*mpp.Challenge
 	// Credential is the verified client credential on success.
 	Credential *mpp.Credential
 	// Receipt acknowledges a successfully verified payment.
@@ -348,6 +362,57 @@ func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
 	return request, nil
 }
 
+// buildChargeRequests produces the ordered canonical request maps offered for
+// a charge operation.
+func (m *Mpp) buildChargeRequests(params ChargeParams) ([]map[string]any, error) {
+	builder, ok := m.method.(ChargeOffersBuilder)
+	if !ok {
+		request, err := m.buildChargeRequest(params)
+		if err != nil {
+			return nil, err
+		}
+		return []map[string]any{request}, nil
+	}
+	requests, err := builder.BuildChargeRequests(params)
+	if err != nil {
+		return nil, err
+	}
+	if len(requests) == 0 {
+		return nil, fmt.Errorf("server: method %q returned no charge offers", m.method.Name())
+	}
+	for _, request := range requests {
+		applyMppxScope(request, params.MppxScope)
+	}
+	return requests, nil
+}
+
+// selectChargeOffer returns the index of the offer echoed by the Payment
+// credential in authorization. It falls back to the first offer when there is
+// no credential or no offer matches, so VerifyOrChallenge reports the error.
+func selectChargeOffer(authorization string, requests []map[string]any) int {
+	if len(requests) < 2 {
+		return 0
+	}
+	header, err := mpp.FindPaymentAuthorizationStrict(authorization)
+	if err != nil || header == "" {
+		return 0
+	}
+	credential, err := mpp.ParseCredential(header)
+	if err != nil {
+		return 0
+	}
+	echoed, err := echoedRequestMap(credential)
+	if err != nil {
+		return 0
+	}
+	for i, request := range requests {
+		if mpp.ChallengeBoundJSONEqual(echoed, request) {
+			return i
+		}
+	}
+	return 0
+}
+
 func applyMppxScope(request map[string]any, scope map[string]string) {
 	if len(scope) == 0 {
 		return
@@ -356,44 +421,83 @@ func applyMppxScope(request map[string]any, scope map[string]string) {
 }
 
 // Charge handles a charge intent with human-readable amounts.
+//
+// Methods implementing ChargeOffersBuilder may offer several requests; Charge
+// then returns one Challenge per offer and verifies a Credential against the
+// offer it echoes.
 func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, error) {
 	intent, ok := m.method.Intents()["charge"]
 	if !ok {
 		return nil, fmt.Errorf("method %q does not support charge intent", m.method.Name())
 	}
 
-	request, err := m.buildChargeRequest(params)
+	requests, err := m.buildChargeRequests(params)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := VerifyOrChallenge(ctx, VerifyParams{
-		Authorization: m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization),
+	// Share one expiry so every offer in a response expires together.
+	expires := params.Expires
+	if expires == "" {
+		expires = mpp.Expires.Minutes(5)
+	}
+	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
+	selected := selectChargeOffer(authorization, requests)
+	verifyParams := VerifyParams{
+		Authorization: authorization,
 		Intent:        intent,
-		Request:       request,
+		Request:       requests[selected],
 		Body:          params.Body,
 		Realm:         m.realm,
 		SecretKey:     m.secretKey,
 		Method:        m.method.Name(),
 		Description:   params.Description,
 		Meta:          params.Meta,
-		Expires:       params.Expires,
+		Expires:       expires,
 		Header:        m.advertisedCredentialHeader(),
-	})
-	if err != nil {
-		if result != nil {
-			return &ChargeResult{
-				Challenge:  result.Challenge,
-				Credential: result.Credential,
-				Receipt:    result.Receipt,
-			}, err
-		}
+	}
+	result, err := VerifyOrChallenge(ctx, verifyParams)
+	if result == nil {
 		return nil, err
 	}
 
-	return &ChargeResult{
+	chargeResult := &ChargeResult{
 		Challenge:  result.Challenge,
 		Credential: result.Credential,
 		Receipt:    result.Receipt,
-	}, nil
+	}
+	if result.Challenge != nil {
+		challenges, offerErr := chargeOfferChallenges(ctx, verifyParams, requests, selected, result.Challenge)
+		if offerErr != nil {
+			return nil, offerErr
+		}
+		chargeResult.Challenges = challenges
+	}
+	return chargeResult, err
+}
+
+// chargeOfferChallenges issues a fresh Challenge for every offer, reusing the
+// already issued Challenge for the selected offer.
+func chargeOfferChallenges(
+	ctx context.Context,
+	params VerifyParams,
+	requests []map[string]any,
+	selected int,
+	selectedChallenge *mpp.Challenge,
+) ([]*mpp.Challenge, error) {
+	challenges := make([]*mpp.Challenge, len(requests))
+	params.Authorization = ""
+	for i, request := range requests {
+		if i == selected {
+			challenges[i] = selectedChallenge
+			continue
+		}
+		params.Request = request
+		result, err := VerifyOrChallenge(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		challenges[i] = result.Challenge
+	}
+	return challenges, nil
 }

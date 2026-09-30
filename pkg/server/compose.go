@@ -51,7 +51,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 		if cfg.Mpp.realm != realm {
 			panic(fmt.Sprintf("server: ComposeConfig[%d] realm %q differs from [0] realm %q", i, cfg.Mpp.realm, realm))
 		}
-		if _, err := cfg.Mpp.buildChargeRequest(cfg.Params); err != nil {
+		if _, err := cfg.Mpp.buildChargeRequests(cfg.Params); err != nil {
 			panic(fmt.Sprintf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err))
 		}
 		entries[i] = composedEntry{
@@ -114,14 +114,14 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 			result, err := entry.mpp.Charge(r.Context(), params)
 			if err != nil {
 				if result != nil && result.Challenge != nil {
-					WritePaymentErrorWithChallenge(w, err, result.Challenge, realm)
+					WritePaymentErrorWithChallenges(w, err, result.Challenges, realm)
 					return
 				}
 				WritePaymentError(w, err)
 				return
 			}
 			if result.Challenge != nil {
-				WriteChallenge(w, result.Challenge, realm)
+				WriteChallenges(w, result.Challenges, realm)
 				return
 			}
 
@@ -144,13 +144,11 @@ func composeChallenges(w http.ResponseWriter, r *http.Request, entries []compose
 func collectComposeChallenges(ctx context.Context, entries []composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
 	var challenges []*mpp.Challenge
 	for _, entry := range entries {
-		challenge, err := freshComposeChallenge(ctx, entry, body, scope)
+		offered, err := freshComposeChallenges(ctx, entry, body, scope)
 		if err != nil {
 			return nil, err
 		}
-		if challenge != nil {
-			challenges = append(challenges, challenge)
-		}
+		challenges = append(challenges, offered...)
 	}
 	if len(challenges) == 0 {
 		return nil, mpp.ErrBadRequest("no challenges could be generated")
@@ -158,7 +156,8 @@ func collectComposeChallenges(ctx context.Context, entries []composedEntry, body
 	return challenges, nil
 }
 
-func freshComposeChallenge(ctx context.Context, entry composedEntry, body []byte, scope map[string]string) (*mpp.Challenge, error) {
+// freshComposeChallenges issues every Challenge offered by one compose entry.
+func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
 	params := entry.params
 	params.Authorization = ""
 	if len(scope) > 0 {
@@ -172,7 +171,7 @@ func freshComposeChallenge(ctx context.Context, entry composedEntry, body []byte
 	if err != nil {
 		return nil, err
 	}
-	return result.Challenge, nil
+	return result.Challenges, nil
 }
 
 func writeComposeMalformedCredentialError(
@@ -188,11 +187,11 @@ func writeComposeMalformedCredentialError(
 	var challenges []*mpp.Challenge
 	if cred != nil {
 		for _, entry := range findEntriesByMethodIntent(entries, cred) {
-			challenge, chErr := freshComposeChallenge(r.Context(), entry, body, scope)
-			if chErr != nil || challenge == nil {
+			offered, chErr := freshComposeChallenges(r.Context(), entry, body, scope)
+			if chErr != nil {
 				continue
 			}
-			challenges = append(challenges, challenge)
+			challenges = append(challenges, offered...)
 		}
 	}
 	if len(challenges) == 0 {
@@ -277,12 +276,17 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
 			continue
 		}
-		request, err := entry.scopedRequest(scope)
+		requests, err := entry.scopedRequests(scope)
 		if err != nil {
 			return composedEntry{}, false, err
 		}
-		if mpp.ChallengeBoundJSONEqual(echoedRequest, request) && reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
-			return entry, true, nil
+		if !reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
+			continue
+		}
+		for _, request := range requests {
+			if mpp.ChallengeBoundJSONEqual(echoedRequest, request) {
+				return entry, true, nil
+			}
 		}
 	}
 
@@ -301,12 +305,12 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 	return composedEntry{}, false, nil
 }
 
-func (entry composedEntry) scopedRequest(scope map[string]string) (map[string]any, error) {
+func (entry composedEntry) scopedRequests(scope map[string]string) ([]map[string]any, error) {
 	params := entry.params
 	if len(scope) > 0 {
 		params.MppxScope = scope
 	}
-	return entry.mpp.buildChargeRequest(params)
+	return entry.mpp.buildChargeRequests(params)
 }
 
 func composePaymentCredential(entries []composedEntry, r *http.Request) (string, error) {

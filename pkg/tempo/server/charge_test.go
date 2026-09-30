@@ -85,6 +85,10 @@ type mockRPC struct {
 	onSend           func(raw string) (string, map[string]any, error)
 	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 	onGetReceipt     func(hash string) (*temporpc.JSONRPCResponse, error)
+	// balances answers TIP-20 balanceOf eth_calls by token address; those
+	// calls are recorded in balanceCalls, not callRequests or onCall.
+	balances     map[common.Address]*big.Int
+	balanceCalls []common.Address
 }
 
 type recordingStore struct {
@@ -159,6 +163,19 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 		}
 		return &temporpc.JSONRPCResponse{Result: m.estimateGas}, nil
 	case "eth_call":
+		if len(params) > 0 {
+			if callObject, ok := params[0].(map[string]any); ok {
+				if data, _ := callObject["data"].(string); strings.HasPrefix(data, "0x70a08231") {
+					token := common.HexToAddress(callObject["to"].(string))
+					m.balanceCalls = append(m.balanceCalls, token)
+					balance := m.balances[token]
+					if balance == nil {
+						balance = new(big.Int)
+					}
+					return &temporpc.JSONRPCResponse{Result: fmt.Sprintf("0x%064x", balance)}, nil
+				}
+			}
+		}
 		if len(params) > 0 {
 			if callObject, ok := params[0].(map[string]any); ok {
 				m.callRequests = append(m.callRequests, callObject)
@@ -490,7 +507,7 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSigner(t *testing.T) {
 		}
 
 		coSignedTx.From = sender
-		coSignedTx.FeeToken = common.HexToAddress(request.Currency)
+		coSignedTx.FeeToken = common.HexToAddress(tempo.PathUSDAddress)
 		coSignedTx.AwaitingFeePayer = false
 		{
 			err := tempotx.AddFeePayerSignature(coSignedTx, feePayerSigner)
@@ -645,8 +662,10 @@ func TestChargeHTTPFlow_KeychainFeePayerSigningForm(t *testing.T) {
 				if broadcast.KeyAuthorization == nil {
 					return "", nil, fmt.Errorf("broadcast omitted key authorization")
 				}
-				if broadcast.FeeToken != common.HexToAddress(request.Currency) {
-					return "", nil, fmt.Errorf("broadcast fee token = %s, want %s", broadcast.FeeToken.Hex(), request.Currency)
+				// The local fee payer pays gas in its allowed fee token (pathUSD on
+				// Moderato), not in the charge currency.
+				if broadcast.FeeToken != common.HexToAddress(tempo.PathUSDAddress) {
+					return "", nil, fmt.Errorf("broadcast fee token = %s, want %s", broadcast.FeeToken.Hex(), tempo.PathUSDAddress)
 				}
 				gotParity := broadcast.Signature.Raw[keychain.KeychainSignatureLength-1]
 				if tc.legacyYParity && gotParity != 27 && gotParity != 28 {
@@ -745,9 +764,9 @@ func TestChargeFlow_KeychainFeePayerSigningFormRejectsTampering(t *testing.T) {
 			wantError: "failed to deserialize transaction payload",
 		},
 		{
-			name:      "fee token does not match request",
+			name:      "fee token is not an allowed fee token",
 			options:   keychainCredentialOptions{feeToken: common.HexToAddress("0x20c0000000000000000000000000000000000002")},
-			wantError: "fee payer transaction fee token does not match the charge request",
+			wantError: "fee payer transaction fee token is not supported",
 		},
 	}
 
@@ -809,7 +828,7 @@ func buildKeychainFeePayerCredential(
 	tx.From = common.Address{}
 	feeToken := options.feeToken
 	if feeToken == (common.Address{}) {
-		feeToken = common.HexToAddress(testCurrency)
+		feeToken = common.HexToAddress(tempo.PathUSDAddress)
 	}
 	tx.FeeToken = feeToken
 	authorization := keychain.NewKeyAuthorization(42431, keychain.SignatureTypeSecp256k1, accessSigner.Address()).
@@ -1497,8 +1516,9 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 			"eth_call object missing from") {
 			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
-		if !assert.Equalf(t, request.Currency, callObject["feeToken"],
-			"eth_call feeToken = %v, want %s", callObject["feeToken"], request.Currency) {
+		wantFeeToken := common.HexToAddress(tempo.PathUSDAddress).Hex()
+		if !assert.Equalf(t, wantFeeToken, callObject["feeToken"],
+			"eth_call feeToken = %v, want %s", callObject["feeToken"], wantFeeToken) {
 			return *new(*temporpc.JSONRPCResponse), *new(error)
 		}
 
@@ -1562,7 +1582,7 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 
 }
 
-func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
+func TestChargeFlow_LocalFeePayerSponsorsCurrencyWithoutFeePolicy(t *testing.T) {
 	ctx := context.Background()
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
 		Amount:    "0.50",
@@ -1572,39 +1592,22 @@ func TestChargeFlow_RejectsUnsupportedFeePayerToken(t *testing.T) {
 		ChainID:   42431,
 		FeePayer:  true,
 	})
-	if !assert.NoErrorf(t, err,
-		"NormalizeChargeRequest() error = %v", err) {
-		return
-	}
+	require.NoError(t, err)
 
 	rpc := newMockRPC(request)
-	clientMethod := newClientMethod(t, rpc, tempo.CredentialTypeTransaction)
-	challenge := buildChallenge(t, request)
-
-	credential, err := clientMethod.CreateCredential(ctx, challenge)
-	if !assert.NoErrorf(t, err,
-		"CreateCredential() error = %v", err) {
-		return
-	}
-
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
 	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
-	if !assert.NoErrorf(t, err,
-		"NewIntent() error = %v", err) {
-		return
-	}
-	{
+	require.NoError(t, err)
 
-		_, err := intent.Verify(ctx, credential, request.Map())
-		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "not supported"),
-			"Verify() error = %v, want unsupported fee token rejection", err) {
-			return
-		}
-	}
-	if !assert.Lenf(t, rpc.sentRawTxs, 0,
-		"expected unsupported fee token to be rejected before broadcast, got %d broadcasts", len(rpc.sentRawTxs)) {
-		return
-	}
-
+	// The charge currency has no fee-payer policy; the local fee payer pays
+	// gas in its allowed fee token instead.
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	require.Len(t, rpc.sentRawTxs, 1)
+	broadcast, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	require.NoError(t, err)
+	assert.Equal(t, common.HexToAddress(tempo.PathUSDAddress), broadcast.FeeToken)
 }
 
 func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {

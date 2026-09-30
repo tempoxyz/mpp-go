@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,9 @@ var feePayerMaxTotalFee = big.NewInt(50_000_000_000_000_000)
 
 var feeControllerAddress = common.HexToAddress("0xfeec000000000000000000000000000000000000")
 
+// balanceOfSelector is the TIP-20 balanceOf(address) selector.
+const balanceOfSelector = "70a08231"
+
 const feePayerMaxValidityWindow = 15 * time.Minute
 
 type sourceDID struct {
@@ -64,7 +68,17 @@ type IntentConfig struct {
 	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
 	FeePayerPrivateKeyEnv string
 	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor.
+	// With a local fee payer, the configured tokens are the fee tokens it may
+	// pay gas in (tried in address order), independent of the charge currency.
+	// When empty, a local fee payer may use pathUSD and, on mainnet, USDC.e.
+	// Remote fee payers (FeePayerURL) pay in the charge currency, which needs
+	// a policy here.
 	FeePayerPolicies map[string]FeePayerPolicy
+	// FeeToken fixes the fee token a local fee payer pays gas in. When empty,
+	// the local fee payer uses the first allowed fee token it holds a balance
+	// of, or the first allowed fee token. It must be an allowed fee token and
+	// is ignored for remote fee payers (FeePayerURL).
+	FeeToken string
 	// Store persists replay-protection keys for hash and proof credentials.
 	Store tempo.Store
 }
@@ -75,7 +89,11 @@ type Intent struct {
 	rpcURL         string
 	feePayerSigner *temposigner.Signer
 	feePayerPolicy map[string]FeePayerPolicy
-	store          tempo.Store
+	// feeTokens lists configured allowed fee tokens in deterministic order;
+	// nil selects the per-chain defaults.
+	feeTokens []common.Address
+	feeToken  common.Address
+	store     tempo.Store
 }
 
 var _ mppserver.BroadcastingIntent = (*Intent)(nil)
@@ -87,6 +105,8 @@ type validatedChargeCredential struct {
 	sender  common.Address
 	source  *sourceDID
 	tx      *tempotx.Tx
+	// feeToken is the token a local fee payer pays gas in.
+	feeToken common.Address
 }
 
 // NewIntent constructs a Tempo charge verifier.
@@ -114,11 +134,31 @@ func NewIntent(config IntentConfig) (*Intent, error) {
 	if err != nil {
 		return nil, err
 	}
+	var feeTokens []common.Address
+	if len(config.FeePayerPolicies) > 0 {
+		for token := range feePayerPolicy {
+			feeTokens = append(feeTokens, common.HexToAddress(token))
+		}
+		// Map keys have no order; sort by address so selection is deterministic.
+		slices.SortFunc(feeTokens, func(a, b common.Address) int { return a.Cmp(b) })
+	}
+	var feeToken common.Address
+	if config.FeeToken != "" {
+		if !common.IsHexAddress(config.FeeToken) {
+			return nil, fmt.Errorf("tempo server: invalid fee token %q", config.FeeToken)
+		}
+		if feePayerSigner == nil {
+			return nil, fmt.Errorf("tempo server: FeeToken requires a local fee payer signer")
+		}
+		feeToken = common.HexToAddress(config.FeeToken)
+	}
 	return &Intent{
 		rpc:            config.RPC,
 		rpcURL:         config.RPCURL,
 		feePayerSigner: feePayerSigner,
 		feePayerPolicy: feePayerPolicy,
+		feeTokens:      feeTokens,
+		feeToken:       feeToken,
 		store:          store,
 	}, nil
 }
@@ -357,7 +397,25 @@ func (i *Intent) validateTransaction(
 	tx.From = sender
 
 	if request.MethodDetails.FeePayer {
-		policy, err := i.feePayerPolicyFor(request.Currency)
+		allowed, err := i.allowedFeeTokens(ctx, validated.rpc, request)
+		if err != nil {
+			return err
+		}
+		if feePayerForm && tx.FeeToken != (common.Address{}) && !slices.Contains(allowed, tx.FeeToken) {
+			return mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+		}
+		feeToken := allowed[0]
+		if tx.FeeToken != (common.Address{}) {
+			feeToken = tx.FeeToken
+		}
+		if i.feePayerSigner != nil {
+			feeToken, err = i.resolveFeeToken(ctx, validated.rpc, allowed)
+			if err != nil {
+				return err
+			}
+			validated.feeToken = feeToken
+		}
+		policy, err := i.feePayerPolicyFor(feeToken.Hex())
 		if err != nil {
 			return err
 		}
@@ -375,12 +433,8 @@ func (i *Intent) validateTransaction(
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
 		}
-		requestFeeToken := common.HexToAddress(request.Currency)
 		if !feePayerForm && tx.FeeToken != (common.Address{}) {
 			return mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
-		}
-		if feePayerForm && tx.FeeToken != (common.Address{}) && tx.FeeToken != requestFeeToken {
-			return mpp.ErrInvalidPayload("fee payer transaction fee token does not match the charge request")
 		}
 	} else if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
 		return err
@@ -460,9 +514,9 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
 		releaseSponsoredClaim = true
-		requestFeeToken := common.HexToAddress(request.Currency)
+		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
-			tx.FeeToken = requestFeeToken
+			tx.FeeToken = feeToken
 			tx.AwaitingFeePayer = false
 			if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
 				return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer transaction")
@@ -476,13 +530,21 @@ func (i *Intent) broadcastTransaction(
 			if err != nil {
 				return nil, mpp.ErrVerificationFailed("fee payer returned an invalid transaction")
 			}
+			allowed, err := i.allowedFeeTokens(ctx, rpc, request)
+			if err != nil {
+				return nil, err
+			}
+			if !slices.Contains(allowed, tx.FeeToken) {
+				return nil, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+			}
+			feeToken = tx.FeeToken
 		} else {
 			return nil, mpp.ErrVerificationFailed("fee payer challenge requires a configured fee payer signer or fee payer URL")
 		}
 		if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction does not contain a matching Tempo transfer")
 		}
-		policy, err := i.feePayerPolicyFor(request.Currency)
+		policy, err := i.feePayerPolicyFor(feeToken.Hex())
 		if err != nil {
 			return nil, err
 		}
@@ -492,8 +554,8 @@ func (i *Intent) broadcastTransaction(
 		if tx.AwaitingFeePayer {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction must clear the awaiting fee payer marker")
 		}
-		if tx.FeeToken != requestFeeToken {
-			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the charge request")
+		if tx.FeeToken != feeToken {
+			return nil, mpp.ErrVerificationFailed("co-signed transaction fee token does not match the selected fee token")
 		}
 		coSignedSender, err := verifyTransactionSender(tx)
 		if err != nil {
@@ -1297,6 +1359,92 @@ func defaultFeePayerPolicy() FeePayerPolicy {
 		MaxPriorityFeePerGas: new(big.Int).Set(feePayerMaxPriorityFeePerGas),
 		MaxTotalFee:          new(big.Int).Set(feePayerMaxTotalFee),
 	}
+}
+
+// allowedFeeTokens returns the ordered fee tokens a local fee payer may pay
+// gas in: the configured FeePayerPolicies tokens, or mppx's defaults of
+// pathUSD plus the chain's default currency (USDC.e on mainnet), limited to
+// tokens with a fee-payer policy.
+func (i *Intent) allowedFeeTokens(ctx context.Context, rpc tempo.RPCClient, request tempo.ChargeRequest) ([]common.Address, error) {
+	if i.feeTokens != nil {
+		return i.feeTokens, nil
+	}
+	chainID, err := chargeChainID(ctx, rpc, request)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []common.Address{common.HexToAddress(tempo.PathUSDAddress)}
+	if chainID == tempotx.ChainIdMainnet {
+		candidates = append(candidates, common.HexToAddress(tempo.MainnetUSDCAddress))
+	}
+	allowed := make([]common.Address, 0, len(candidates))
+	for _, token := range candidates {
+		if _, ok := i.feePayerPolicy[token.Hex()]; ok {
+			allowed = append(allowed, token)
+		}
+	}
+	if len(allowed) == 0 {
+		return nil, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+	}
+	return allowed, nil
+}
+
+// resolveFeeToken picks the local fee payer's fee token: the configured
+// FeeToken, else the first allowed token the fee payer holds a balance of,
+// else the first allowed token. The result must be allowed.
+func (i *Intent) resolveFeeToken(ctx context.Context, rpc tempo.RPCClient, allowed []common.Address) (common.Address, error) {
+	if i.feeToken != (common.Address{}) {
+		if !slices.Contains(allowed, i.feeToken) {
+			return common.Address{}, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+		}
+		return i.feeToken, nil
+	}
+	account := i.feePayerSigner.Address()
+	for _, token := range allowed {
+		if hasTokenBalance(ctx, rpc, token, account) {
+			return token, nil
+		}
+	}
+	return allowed[0], nil
+}
+
+// hasTokenBalance reports whether account holds a nonzero TIP-20 balance.
+// Lookup failures count as no balance.
+func hasTokenBalance(ctx context.Context, rpc tempo.RPCClient, token, account common.Address) bool {
+	response, err := rpc.SendRequest(ctx, "eth_call", map[string]any{
+		"to":   token.Hex(),
+		"data": "0x" + balanceOfSelector + addressToWord(account),
+	}, "latest")
+	if err != nil || response.CheckError() != nil {
+		return false
+	}
+	result, ok := response.Result.(string)
+	if !ok {
+		return false
+	}
+	balance, err := hexutil.DecodeBig(normalizeHexQuantity(result))
+	return err == nil && balance.Sign() > 0
+}
+
+// normalizeHexQuantity strips leading zeros from a 32-byte eth_call word so
+// it decodes as a hex quantity.
+func normalizeHexQuantity(value string) string {
+	trimmed := strings.TrimLeft(strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X"), "0")
+	if trimmed == "" {
+		return "0x0"
+	}
+	return "0x" + trimmed
+}
+
+func chargeChainID(ctx context.Context, rpc tempo.RPCClient, request tempo.ChargeRequest) (int64, error) {
+	if request.MethodDetails.ChainID != nil {
+		return *request.MethodDetails.ChainID, nil
+	}
+	chainID, err := rpc.GetChainID(ctx)
+	if err != nil {
+		return 0, mpp.ErrVerificationFailed("failed to resolve chain id")
+	}
+	return int64(chainID), nil
 }
 
 func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {

@@ -22,6 +22,56 @@ func TestDefaultCurrencyForChain(t *testing.T) {
 		assert.Failf(t, "", "DefaultCurrencyForChain(unknown) = %q, want %q", got, tempotx.AlphaUSDAddress.Hex())
 		return
 	}
+	// Pin exact values: the single-currency default must not move to OUSD.
+	assert.Equal(t, "0x20C000000000000000000000b9537d11c60E8b50", DefaultCurrencyForChain(tempotx.ChainIdMainnet))
+	assert.Equal(t, "0x20C0000000000000000000000000000000000001", DefaultCurrencyForChain(tempotx.ChainIdModerato))
+	assert.Equal(t, "0x20C0000000000000000000000000000000000001", DefaultCurrencyForChain(0))
+}
+
+func TestDefaultCurrenciesForChain(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		chainID int64
+		want    []string
+	}{
+		{
+			name:    "mainnet offers OUSD then USDC.e",
+			chainID: tempotx.ChainIdMainnet,
+			want:    []string{"0x20c0000000000000000000006a37DA5C996874BE", "0x20C000000000000000000000b9537d11c60E8b50"},
+		},
+		{
+			name:    "moderato offers OUSD then pathUSD",
+			chainID: tempotx.ChainIdModerato,
+			want:    []string{"0x20c0000000000000000000006a37DA5C996874BE", "0x20c0000000000000000000000000000000000000"},
+		},
+		{
+			name:    "unknown chain keeps single default",
+			chainID: 999999,
+			want:    []string{DefaultCurrencyForChain(999999)},
+		},
+		{
+			name:    "zero chain keeps single default",
+			chainID: 0,
+			want:    []string{DefaultCurrencyForChain(0)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, DefaultCurrenciesForChain(tt.chainID))
+		})
+	}
+}
+
+func TestDefaultCurrenciesForChainReturnsCopy(t *testing.T) {
+	t.Parallel()
+
+	first := DefaultCurrenciesForChain(tempotx.ChainIdMainnet)
+	first[0] = "mutated"
+	assert.Equal(t, OUSDAddress, DefaultCurrenciesForChain(tempotx.ChainIdMainnet)[0])
 }
 
 func TestInferChainIDFromRPCURL(t *testing.T) {

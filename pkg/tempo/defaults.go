@@ -86,3 +86,18 @@ func DefaultCurrencyForChain(chainID int64) string {
 		return tempotx.AlphaUSDAddress.Hex()
 	}
 }
+
+// DefaultCurrenciesForChain returns the ordered stablecoins a server accepts
+// by default on a chain. Mainnet offers OUSD, then USDC.e; Moderato offers
+// OUSD, then pathUSD. Other chains fall back to the single
+// DefaultCurrencyForChain token. The returned slice is a fresh copy.
+func DefaultCurrenciesForChain(chainID int64) []string {
+	switch chainID {
+	case tempotx.ChainIdMainnet:
+		return []string{OUSDAddress, MainnetUSDCAddress}
+	case tempotx.ChainIdModerato:
+		return []string{OUSDAddress, PathUSDAddress}
+	default:
+		return []string{DefaultCurrencyForChain(chainID)}
+	}
+}

@@ -91,7 +91,7 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			result, err := m.Charge(r.Context(), chargeParams)
 			if err != nil {
 				if result != nil && result.Challenge != nil {
-					WritePaymentErrorWithChallenge(w, err, result.Challenge, m.realm)
+					WritePaymentErrorWithChallenges(w, err, result.Challenges, m.realm)
 					return
 				}
 				WritePaymentError(w, err)
@@ -99,7 +99,7 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			}
 
 			if result.Challenge != nil {
-				WriteChallenge(w, result.Challenge, m.realm)
+				WriteChallenges(w, result.Challenges, m.realm)
 				return
 			}
 
@@ -200,28 +200,68 @@ func WritePaymentErrorWithChallenge(w http.ResponseWriter, err error, challenge 
 		WritePaymentError(w, err)
 		return
 	}
+	WritePaymentErrorWithChallenges(w, err, []*mpp.Challenge{challenge}, realm)
+}
 
-	header, headerErr := challenge.ToAuthenticateStrict(realm)
-	if headerErr != nil {
-		WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, headerErr.Error()))
+// WritePaymentErrorWithChallenges serializes an MPP error with fresh retry
+// challenges, one WWW-Authenticate field value per challenge in order.
+func WritePaymentErrorWithChallenges(w http.ResponseWriter, err error, challenges []*mpp.Challenge, realm string) {
+	if len(challenges) == 0 {
+		WritePaymentError(w, err)
 		return
 	}
-
-	w.Header().Set(mpp.HeaderWWWAuthenticate, header)
+	headers, challengeID, headerErr := authenticateHeaders(challenges, realm)
+	if headerErr != nil {
+		WritePaymentError(w, mpp.ErrInvalidChallenge(challengeID, headerErr.Error()))
+		return
+	}
+	setAuthenticateHeaders(w.Header(), headers)
 	WritePaymentError(w, err)
 }
 
 // WriteChallenge serializes an initial 402 challenge response.
 func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
-	header, err := challenge.ToAuthenticateStrict(realm)
+	WriteChallenges(w, []*mpp.Challenge{challenge}, realm)
+}
+
+// WriteChallenges serializes an initial 402 response offering every challenge,
+// one WWW-Authenticate field value per challenge in presentation order.
+func WriteChallenges(w http.ResponseWriter, challenges []*mpp.Challenge, realm string) {
+	if len(challenges) == 0 {
+		WritePaymentError(w, mpp.ErrBadRequest("no challenges could be generated"))
+		return
+	}
+	headers, _, err := authenticateHeaders(challenges, realm)
 	if err != nil {
 		WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
 		return
 	}
 
-	w.Header().Set(mpp.HeaderWWWAuthenticate, header)
+	setAuthenticateHeaders(w.Header(), headers)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusPaymentRequired)
+}
+
+// authenticateHeaders serializes every challenge before any header is written
+// so a later failure cannot leave a partial set of offers. On failure it also
+// returns the ID of the challenge that could not be serialized.
+func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, string, error) {
+	headers := make([]string, 0, len(challenges))
+	for _, challenge := range challenges {
+		header, err := challenge.ToAuthenticateStrict(realm)
+		if err != nil {
+			return nil, challenge.ID, err
+		}
+		headers = append(headers, header)
+	}
+	return headers, "", nil
+}
+
+func setAuthenticateHeaders(header http.Header, values []string) {
+	header.Del(mpp.HeaderWWWAuthenticate)
+	for _, value := range values {
+		header.Add(mpp.HeaderWWWAuthenticate, value)
+	}
 }
 
 // WritePaymentError serializes MPP verification errors as problem details.
