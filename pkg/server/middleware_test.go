@@ -232,6 +232,44 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	assert.Equal(t, originalBody, string(body))
 }
 
+func TestReadRequestBodyRestoresBodyWithinLimit(t *testing.T) {
+	const originalBody = `{"query":"paid"}`
+	request := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
+
+	read, err := ReadRequestBody(request)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(read))
+
+	restored, err := io.ReadAll(request.Body)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(restored))
+}
+
+func TestReadRequestBodyRejectsOversizedBody(t *testing.T) {
+	oversized := strings.Repeat("a", MaxRequestBodySize+1)
+	request := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(oversized))
+
+	read, err := ReadRequestBody(request)
+	require.ErrorIs(t, err, ErrRequestBodyTooLarge)
+	assert.Nil(t, read)
+}
+
+func TestChargeMiddlewareRejectsOversizedRequestBodyBeforeCharging(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Fail(t, "handler should not be called")
+	}))
+
+	oversized := strings.NewReader(strings.Repeat("a", MaxRequestBodySize+1))
+	request := httptest.NewRequest(http.MethodPost, "/paid", oversized)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+	assert.Contains(t, response.Body.String(), "too large")
+}
+
 func TestChargeMiddlewareReturnsFreshChallengeOnVerificationFailure(t *testing.T) {
 	payment := newTestServer(t, verificationFailedMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,7 +390,7 @@ func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {
 		w,
 		httptest.NewRequest(http.MethodGet, "/", nil),
 		&mpp.Credential{},
-		mpp.Success("0xreceipt"),
+		mpp.Success("tempo", "0xreceipt"),
 	)
 
 	if !w.flushed {
@@ -361,6 +399,22 @@ func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {
 	if got := w.header.Get("Cache-Control"); got != "private" {
 		t.Fatalf("Cache-Control = %q, want private", got)
 	}
+}
+
+func TestServeVerifiedOmitsReceiptFromFailedResponse(t *testing.T) {
+	w := httptest.NewRecorder()
+	serveVerified(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "failed", http.StatusInternalServerError)
+		}),
+		w,
+		httptest.NewRequest(http.MethodGet, "/", nil),
+		&mpp.Credential{},
+		mpp.Success("tempo", "0xreceipt"),
+	)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Empty(t, w.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
 type optionalResponseWriter struct {
@@ -397,4 +451,35 @@ func (w *optionalResponseWriter) Flush() {
 
 func (w *optionalResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, nil
+}
+
+func TestChargeMiddleware_RequiresAuthReadsPaymentAuthorizationAndPreservesBearer(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithRequiresAuth(true))
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "OK")
+	}))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	challengeResponse, err := http.Get(server.URL)
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.StatusCode)
+
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, mpp.HeaderPaymentAuthorization, challenge.Header)
+	assert.Contains(t, challengeResponse.Header.Get("WWW-Authenticate"), `header="`+mpp.HeaderPaymentAuthorization+`"`)
+
+	credential := challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"})
+	retry, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	retry.Header.Set("Authorization", "Bearer app-token")
+	retry.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+
+	paidResponse, err := http.DefaultClient.Do(retry)
+	require.NoError(t, err)
+	defer paidResponse.Body.Close()
+	require.Equal(t, http.StatusOK, paidResponse.StatusCode)
+	assert.NotEmpty(t, paidResponse.Header.Get("Payment-Receipt"))
 }

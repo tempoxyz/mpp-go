@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 
@@ -66,17 +69,22 @@ func ReceiptFromContext(ctx context.Context) *mpp.Receipt {
 // ChargeMiddleware creates an http.Handler middleware for the charge intent.
 //
 // It calls Mpp.Charge with the provided ChargeParams, injects the incoming
-// Authorization header automatically, returns a 402 challenge when payment is
-// required, and stores the verified Credential and Receipt in the request
-// context on success.
+// Authorization and Payment-Authorization headers automatically, returns a 402
+// challenge when payment is required, and stores the verified Credential and
+// Receipt in the request context on success.
 func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			chargeParams := params
-			chargeParams.Authorization = r.Header.Get("Authorization")
+			chargeParams.Authorization = r.Header.Get(mpp.HeaderAuthorization)
+			chargeParams.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
 			chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
 			body, err := ReadRequestBody(r)
 			if err != nil {
+				if errors.Is(err, ErrRequestBodyTooLarge) {
+					WritePaymentError(w, mpp.ErrBadRequest("request body is too large to verify"))
+					return
+				}
 				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
 				return
 			}
@@ -87,7 +95,7 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			result, err := m.Charge(r.Context(), chargeParams)
 			if err != nil {
 				if result != nil && result.Challenge != nil {
-					WritePaymentErrorWithChallenge(w, err, result.Challenge, m.realm)
+					WritePaymentErrorWithChallenges(w, err, result.Challenges, m.realm)
 					return
 				}
 				WritePaymentError(w, err)
@@ -95,7 +103,7 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			}
 
 			if result.Challenge != nil {
-				WriteChallenge(w, result.Challenge, m.realm)
+				WriteChallenges(w, result.Challenges, m.realm)
 				return
 			}
 
@@ -104,15 +112,27 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 	}
 }
 
+// MaxRequestBodySize bounds how much of a request body is buffered to verify a
+// credential digest. ChargeMiddleware reads the body before any credential is
+// validated, so an unbounded read would let an unauthenticated caller exhaust
+// server memory.
+const MaxRequestBodySize = 8 << 20 // 8 MiB
+
+// ErrRequestBodyTooLarge reports a body that exceeds MaxRequestBodySize.
+var ErrRequestBodyTooLarge = errors.New("request body exceeds the maximum verifiable size")
+
 // ReadRequestBody reads and restores r.Body so middleware can verify body digests
 // without consuming the body before the protected handler runs.
 func ReadRequestBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBodySize+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > MaxRequestBodySize {
+		return nil, ErrRequestBodyTooLarge
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return body, nil
@@ -120,14 +140,74 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {
 	ctx := ContextWithPayment(r.Context(), credential, receipt)
+	wrapped, complete := DeferPaymentReceipt(w, receipt)
+	next.ServeHTTP(wrapped, r.WithContext(ctx))
+	complete()
+}
 
-	// Mark the paid response as private so shared caches never serve a
-	// Payment-Receipt to a different client. This mirrors the MPP spec
-	// (mpp.dev/protocol) and the rust reference implementation.
-	w.Header().Set("Cache-Control", "private")
-	w.Header().Set("Payment-Receipt", receipt.ToPaymentReceipt())
+// DeferPaymentReceipt returns a writer that adds the receipt only when a
+// successful response status is committed. Call complete after the handler
+// returns to commit an otherwise empty successful response.
+func DeferPaymentReceipt(w http.ResponseWriter, receipt *mpp.Receipt) (http.ResponseWriter, func()) {
+	wrapped := &paymentReceiptWriter{ResponseWriter: w, receipt: receipt.ToPaymentReceipt()}
+	return wrapped, func() {
+		if !wrapped.wroteHeader {
+			wrapped.WriteHeader(http.StatusOK)
+		}
+	}
+}
 
-	next.ServeHTTP(w, r.WithContext(ctx))
+type paymentReceiptWriter struct {
+	http.ResponseWriter
+	receipt     string
+	wroteHeader bool
+}
+
+func (w *paymentReceiptWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		w.Header().Del(mpp.HeaderPaymentReceipt)
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.wroteHeader = true
+	setPaymentReceiptForStatus(w.Header(), status, w.receipt)
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *paymentReceiptWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *paymentReceiptWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *paymentReceiptWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("http.ResponseWriter does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (w *paymentReceiptWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func setPaymentReceiptForStatus(header http.Header, status int, receipt string) {
+	if status >= http.StatusBadRequest {
+		header.Del(mpp.HeaderPaymentReceipt)
+		return
+	}
+	header.Set("Cache-Control", "private")
+	header.Set(mpp.HeaderPaymentReceipt, receipt)
 }
 
 // WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry challenge.
@@ -136,32 +216,68 @@ func WritePaymentErrorWithChallenge(w http.ResponseWriter, err error, challenge 
 		WritePaymentError(w, err)
 		return
 	}
+	WritePaymentErrorWithChallenges(w, err, []*mpp.Challenge{challenge}, realm)
+}
 
-	header, headerErr := challenge.ToAuthenticateStrict(realm)
-	if headerErr != nil {
-		WritePaymentError(w, mpp.ErrInvalidChallenge(challenge.ID, headerErr.Error()))
+// WritePaymentErrorWithChallenges serializes an MPP error with fresh retry
+// challenges, one WWW-Authenticate field value per challenge in order.
+func WritePaymentErrorWithChallenges(w http.ResponseWriter, err error, challenges []*mpp.Challenge, realm string) {
+	if len(challenges) == 0 {
+		WritePaymentError(w, err)
 		return
 	}
-
-	w.Header().Set("WWW-Authenticate", header)
+	headers, challengeID, headerErr := authenticateHeaders(challenges, realm)
+	if headerErr != nil {
+		WritePaymentError(w, mpp.ErrInvalidChallenge(challengeID, headerErr.Error()))
+		return
+	}
+	setAuthenticateHeaders(w.Header(), headers)
 	WritePaymentError(w, err)
 }
 
-// WriteChallenge serializes a 402 challenge response using RFC 9457 problem details.
+// WriteChallenge serializes an initial 402 challenge response.
 func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
-	header, err := challenge.ToAuthenticateStrict(realm)
+	WriteChallenges(w, []*mpp.Challenge{challenge}, realm)
+}
+
+// WriteChallenges serializes an initial 402 response offering every challenge,
+// one WWW-Authenticate field value per challenge in presentation order.
+func WriteChallenges(w http.ResponseWriter, challenges []*mpp.Challenge, realm string) {
+	if len(challenges) == 0 {
+		WritePaymentError(w, mpp.ErrBadRequest("no challenges could be generated"))
+		return
+	}
+	headers, _, err := authenticateHeaders(challenges, realm)
 	if err != nil {
 		WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
 		return
 	}
 
-	w.Header().Set("WWW-Authenticate", header)
-	w.Header().Set("Content-Type", "application/problem+json")
+	setAuthenticateHeaders(w.Header(), headers)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusPaymentRequired)
+}
 
-	problem := mpp.ErrPaymentRequired(realm, challenge.Description)
-	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
+// authenticateHeaders serializes every challenge before any header is written
+// so a later failure cannot leave a partial set of offers. On failure it also
+// returns the ID of the challenge that could not be serialized.
+func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, string, error) {
+	headers := make([]string, 0, len(challenges))
+	for _, challenge := range challenges {
+		header, err := challenge.ToAuthenticateStrict(realm)
+		if err != nil {
+			return nil, challenge.ID, err
+		}
+		headers = append(headers, header)
+	}
+	return headers, "", nil
+}
+
+func setAuthenticateHeaders(header http.Header, values []string) {
+	header.Del(mpp.HeaderWWWAuthenticate)
+	for _, value := range values {
+		header.Add(mpp.HeaderWWWAuthenticate, value)
+	}
 }
 
 // WritePaymentError serializes MPP verification errors as problem details.
@@ -169,7 +285,8 @@ func WritePaymentError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 
-	if pe, ok := err.(*mpp.PaymentError); ok {
+	var pe *mpp.PaymentError
+	if errors.As(err, &pe) {
 		w.WriteHeader(pe.Status)
 		json.NewEncoder(w).Encode(pe.ProblemDetails(""))
 		return
