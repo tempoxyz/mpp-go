@@ -36,6 +36,8 @@ func parseAuthParams(s string) (map[string]string, error) {
 		if key == "" {
 			return nil, fmt.Errorf("mpp: malformed auth-param")
 		}
+		// Auth-param names are case-insensitive (RFC 9110 §11.2).
+		name := strings.ToLower(key)
 
 		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 			i++
@@ -53,10 +55,10 @@ func parseAuthParams(s string) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, exists := params[key]; exists {
+		if _, exists := params[name]; exists {
 			return nil, fmt.Errorf("mpp: duplicate auth-param %q", key)
 		}
-		params[key] = value
+		params[name] = value
 		i = next
 
 		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
@@ -66,7 +68,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 			// Legacy challenges may contain unescaped quotes in the optional
 			// description. Keep the value up to the quote and ignore the
 			// malformed, non-semantic suffix.
-			if key == "description" {
+			if name == "description" {
 				break
 			}
 			return nil, fmt.Errorf("mpp: malformed auth-param separator")
