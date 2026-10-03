@@ -26,6 +26,16 @@ func TestDetectRealmPrecedenceAndDefault(t *testing.T) {
 	}
 }
 
+func TestDetectRealmIgnoresHostEnvVars(t *testing.T) {
+	for _, envVar := range realmEnvVars {
+		t.Setenv(envVar, "")
+	}
+	t.Setenv("HOST", "0.0.0.0")
+	t.Setenv("HOSTNAME", "api-7d9f8c6b5-x2k4p")
+
+	assert.Equal(t, "MPP Payment", DetectRealm())
+}
+
 func TestDetectSecretKey(t *testing.T) {
 	t.Setenv("MPP_SECRET_KEY", "")
 	if _, err := DetectSecretKey(); err == nil || !strings.Contains(err.Error(), "MPP_SECRET_KEY environment variable is not set") {
