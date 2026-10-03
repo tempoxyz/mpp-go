@@ -467,6 +467,23 @@ func TestParseChallenge(t *testing.T) {
 			wantErr: `duplicate auth-param`,
 		},
 		{
+			name:   "mixed-case auth param names",
+			header: `Payment ID="abc", Realm="api.example.com", METHOD="tempo", Intent="charge", Request="e30"`,
+			want: &Challenge{
+				ID:         "abc",
+				Method:     "tempo",
+				Intent:     "charge",
+				Request:    map[string]any{},
+				Realm:      "api.example.com",
+				RequestB64: "e30",
+			},
+		},
+		{
+			name:    "case-variant duplicate auth params",
+			header:  `Payment id="abc", ID="def", realm="api.example.com", method="tempo", intent="charge", request="e30"`,
+			wantErr: `duplicate auth-param "ID"`,
+		},
+		{
 			name:    "unterminated quoted auth param",
 			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", opaque="unterminated`,
 			wantErr: `unterminated quoted auth-param`,
