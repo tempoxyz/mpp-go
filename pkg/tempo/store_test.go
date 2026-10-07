@@ -142,6 +142,11 @@ func TestStoreKeys(t *testing.T) {
 			want: "mppx:charge:0xabc123",
 		},
 		{
+			name: "charge key prefixes unprefixed hash",
+			got:  ChargeStoreKey("ABC123"),
+			want: "mppx:charge:0xabc123",
+		},
+		{
 			name: "proof key prefixes challenge id",
 			got:  ChargeProofStoreKey("challenge-1"),
 			want: "mppx:charge:proof:challenge-1",
