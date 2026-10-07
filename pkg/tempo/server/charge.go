@@ -292,7 +292,10 @@ func (i *Intent) validateCredential(
 	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	amount, _ := new(big.Int).SetString(request.Amount, 10)
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(request.Amount), 10)
+	if !ok {
+		return nil, mpp.ErrBadRequest("invalid charge amount")
+	}
 	if request.MethodDetails.FeePayer && amount.Sign() == 0 && payload.Type != tempo.CredentialTypeProof {
 		return nil, mpp.ErrInvalidPayload("zero-amount fee payer challenges require a proof credential")
 	}

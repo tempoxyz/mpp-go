@@ -42,7 +42,7 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 }
 
 func TestZeroAmountSponsoredCredentialsRequireProof(t *testing.T) {
-	for _, amount := range []string{"0", "00", "000000"} {
+	for _, amount := range []string{"0", "00", "000000", " 0 ", "\t00\n"} {
 		for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
 			t.Run(amount+"/"+string(kind), func(t *testing.T) {
 				request := buildRequest(t, true, nil)
