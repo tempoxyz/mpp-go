@@ -12,7 +12,7 @@ import (
 func TestMethodBuildChargeRequest(t *testing.T) {
 	t.Parallel()
 
-	moderatoIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlModerato})
+	moderatoIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return

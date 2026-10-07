@@ -378,7 +378,7 @@ func TestMethodFromConfigAppliesRelayToCustomIntent(t *testing.T) {
 	server, _ := relayTestServer(t, func(string) any {
 		return map[string]any{"success": false, "error": map[string]any{"code": RelayErrorUnsupported}}
 	})
-	localIntent, err := NewIntent(IntentConfig{})
+	localIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	require.NoError(t, err)
 	method, err := MethodFromConfig(Config{
 		Intent:    localIntent,

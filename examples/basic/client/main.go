@@ -39,9 +39,10 @@ func main() {
 	}
 
 	method, err := charge.New(charge.Config{
-		PrivateKey: privateKey,
-		ChainID:    chainID,
-		RPCURL:     rpcURL,
+		PaymentPolicy: devnet.PaymentPolicy(chainID),
+		PrivateKey:    privateKey,
+		ChainID:       chainID,
+		RPCURL:        rpcURL,
 	})
 	if err != nil {
 		log.Fatal(err)

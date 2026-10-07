@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"net/http"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -24,7 +26,26 @@ func runRelayClient(
 	privateKey string,
 	payment *server.Mpp,
 ) (*relayClientResult, error) {
+	// Bind authorization to our local server configuration, not remote offer data.
+	expected, err := payment.Charge(ctx, server.ChargeParams{Amount: "0.01"})
+	if err != nil {
+		return nil, err
+	}
+	trusted, err := tempo.ParseChargeRequest(expected.Challenge.Request)
+	if err != nil {
+		return nil, err
+	}
 	method, err := charge.New(charge.Config{
+		PaymentPolicy: func(_ context.Context, request tempo.ChargeRequest) error {
+			if request.Amount != trusted.Amount ||
+				!strings.EqualFold(request.Currency, trusted.Currency) ||
+				!strings.EqualFold(request.Recipient, trusted.Recipient) ||
+				request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != chainID ||
+				len(request.MethodDetails.Splits) != 0 {
+				return fmt.Errorf("payment does not match the configured photo price and payee")
+			}
+			return nil
+		},
 		ChainID:    chainID,
 		PrivateKey: privateKey,
 		RPCURL:     rpcURL,

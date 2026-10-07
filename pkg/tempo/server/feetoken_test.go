@@ -76,7 +76,7 @@ func TestSponsoredOUSDChargeWithDefaultsEndToEnd(t *testing.T) {
 			ctx := context.Background()
 			rpc := newOffersRPC(tt.chainID)
 			rpc.balances = tt.balances
-			intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 			require.NoError(t, err)
 			payment := newTestServer(t, NewMethod(MethodConfig{
 				Intent:    intent,
@@ -120,7 +120,7 @@ func TestLocalFeePayerAllowedFeeTokens(t *testing.T) {
 	chain := func(id int64) tempo.ChargeRequest {
 		return tempo.ChargeRequest{MethodDetails: tempo.MethodDetails{ChainID: &id}}
 	}
-	defaults, err := NewIntent(IntentConfig{FeePayerPrivateKey: feePayerKey})
+	defaults, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -149,7 +149,7 @@ func TestLocalFeePayerAllowedFeeTokens(t *testing.T) {
 		})
 	}
 
-	custom, err := NewIntent(IntentConfig{
+	custom, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 		FeePayerPrivateKey: feePayerKey,
 		FeePayerPolicies: map[string]FeePayerPolicy{
 			usdceAddress:   defaultFeePayerPolicy(),
@@ -186,7 +186,7 @@ func TestLocalFeePayerResolveFeeToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			intent, err := NewIntent(IntentConfig{FeePayerPrivateKey: feePayerKey, FeeToken: tt.feeToken})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey, FeeToken: tt.feeToken})
 			require.NoError(t, err)
 			rpc := &mockRPC{balances: tt.balances}
 			got, err := intent.resolveFeeToken(context.Background(), rpc, allowed)
@@ -213,7 +213,7 @@ func TestLocalFeePayerFailedBalanceLookupCountsAsUnfunded(t *testing.T) {
 func TestNewIntentRejectsInvalidFeeToken(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewIntent(IntentConfig{FeeToken: "pathUSD"})
+	_, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeeToken: "pathUSD"})
 	require.EqualError(t, err, `tempo server: invalid fee token "pathUSD"`)
 }
 
@@ -222,7 +222,7 @@ func TestSponsoredChargeConfiguredFeeTokenWins(t *testing.T) {
 
 	rpc, credential, request := sponsoredCredential(t, tempotx.ChainIdMainnet, ousdAddress)
 	rpc.balances = map[common.Address]*big.Int{pathUSDToken: big.NewInt(1)}
-	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey, FeeToken: usdceAddress})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey, FeeToken: usdceAddress})
 	require.NoError(t, err)
 
 	_, err = intent.Verify(context.Background(), credential, request.Map())
@@ -247,7 +247,7 @@ func TestSponsoredChargeRejectsFeeTokenOutsideAllowlist(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			rpc, credential, request := sponsoredCredential(t, tt.chainID, ousdAddress)
-			intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey, FeeToken: tt.feeToken})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey, FeeToken: tt.feeToken})
 			require.NoError(t, err)
 
 			_, err = intent.Verify(context.Background(), credential, request.Map())
@@ -264,7 +264,7 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 		t.Parallel()
 		rpc, credential, request := sponsoredCredential(t, tempotx.ChainIdMainnet, ousdAddress)
 		rpc.balances = map[common.Address]*big.Int{pathUSDToken: big.NewInt(1), usdceToken: big.NewInt(1)}
-		intent, err := NewIntent(IntentConfig{
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 			RPC:                rpc,
 			FeePayerPrivateKey: feePayerKey,
 			FeePayerPolicies:   map[string]FeePayerPolicy{ousdAddress: defaultFeePayerPolicy()},
@@ -280,7 +280,7 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 		t.Parallel()
 		rpc, credential, request := sponsoredCredential(t, tempotx.ChainIdModerato, ousdAddress)
 		rpc.balances = map[common.Address]*big.Int{usdceToken: big.NewInt(1)}
-		intent, err := NewIntent(IntentConfig{
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 			RPC:                rpc,
 			FeePayerPrivateKey: feePayerKey,
 			FeePayerPolicies: map[string]FeePayerPolicy{
@@ -298,7 +298,7 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 	t.Run("fee token policy limits apply", func(t *testing.T) {
 		t.Parallel()
 		rpc, credential, request := sponsoredCredential(t, tempotx.ChainIdMainnet, ousdAddress)
-		intent, err := NewIntent(IntentConfig{
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 			RPC:                rpc,
 			FeePayerPrivateKey: feePayerKey,
 			FeePayerPolicies: map[string]FeePayerPolicy{usdceAddress: {
@@ -349,7 +349,7 @@ func sponsoredCredential(t *testing.T, chainID int64, currency string) (*mockRPC
 
 func payWithTransaction(t *testing.T, rpc *mockRPC, challenge *mpp.Challenge) *mpp.Credential {
 	t.Helper()
-	method, err := chargeclient.New(chargeclient.Config{
+	method, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey:     testPrivateKey,
 		RPC:            rpc,
 		ChainID:        int64(rpc.chainID),
@@ -424,7 +424,7 @@ func TestRemoteSponsoredOUSDUsesIndependentFeeToken(t *testing.T) {
 			}))
 			defer sponsor.Close()
 			rpc := newOffersRPC(tt.chainID)
-			intent, err := NewIntent(IntentConfig{RPC: rpc})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 			require.NoError(t, err)
 			payment := newTestServer(t, NewMethod(MethodConfig{
 				Intent: intent, Recipient: testRecipient, ChainID: tt.chainID,

@@ -528,7 +528,7 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSigner(t *testing.T) {
 	defer feePayerServer.Close()
 	request.MethodDetails.FeePayerURL = feePayerServer.URL
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -610,7 +610,7 @@ func TestChargeFlow_FeePayerTransactionViaRemoteSignerRejectsTamperedFeeToken(t 
 	defer feePayerServer.Close()
 	request.MethodDetails.FeePayerURL = feePayerServer.URL
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -684,7 +684,7 @@ func TestChargeHTTPFlow_KeychainFeePayerSigningForm(t *testing.T) {
 				return testReceiptHash, buildReceipt(raw, request, rootSigner.Address()), nil
 			}
 
-			intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 			if err != nil {
 				t.Fatalf("NewIntent() error = %v", err)
 			}
@@ -776,7 +776,7 @@ func TestChargeFlow_KeychainFeePayerSigningFormRejectsTampering(t *testing.T) {
 			rpc := newMockRPC(request)
 			challenge := buildChallenge(t, request)
 			credential := buildKeychainFeePayerCredential(t, rpc, challenge, tc.options)
-			intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 			if err != nil {
 				t.Fatalf("NewIntent() error = %v", err)
 			}
@@ -916,7 +916,7 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 		Source: tempo.ProofSource(42431, rootSigner.Address()),
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -989,7 +989,7 @@ func TestChargeFlow_ProofCredentialWithAccessKeyWithoutExpiry(t *testing.T) {
 		Source: tempo.ProofSource(42431, rootSigner.Address()),
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1051,7 +1051,7 @@ func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1103,7 +1103,7 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1148,7 +1148,7 @@ func TestChargeFlow_HashCredentialAcceptsAttributionMemo(t *testing.T) {
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1181,7 +1181,7 @@ func TestChargeFlow_RejectsMalformedCredentialSource(t *testing.T) {
 
 	credential.Source = "not-a-did"
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1219,7 +1219,7 @@ func TestChargeFlow_ProofCredentialRejectsDifferentRealm(t *testing.T) {
 
 	credential.Challenge.Realm = "other.example.com"
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1263,7 +1263,7 @@ func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1330,7 +1330,7 @@ func TestChargeFlow_TransactionCredentialRejectsReservedHashAfterReceiptFailure(
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1377,7 +1377,7 @@ func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailur
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1434,7 +1434,7 @@ func TestChargeFlow_RejectsFeePayerTransactionOutsideSponsorPolicy(t *testing.T)
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1462,7 +1462,7 @@ func TestChargeFlow_FeePayerTransactionUsesChallengeOnceAfterRevert(t *testing.T
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -1597,7 +1597,7 @@ func TestChargeFlow_LocalFeePayerSponsorsCurrencyWithoutFeePolicy(t *testing.T) 
 	rpc := newMockRPC(request)
 	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
 	require.NoError(t, err)
-	intent, err := NewIntent(IntentConfig{RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 	require.NoError(t, err)
 
 	// The charge currency has no fee-payer policy; the local fee payer pays
@@ -1635,7 +1635,7 @@ func TestChargeFlow_CustomFeePayerPolicyAllowsConfiguredToken(t *testing.T) {
 		return
 	}
 
-	intent, err := NewIntent(IntentConfig{
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 		RPC:                rpc,
 		FeePayerPrivateKey: feePayerKey,
 		FeePayerPolicies: map[string]FeePayerPolicy{
@@ -1722,7 +1722,7 @@ func TestCanonicalReceiptTransfers_RejectsUnpairedMemoTransfers(t *testing.T) {
 
 func newClientMethod(t *testing.T, rpc tempo.RPCClient, credentialType tempo.CredentialType) *chargeclient.Method {
 	t.Helper()
-	method, err := chargeclient.New(chargeclient.Config{
+	method, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey:     testPrivateKey,
 		RPC:            rpc,
 		ChainID:        42431,

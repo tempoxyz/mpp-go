@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"net/http"
 	"net/http/httptest"
 
@@ -17,6 +18,8 @@ type exampleServer struct {
 
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
 	method, err := charge.MethodFromConfig(charge.Config{
+		// Development only: replicas need a shared persistent store.
+		Store:     tempo.NewMemoryStore(),
 		RPCURL:    rpcURL,
 		ChainID:   chainID,
 		Currency:  devnet.Currency,

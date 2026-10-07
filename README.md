@@ -54,11 +54,14 @@ import (
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
 	method, _ := charge.MethodFromConfig(charge.Config{
+        // Development only; use a shared persistent Store in production.
+        Store: tempo.NewMemoryStore(),
 		RPCURL: "https://rpc.moderato.tempo.xyz",
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
@@ -109,14 +112,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+    "strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
+    "github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 
 func main() {
 	method, _ := charge.New(charge.Config{
+        ChainID: 42431,
+        PaymentPolicy: func(_ context.Context, request tempo.ChargeRequest) error {
+            if request.Amount != "500000" ||
+                !strings.EqualFold(request.Currency, tempo.DefaultCurrencyForChain(42431)) ||
+                !strings.EqualFold(request.Recipient, "0x70997970c51812dc3a010c7d01b50e0d17dc79c8") ||
+                request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != 42431 ||
+                len(request.MethodDetails.Splits) != 0 {
+                return fmt.Errorf("unexpected payment terms")
+            }
+            return nil
+        },
 		PrivateKey: os.Getenv("MPP_PRIVATE_KEY"),
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
@@ -317,3 +333,39 @@ Licensed under either of [Apache License, Version 2.0](./LICENSE-APACHE) or [MIT
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
+
+### Payment authorization and replay storage
+
+Clients reject nonzero payments unless `PaymentPolicy` explicitly authorizes the
+normalized request before signing or broadcasting. A policy must bound the amount
+in token base units and check currency, recipient (including splits), and chain.
+For a working bounded policy, see `examples/internal/devnet.PaymentPolicy`:
+
+```go
+method, err := charge.New(charge.Config{
+    PrivateKey: privateKey,
+    ChainID: chainID,
+    PaymentPolicy: func(ctx context.Context, request tempo.ChargeRequest) error {
+        // Application policy: validate the token, payee, chain, and total budget.
+        return budget.Authorize(ctx, request)
+    },
+})
+```
+
+The callback may run concurrently. A per-payment cap does not bound cumulative
+spending; reserve any shared budget atomically. Zero-amount identity proofs do not
+require payment approval and never authorize a token transfer.
+
+Local verifiers require an explicit `Store` before verifying any payment. All
+replicas must share persistent replay keys, with atomic `PutIfAbsent`, no eviction,
+and fail-closed behavior on storage errors. `tempo.NewMemoryStore()` is an explicit
+single-process development choice; it loses replay protection on restart. Existing
+applications relying on the implicit memory store must configure storage. Relay
+verification delegates replay protection to the relay.
+
+Payment middleware buffers at most 4 MiB for request digest verification and
+returns HTTP 413 for larger bodies, including chunked requests. Configure HTTP
+read timeouts as well. Fiber applications should keep their transport `BodyLimit`
+at or below this limit, since Fiber reads the body before middleware runs.
+Sponsored zero-amount requests require proof credentials; sponsored transactions
+must retain at least 15 seconds of validity before co-signing and broadcasting.

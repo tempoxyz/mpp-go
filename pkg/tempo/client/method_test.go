@@ -166,7 +166,7 @@ func TestCreateCredentialHashWithAttributionMemo(t *testing.T) {
 		return
 	}
 	rpc := &mockRPC{chainID: 42431}
-	method, err := New(Config{
+	method, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		ChainID:        42431,
 		CredentialType: tempo.CredentialTypeHash,
 		PrivateKey:     testPrivateKey,
@@ -206,7 +206,7 @@ func TestCreateCredentialHashWithAttributionMemo(t *testing.T) {
 func TestNewInfersChainIDFromRPCURL(t *testing.T) {
 	t.Parallel()
 
-	method, err := New(Config{
+	method, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey: testPrivateKey,
 		RPCURL:     tempotx.RpcUrlModerato,
 	})
@@ -224,7 +224,7 @@ func TestNewInfersChainIDFromRPCURL(t *testing.T) {
 func TestNewRejectsUnknownChainWithoutRPC(t *testing.T) {
 	t.Parallel()
 
-	_, err := New(Config{PrivateKey: testPrivateKey, ChainID: 999999})
+	_, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil }, PrivateKey: testPrivateKey, ChainID: 999999})
 	if !assert.Falsef(t, err == nil || err.Error() != "tempo client: unknown chain id 999999; configure RPC or RPCURL explicitly",
 		"New() error = %v, want unknown chain id error", err) {
 		return
@@ -235,7 +235,7 @@ func TestNewRejectsUnknownChainWithoutRPC(t *testing.T) {
 func TestCreateCredentialRejectsUnknownChallengeChainWithoutRPC(t *testing.T) {
 	t.Parallel()
 
-	method, err := New(Config{PrivateKey: testPrivateKey})
+	method, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil }, PrivateKey: testPrivateKey})
 	if !assert.NoErrorf(t, err,
 		"New() error = %v", err) {
 		return

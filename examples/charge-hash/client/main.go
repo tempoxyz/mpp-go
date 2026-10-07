@@ -36,7 +36,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	method, err := charge.New(charge.Config{ChainID: chainID, CredentialType: tempo.CredentialTypeHash, PrivateKey: privateKey, RPCURL: rpcURL})
+	method, err := charge.New(charge.Config{
+		PaymentPolicy: devnet.PaymentPolicy(chainID), ChainID: chainID, CredentialType: tempo.CredentialTypeHash, PrivateKey: privateKey, RPCURL: rpcURL})
 	if err != nil {
 		log.Fatal(err)
 	}

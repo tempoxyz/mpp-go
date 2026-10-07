@@ -44,7 +44,9 @@ type Config struct {
 	FeePayerPolicies map[string]FeePayerPolicy
 	// FeeToken fixes the fee token a local fee payer pays gas in; see IntentConfig.FeeToken.
 	FeeToken string
-	// Store persists replay-protection keys for hash and proof credentials.
+	// Store is required to verify payments. Use a persistent store shared by all
+	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
+	// An explicit tempo.NewMemoryStore() is only suitable for single-process development.
 	Store tempo.Store
 	// Relay delegates credential validation and finalization to Tempo API or a compatible MPP relay.
 	Relay *RelayConfig

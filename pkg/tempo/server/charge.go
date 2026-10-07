@@ -42,6 +42,14 @@ var feeControllerAddress = common.HexToAddress("0xfeec00000000000000000000000000
 const balanceOfSelector = "70a08231"
 
 const feePayerMaxValidityWindow = 15 * time.Minute
+const feePayerMinValidityWindow = 15 * time.Second
+
+func validateFeePayerDeadline(validBefore uint64, now time.Time) error {
+	if validBefore < uint64(now.Add(feePayerMinValidityWindow).Unix()) {
+		return mpp.ErrVerificationFailed("fee payer transaction needs at least 15 seconds of remaining validity")
+	}
+	return nil
+}
 
 type sourceDID struct {
 	chainID int64
@@ -79,7 +87,9 @@ type IntentConfig struct {
 	// of, or the first allowed fee token. It must be an allowed fee token and
 	// is ignored for remote fee payers (FeePayerURL).
 	FeeToken string
-	// Store persists replay-protection keys for hash and proof credentials.
+	// Store is required to verify payments. Use a persistent store shared by all
+	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
+	// An explicit tempo.NewMemoryStore() is only suitable for single-process development.
 	Store tempo.Store
 }
 
@@ -127,9 +137,6 @@ func NewIntent(config IntentConfig) (*Intent, error) {
 		feePayerSigner = resolved
 	}
 	store := config.Store
-	if store == nil {
-		store = tempo.NewMemoryStore()
-	}
 	feePayerPolicy, err := normalizeFeePayerPolicies(config.FeePayerPolicies)
 	if err != nil {
 		return nil, err
@@ -259,6 +266,9 @@ func (i *Intent) validateCredential(
 	if credential == nil {
 		return nil, mpp.ErrMalformedCredential("credential is required")
 	}
+	if i.store == nil {
+		return nil, fmt.Errorf("tempo server: configure a shared persistent replay Store before verifying payments; MemoryStore is only suitable for single-process development")
+	}
 	request, err := tempo.ParseChargeRequest(requestMap)
 	if err != nil {
 		return nil, mpp.ErrBadRequest(err.Error())
@@ -273,6 +283,9 @@ func (i *Intent) validateCredential(
 	}
 	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
+	}
+	if request.MethodDetails.FeePayer && request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
+		return nil, mpp.ErrInvalidPayload("zero-amount fee payer challenges require a proof credential")
 	}
 	if request.MethodDetails.FeePayer && request.Amount != "0" && payload.Type != tempo.CredentialTypeTransaction {
 		return nil, mpp.ErrInvalidPayload("fee payer challenges require a transaction credential")
@@ -427,8 +440,8 @@ func (i *Intent) validateTransaction(
 		if !tx.AwaitingFeePayer {
 			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
-		if tx.ValidBefore == 0 || time.Now().Unix() >= int64(tx.ValidBefore) {
-			return mpp.ErrVerificationFailed("fee payer transaction has expired")
+		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+			return err
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
@@ -514,6 +527,9 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
 		releaseSponsoredClaim = true
+		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+			return nil, err
+		}
 		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
 			tx.FeeToken = feeToken
@@ -583,6 +599,11 @@ func (i *Intent) broadcastTransaction(
 		return nil, err
 	}
 
+	if request.MethodDetails.FeePayer {
+		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	serialized, err := tempotx.Serialize(tx, nil)
 	if err != nil {
 		return nil, mpp.ErrVerificationFailed("failed to serialize transaction")
@@ -1494,7 +1515,7 @@ func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string, policy
 				}
 			}
 		}
-		if int64(tx.ValidBefore) > maxValidBefore {
+		if tx.ValidBefore > uint64(maxValidBefore) {
 			return mpp.ErrInvalidPayload("fee payer transaction validity window exceeds sponsor policy")
 		}
 	}

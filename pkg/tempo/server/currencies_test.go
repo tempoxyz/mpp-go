@@ -39,11 +39,11 @@ func TestCurrencyConstants(t *testing.T) {
 func TestNewMethodDefaultCurrencies(t *testing.T) {
 	t.Parallel()
 
-	moderatoIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlModerato})
+	moderatoIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato})
 	require.NoError(t, err)
-	mainnetIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlMainnet})
+	mainnetIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlMainnet})
 	require.NoError(t, err)
-	customIntent, err := NewIntent(IntentConfig{RPCURL: "https://rpc.example.com"})
+	customIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: "https://rpc.example.com"})
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -354,7 +354,7 @@ func TestMethodBuildChargeRequestsPropagatesErrors(t *testing.T) {
 func TestDefaultFeePayerPoliciesUnchanged(t *testing.T) {
 	t.Parallel()
 
-	intent, err := NewIntent(IntentConfig{})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	require.NoError(t, err)
 
 	want := FeePayerPolicy{
@@ -606,7 +606,7 @@ func newOffersRPC(chainID int64) *mockRPC {
 
 func newOffersServer(t *testing.T, rpc *mockRPC, config MethodConfig) *mppserver.Mpp {
 	t.Helper()
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	require.NoError(t, err)
 	config.Intent = intent
 	config.Recipient = testRecipient
@@ -628,7 +628,7 @@ func issueOffers(t *testing.T, payment *mppserver.Mpp, params mppserver.ChargePa
 
 func payWithHash(t *testing.T, rpc *mockRPC, challenge *mpp.Challenge) *mpp.Credential {
 	t.Helper()
-	method, err := chargeclient.New(chargeclient.Config{
+	method, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey:     testPrivateKey,
 		RPC:            rpc,
 		ChainID:        int64(rpc.chainID),
