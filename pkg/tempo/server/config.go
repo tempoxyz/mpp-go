@@ -1,6 +1,8 @@
 package chargeserver
 
 import (
+	"fmt"
+
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 )
@@ -94,7 +96,7 @@ func MethodFromConfig(config Config) (*Method, error) {
 		if err != nil {
 			return nil, err
 		}
-		method := NewMethod(methodConfig)
+		method := newMethod(methodConfig)
 		intent, err := relay.intent(method.intent.Name())
 		if err != nil {
 			return nil, err
@@ -102,6 +104,9 @@ func MethodFromConfig(config Config) (*Method, error) {
 		method.intent = intent
 		method.supportsUnknownChain = true
 		return method, nil
+	}
+	if methodConfig.Intent.store == nil {
+		return nil, fmt.Errorf("tempo server: a replay Store is required")
 	}
 	return NewMethod(methodConfig), nil
 }

@@ -22,7 +22,12 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 	method, err := MethodFromConfig(Config{RPC: rpc})
 	require.ErrorContains(t, err, "replay Store is required")
 	require.Nil(t, method)
-	require.Panics(t, func() { NewMethod(MethodConfig{}) })
+	for _, unconfigured := range []*Intent{nil, {}} {
+		require.Panics(t, func() { NewMethod(MethodConfig{Intent: unconfigured}) })
+		method, err := MethodFromConfig(Config{Intent: unconfigured})
+		require.ErrorContains(t, err, "replay Store is required")
+		require.Nil(t, method)
+	}
 	require.Empty(t, rpc.sentRawTxs)
 
 	store := tempo.NewMemoryStore()
@@ -37,20 +42,23 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 }
 
 func TestZeroAmountSponsoredCredentialsRequireProof(t *testing.T) {
-	for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
-		t.Run(string(kind), func(t *testing.T) {
-			request := buildRequest(t, true, nil)
-			request.Amount = "0"
-			rpc := newMockRPC(request)
-			intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
-			require.NoError(t, err)
-			credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x01"}.Map()}
-			_, err = intent.Verify(context.Background(), credential, request.Map())
-			require.ErrorContains(t, err, "zero-amount fee payer challenges require a proof")
-			require.Empty(t, rpc.sentRawTxs)
-			require.Empty(t, rpc.callRequests)
-		})
+	for _, amount := range []string{"0", "00", "000000"} {
+		for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
+			t.Run(amount+"/"+string(kind), func(t *testing.T) {
+				request := buildRequest(t, true, nil)
+				request.Amount = amount
+				rpc := newMockRPC(request)
+				intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
+				require.NoError(t, err)
+				credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x01"}.Map()}
+				_, err = intent.Verify(context.Background(), credential, request.Map())
+				require.ErrorContains(t, err, "zero-amount fee payer challenges require a proof")
+				require.Empty(t, rpc.sentRawTxs)
+				require.Empty(t, rpc.callRequests)
+			})
+		}
 	}
+
 }
 
 func TestSponsoredValidityDeadline(t *testing.T) {
