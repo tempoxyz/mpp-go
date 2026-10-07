@@ -105,7 +105,7 @@ func MethodFromConfig(config Config) (*Method, error) {
 		method.supportsUnknownChain = true
 		return method, nil
 	}
-	if methodConfig.Intent.store == nil {
+	if !hasReplayStore(methodConfig.Intent.store) {
 		return nil, fmt.Errorf("tempo server: a replay Store is required")
 	}
 	return NewMethod(methodConfig), nil

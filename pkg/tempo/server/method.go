@@ -68,7 +68,7 @@ var _ mppserver.ChargeOffersBuilder = (*Method)(nil)
 // when Intent lacks replay storage or the currency configuration is invalid (see MethodConfig.Currencies);
 // use MethodFromConfig to receive the error instead.
 func NewMethod(config MethodConfig) *Method {
-	if config.Intent == nil || config.Intent.store == nil {
+	if config.Intent == nil || !hasReplayStore(config.Intent.store) {
 		panic("tempo server: Intent must be configured with a replay Store")
 	}
 	return newMethod(config)

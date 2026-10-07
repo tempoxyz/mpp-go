@@ -41,6 +41,20 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 	require.Error(t, err, "another verifier must not accept the same proof")
 }
 
+func TestTypedNilReplayStoresRejectedBeforeChallenge(t *testing.T) {
+	for _, store := range []tempo.Store{nil, (*tempo.MemoryStore)(nil), (*tempo.RedisStore)(nil)} {
+		intent, err := NewIntent(IntentConfig{Store: store})
+		require.ErrorContains(t, err, "replay Store is required")
+		require.Nil(t, intent)
+		for _, config := range []Config{{Store: store}, {Intent: &Intent{store: store}}} {
+			method, err := MethodFromConfig(config)
+			require.ErrorContains(t, err, "replay Store is required")
+			require.Nil(t, method)
+		}
+		require.Panics(t, func() { NewMethod(MethodConfig{Intent: &Intent{store: store}}) })
+	}
+}
+
 func TestZeroAmountSponsoredCredentialsRequireProof(t *testing.T) {
 	for _, amount := range []string{"0", "00", "000000", " 0 ", "\t00\n"} {
 		for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {

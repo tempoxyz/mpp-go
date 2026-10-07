@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -119,9 +120,22 @@ type validatedChargeCredential struct {
 	feeToken common.Address
 }
 
+func hasReplayStore(store tempo.Store) bool {
+	if store == nil {
+		return false
+	}
+	value := reflect.ValueOf(store)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
+}
+
 // NewIntent constructs a Tempo charge verifier.
 func NewIntent(config IntentConfig) (*Intent, error) {
-	if config.Store == nil {
+	if !hasReplayStore(config.Store) {
 		return nil, fmt.Errorf("tempo server: a shared persistent replay Store is required; use MemoryStore only for single-process development")
 	}
 	return newIntent(config)
@@ -274,7 +288,7 @@ func (i *Intent) validateCredential(
 	if credential == nil {
 		return nil, mpp.ErrMalformedCredential("credential is required")
 	}
-	if i.store == nil {
+	if !hasReplayStore(i.store) {
 		return nil, fmt.Errorf("tempo server: configure a shared persistent replay Store before verifying payments; MemoryStore is only suitable for single-process development")
 	}
 	request, err := tempo.ParseChargeRequest(requestMap)
