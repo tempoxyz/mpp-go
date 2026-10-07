@@ -51,3 +51,8 @@ requires a Tempo API key with the `mpp:write` scope.
 `server.ChargeMiddleware` already works with `net/http` and routers built on
 top of it, such as Chi. The Gin and Echo examples use the dedicated adapter
 packages under `pkg/server/gin` and `pkg/server/echo`.
+
+The `basic` server generates a merchant address at startup. Set `RECIPIENT` to
+that printed address when running its client; the client will only authorize
+payments to that merchant. The other local examples use the fixed development
+recipient and cap each payment at one token.

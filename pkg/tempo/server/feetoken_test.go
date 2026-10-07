@@ -349,7 +349,7 @@ func sponsoredCredential(t *testing.T, chainID int64, currency string) (*mockRPC
 
 func payWithTransaction(t *testing.T, rpc *mockRPC, challenge *mpp.Challenge) *mpp.Credential {
 	t.Helper()
-	method, err := chargeclient.New(chargeclient.Config{
+	method, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey:     testPrivateKey,
 		RPC:            rpc,
 		ChainID:        int64(rpc.chainID),
