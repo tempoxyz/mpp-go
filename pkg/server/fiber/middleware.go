@@ -3,6 +3,7 @@ package fiberadapter
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 
 	fiberfw "github.com/gofiber/fiber/v2"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -35,7 +36,12 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
 		chargeParams.PaymentAuthorization = c.Get(mpp.HeaderPaymentAuthorization)
 		chargeParams.MppxScope = fiberScope(c)
-		if body := c.Body(); len(body) > 0 {
+		body := c.Body()
+		if len(body) > server.MaxRequestBodyBytes {
+			WritePaymentError(c, server.RequestBodyError(&http.MaxBytesError{Limit: server.MaxRequestBodyBytes}))
+			return nil
+		}
+		if len(body) > 0 {
 			chargeParams.Body = append([]byte(nil), body...)
 		}
 

@@ -69,7 +69,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 			}
 			body, err := ReadRequestBody(r)
 			if err != nil {
-				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
+				WritePaymentError(w, RequestBodyError(err))
 				return
 			}
 			scope := ScopeFromHTTPRequest(r, "")

@@ -277,3 +277,13 @@ func newTestServer(t *testing.T, method server.Method, realm, secretKey string, 
 	require.NoError(t, err)
 	return payment
 }
+
+func TestOversizedBodyRejectedBeforePayment(t *testing.T) {
+	router := fiberfw.New(fiberfw.Config{BodyLimit: server.MaxRequestBodyBytes + 100})
+	router.Post("/", ChargeMiddleware(nil, server.ChargeParams{}), func(c *fiberfw.Ctx) error { t.Fatal("handler called"); return nil })
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", server.MaxRequestBodyBytes+1)))
+	response, err := router.Test(req)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusRequestEntityTooLarge, response.StatusCode)
+}
