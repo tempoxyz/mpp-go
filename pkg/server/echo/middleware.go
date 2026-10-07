@@ -35,7 +35,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
 			body, err := server.ReadRequestBody(c.Request())
 			if err != nil {
-				server.WritePaymentError(c.Response(), mpp.ErrBadRequest("failed to read request body"))
+				server.WritePaymentError(c.Response(), server.RequestBodyError(err))
 				return nil
 			}
 			if len(body) > 0 {

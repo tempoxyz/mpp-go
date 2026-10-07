@@ -36,7 +36,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
 		body, err := server.ReadRequestBody(c.Request)
 		if err != nil {
-			server.WritePaymentError(c.Writer, mpp.ErrBadRequest("failed to read request body"))
+			server.WritePaymentError(c.Writer, server.RequestBodyError(err))
 			c.Abort()
 			return
 		}

@@ -3,6 +3,8 @@ package fiberadapter
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 
 	fiberfw "github.com/gofiber/fiber/v2"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -35,7 +37,21 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
 		chargeParams.PaymentAuthorization = c.Get(mpp.HeaderPaymentAuthorization)
 		chargeParams.MppxScope = fiberScope(c)
-		if body := c.Body(); len(body) > 0 {
+		if encoding := strings.TrimSpace(c.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+			WritePaymentError(c, &mpp.PaymentError{
+				Type:   "about:blank",
+				Status: http.StatusUnsupportedMediaType,
+				Title:  http.StatusText(http.StatusUnsupportedMediaType),
+				Detail: "encoded request bodies are not supported by payment middleware",
+			})
+			return nil
+		}
+		body := c.BodyRaw()
+		if len(body) > server.MaxRequestBodyBytes {
+			WritePaymentError(c, server.RequestBodyError(&http.MaxBytesError{Limit: server.MaxRequestBodyBytes}))
+			return nil
+		}
+		if len(body) > 0 {
 			chargeParams.Body = append([]byte(nil), body...)
 		}
 

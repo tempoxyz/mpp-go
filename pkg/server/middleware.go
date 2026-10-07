@@ -81,7 +81,7 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
 			body, err := ReadRequestBody(r)
 			if err != nil {
-				WritePaymentError(w, mpp.ErrBadRequest("failed to read request body"))
+				WritePaymentError(w, RequestBodyError(err))
 				return
 			}
 			if len(body) > 0 {
@@ -108,15 +108,41 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 	}
 }
 
+// MaxRequestBodyBytes bounds the body buffered for payment digest verification.
+// Configure the HTTP server's read timeout separately to bound slow uploads.
+const MaxRequestBodyBytes = 4 << 20
+
+// RequestBodyError maps oversized bodies to HTTP 413 and other read failures to 400.
+func RequestBodyError(err error) *mpp.PaymentError {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return &mpp.PaymentError{
+			Type:   "about:blank",
+			Status: http.StatusRequestEntityTooLarge,
+			Title:  http.StatusText(http.StatusRequestEntityTooLarge),
+			Detail: "request body exceeds payment middleware limit",
+		}
+	}
+	return mpp.ErrBadRequest("failed to read request body")
+}
+
 // ReadRequestBody reads and restores r.Body so middleware can verify body digests
 // without consuming the body before the protected handler runs.
 func ReadRequestBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
-	body, err := io.ReadAll(r.Body)
+	original := r.Body
+	defer original.Close()
+	if r.ContentLength > MaxRequestBodyBytes {
+		return nil, &http.MaxBytesError{Limit: MaxRequestBodyBytes}
+	}
+	body, err := io.ReadAll(io.LimitReader(original, MaxRequestBodyBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > MaxRequestBodyBytes {
+		return nil, &http.MaxBytesError{Limit: MaxRequestBodyBytes}
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return body, nil
