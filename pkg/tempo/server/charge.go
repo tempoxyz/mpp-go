@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -79,7 +80,9 @@ type IntentConfig struct {
 	// of, or the first allowed fee token. It must be an allowed fee token and
 	// is ignored for remote fee payers (FeePayerURL).
 	FeeToken string
-	// Store persists replay-protection keys for hash and proof credentials.
+	// Store is required to verify payments. Use a persistent store shared by all
+	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
+	// An explicit tempo.NewMemoryStore() is only suitable for single-process development.
 	Store tempo.Store
 }
 
@@ -109,8 +112,29 @@ type validatedChargeCredential struct {
 	feeToken common.Address
 }
 
+func hasReplayStore(store tempo.Store) bool {
+	if store == nil {
+		return false
+	}
+	value := reflect.ValueOf(store)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
+}
+
 // NewIntent constructs a Tempo charge verifier.
 func NewIntent(config IntentConfig) (*Intent, error) {
+	if !hasReplayStore(config.Store) {
+		return nil, fmt.Errorf("tempo server: a shared persistent replay Store is required; use MemoryStore only for single-process development")
+	}
+	return newIntent(config)
+}
+
+// newIntent also builds relay metadata; relay verification owns its replay store.
+func newIntent(config IntentConfig) (*Intent, error) {
 	feePayerPrivateKey := config.FeePayerPrivateKey
 	if feePayerPrivateKey == "" && config.FeePayerPrivateKeyEnv != "" {
 		feePayerPrivateKey = os.Getenv(config.FeePayerPrivateKeyEnv)
@@ -127,9 +151,6 @@ func NewIntent(config IntentConfig) (*Intent, error) {
 		feePayerSigner = resolved
 	}
 	store := config.Store
-	if store == nil {
-		store = tempo.NewMemoryStore()
-	}
 	feePayerPolicy, err := normalizeFeePayerPolicies(config.FeePayerPolicies)
 	if err != nil {
 		return nil, err
@@ -258,6 +279,9 @@ func (i *Intent) validateCredential(
 ) (*validatedChargeCredential, error) {
 	if credential == nil {
 		return nil, mpp.ErrMalformedCredential("credential is required")
+	}
+	if !hasReplayStore(i.store) {
+		return nil, fmt.Errorf("tempo server: configure a shared persistent replay Store before verifying payments; MemoryStore is only suitable for single-process development")
 	}
 	request, err := tempo.ParseChargeRequest(requestMap)
 	if err != nil {

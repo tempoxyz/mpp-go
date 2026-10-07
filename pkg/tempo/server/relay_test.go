@@ -194,7 +194,7 @@ func TestRelayIntentExposesCredentialHooks(t *testing.T) {
 			},
 		}
 	})
-	method, err := MethodFromConfig(Config{
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		ChainID:   42431,
 		Currency:  testCurrency,
 		Recipient: testRecipient,
@@ -378,7 +378,7 @@ func TestMethodFromConfigAppliesRelayToCustomIntent(t *testing.T) {
 	server, _ := relayTestServer(t, func(string) any {
 		return map[string]any{"success": false, "error": map[string]any{"code": RelayErrorUnsupported}}
 	})
-	localIntent, err := NewIntent(IntentConfig{})
+	localIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	require.NoError(t, err)
 	method, err := MethodFromConfig(Config{
 		Intent:    localIntent,
@@ -397,7 +397,7 @@ func TestMethodFromConfigAppliesRelayToCustomIntent(t *testing.T) {
 
 func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
 	t.Parallel()
-	method, err := MethodFromConfig(Config{
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		ChainID:   999999,
 		Currency:  testCurrency,
 		Recipient: testRecipient,

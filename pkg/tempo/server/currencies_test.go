@@ -39,11 +39,11 @@ func TestCurrencyConstants(t *testing.T) {
 func TestNewMethodDefaultCurrencies(t *testing.T) {
 	t.Parallel()
 
-	moderatoIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlModerato})
+	moderatoIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato})
 	require.NoError(t, err)
-	mainnetIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlMainnet})
+	mainnetIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlMainnet})
 	require.NoError(t, err)
-	customIntent, err := NewIntent(IntentConfig{RPCURL: "https://rpc.example.com"})
+	customIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: "https://rpc.example.com"})
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -54,13 +54,13 @@ func TestNewMethodDefaultCurrencies(t *testing.T) {
 	}{
 		{
 			name:        "mainnet chain id offers OUSD then USDC.e",
-			config:      MethodConfig{ChainID: tempotx.ChainIdMainnet},
+			config:      MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet},
 			wantChainID: tempotx.ChainIdMainnet,
 			want:        []string{ousdAddress, usdceAddress},
 		},
 		{
 			name:        "moderato chain id offers OUSD then pathUSD",
-			config:      MethodConfig{ChainID: tempotx.ChainIdModerato},
+			config:      MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato},
 			wantChainID: tempotx.ChainIdModerato,
 			want:        []string{ousdAddress, pathUSDAddress},
 		},
@@ -96,7 +96,7 @@ func TestNewMethodDefaultCurrencies(t *testing.T) {
 		},
 		{
 			name:        "zero config offers mainnet defaults",
-			config:      MethodConfig{},
+			config:      MethodConfig{Intent: testStoredIntent()},
 			wantChainID: tempotx.ChainIdMainnet,
 			want:        []string{ousdAddress, usdceAddress},
 		},
@@ -131,27 +131,27 @@ func TestNewMethodExplicitCurrencies(t *testing.T) {
 	}{
 		{
 			name:   "explicit list replaces defaults and preserves order",
-			config: MethodConfig{ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress, ousdAddress}},
+			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress, ousdAddress}},
 			want:   []string{usdceAddress, ousdAddress},
 		},
 		{
 			name:   "explicit list may add tokens outside the defaults",
-			config: MethodConfig{ChainID: tempotx.ChainIdModerato, Currencies: []string{testCurrency, pathUSDAddress, ousdAddress}},
+			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currencies: []string{testCurrency, pathUSDAddress, ousdAddress}},
 			want:   []string{testCurrency, pathUSDAddress, ousdAddress},
 		},
 		{
 			name:   "single element list",
-			config: MethodConfig{ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}},
+			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}},
 			want:   []string{usdceAddress},
 		},
 		{
 			name:   "explicit list applies on unknown chain",
-			config: MethodConfig{Currencies: []string{ousdAddress, testCurrency}},
+			config: MethodConfig{Intent: testStoredIntent(), Currencies: []string{ousdAddress, testCurrency}},
 			want:   []string{ousdAddress, testCurrency},
 		},
 		{
 			name: "mixed-case duplicates are removed keeping first spelling and order",
-			config: MethodConfig{ChainID: tempotx.ChainIdMainnet, Currencies: []string{
+			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{
 				ousdAddress,
 				strings.ToLower(ousdAddress),
 				usdceAddress,
@@ -162,12 +162,12 @@ func TestNewMethodExplicitCurrencies(t *testing.T) {
 		},
 		{
 			name:   "legacy currency restricts acceptance to one token",
-			config: MethodConfig{ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress},
+			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress},
 			want:   []string{usdceAddress},
 		},
 		{
 			name:   "legacy currency is kept verbatim",
-			config: MethodConfig{ChainID: tempotx.ChainIdModerato, Currency: strings.ToLower(ousdAddress)},
+			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currency: strings.ToLower(ousdAddress)},
 			want:   []string{strings.ToLower(ousdAddress)},
 		},
 	}
@@ -189,7 +189,7 @@ func TestNewMethodExplicitCurrenciesAreCopied(t *testing.T) {
 	t.Parallel()
 
 	currencies := []string{ousdAddress, usdceAddress}
-	method := NewMethod(MethodConfig{ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient, Currencies: currencies})
+	method := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient, Currencies: currencies})
 	currencies[0] = testCurrency
 	assert.Equal(t, []string{ousdAddress, usdceAddress}, method.currencies)
 }
@@ -250,7 +250,7 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 			require.EqualError(t, err, tt.wantErr)
 
 			assert.PanicsWithValue(t, tt.wantErr, func() {
-				NewMethod(MethodConfig{
+				NewMethod(MethodConfig{Intent: testStoredIntent(),
 					ChainID:    tempotx.ChainIdMainnet,
 					Recipient:  testRecipient,
 					Currency:   tt.currency,
@@ -258,7 +258,7 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 				})
 			})
 
-			method, err := MethodFromConfig(Config{
+			method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 				ChainID:    tempotx.ChainIdMainnet,
 				Recipient:  testRecipient,
 				Currency:   tt.currency,
@@ -273,11 +273,11 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 func TestMethodFromConfigCurrencies(t *testing.T) {
 	t.Parallel()
 
-	defaults, err := MethodFromConfig(Config{RPCURL: tempotx.RpcUrlModerato, Recipient: testRecipient})
+	defaults, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato, Recipient: testRecipient})
 	require.NoError(t, err)
 	assert.Equal(t, []string{ousdAddress, pathUSDAddress}, defaults.currencies)
 
-	explicit, err := MethodFromConfig(Config{
+	explicit, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:     tempotx.RpcUrlModerato,
 		Recipient:  testRecipient,
 		Currencies: []string{pathUSDAddress},
@@ -285,7 +285,7 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{pathUSDAddress}, explicit.currencies)
 
-	legacy, err := MethodFromConfig(Config{
+	legacy, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 		Currency:  testCurrency,
@@ -293,7 +293,7 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{testCurrency}, legacy.currencies)
 
-	relayed, err := MethodFromConfig(Config{
+	relayed, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		ChainID:    tempotx.ChainIdMainnet,
 		Recipient:  testRecipient,
 		Currencies: []string{usdceAddress, ousdAddress},
@@ -306,7 +306,7 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 func TestMethodBuildChargeRequestsPerRequestCurrencyOverride(t *testing.T) {
 	t.Parallel()
 
-	method := NewMethod(MethodConfig{ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient})
+	method := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient})
 	got := offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1", Currency: testCurrency}, tempotx.ChainIdMainnet)
 	assert.Equal(t, checksummed(testCurrency), got)
 
@@ -318,7 +318,7 @@ func TestMethodBuildChargeRequestsPerRequestCurrencyOverride(t *testing.T) {
 func TestMethodBuildChargeRequestsSharesRequestFieldsAcrossOffers(t *testing.T) {
 	t.Parallel()
 
-	method := NewMethod(MethodConfig{
+	method := NewMethod(MethodConfig{Intent: testStoredIntent(),
 		ChainID:     tempotx.ChainIdMainnet,
 		Recipient:   testRecipient,
 		FeePayerURL: "https://fee-payer.example.com",
@@ -346,7 +346,7 @@ func TestMethodBuildChargeRequestsSharesRequestFieldsAcrossOffers(t *testing.T) 
 func TestMethodBuildChargeRequestsPropagatesErrors(t *testing.T) {
 	t.Parallel()
 
-	method := NewMethod(MethodConfig{ChainID: tempotx.ChainIdMainnet})
+	method := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 	_, err := method.BuildChargeRequests(mppserver.ChargeParams{Amount: "1"})
 	require.EqualError(t, err, "tempo server: recipient must be configured on the method or the request")
 }
@@ -354,7 +354,7 @@ func TestMethodBuildChargeRequestsPropagatesErrors(t *testing.T) {
 func TestDefaultFeePayerPoliciesUnchanged(t *testing.T) {
 	t.Parallel()
 
-	intent, err := NewIntent(IntentConfig{})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	require.NoError(t, err)
 
 	want := FeePayerPolicy{
@@ -390,7 +390,7 @@ func TestChargeOffers_HashCredentialForEachOfferVerifies(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			rpc := newOffersRPC(tempotx.ChainIdMainnet)
-			payment := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet})
+			payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 
 			challenges := issueOffers(t, payment, mppserver.ChargeParams{Amount: "0.50"})
 			require.Equal(t, checksummed(ousdAddress, usdceAddress), challengeCurrencies(challenges))
@@ -416,7 +416,7 @@ func TestChargeOffers_ModeratoDefaultsVerifyPathUSD(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdModerato)
-	payment := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdModerato})
+	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato})
 
 	challenges := issueOffers(t, payment, mppserver.ChargeParams{Amount: "0.50"})
 	require.Equal(t, checksummed(ousdAddress, pathUSDAddress), challengeCurrencies(challenges))
@@ -439,7 +439,7 @@ func TestChargeOffers_RejectsCredentialForUnofferedCurrency(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	payment := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet})
+	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 
 	// The same server signs a challenge for another token through a
 	// per-request override, e.g. on a different route.
@@ -462,8 +462,8 @@ func TestChargeOffers_LegacyCurrencyRejectsOtherDefaultOffer(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	defaults := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet})
-	legacy := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress})
+	defaults := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	legacy := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress})
 
 	legacyOffers := issueOffers(t, legacy, mppserver.ChargeParams{Amount: "0.50"})
 	require.Equal(t, checksummed(usdceAddress), challengeCurrencies(legacyOffers))
@@ -488,8 +488,8 @@ func TestChargeOffers_ExplicitCurrenciesRejectDroppedDefault(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	defaults := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet})
-	usdcOnly := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}})
+	defaults := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	usdcOnly := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}})
 
 	require.Equal(t, checksummed(usdceAddress), challengeCurrencies(issueOffers(t, usdcOnly, mppserver.ChargeParams{Amount: "0.50"})))
 	ousdOffer := issueOffers(t, defaults, mppserver.ChargeParams{Amount: "0.50"})[0]
@@ -504,7 +504,7 @@ func TestChargeOffers_PerRequestCurrencyOverrideVerifies(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	payment := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet})
+	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 	params := mppserver.ChargeParams{Amount: "0.50", Currency: testCurrency}
 
 	challenges := issueOffers(t, payment, params)
@@ -522,7 +522,7 @@ func TestChargeOffers_ChargeMiddlewareAdvertisesOffersInOrder(t *testing.T) {
 	t.Parallel()
 
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	payment := newOffersServer(t, rpc, MethodConfig{ChainID: tempotx.ChainIdMainnet})
+	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 	recorder := serveOffersMiddleware(payment, "")
 
 	require.Equal(t, 402, recorder.Code)
@@ -606,7 +606,7 @@ func newOffersRPC(chainID int64) *mockRPC {
 
 func newOffersServer(t *testing.T, rpc *mockRPC, config MethodConfig) *mppserver.Mpp {
 	t.Helper()
-	intent, err := NewIntent(IntentConfig{RPC: rpc})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	require.NoError(t, err)
 	config.Intent = intent
 	config.Recipient = testRecipient
@@ -674,7 +674,7 @@ func checksummed(values ...string) []string {
 }
 
 func TestMethodFromConfigDefaultOffers(t *testing.T) {
-	method, err := MethodFromConfig(Config{Recipient: testRecipient})
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(), Recipient: testRecipient})
 	require.NoError(t, err)
 	assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))
 }
