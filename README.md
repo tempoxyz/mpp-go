@@ -109,27 +109,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-    "strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-    "github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 
 func main() {
 	method, _ := charge.New(charge.Config{
-        ChainID: 42431,
-        PaymentPolicy: func(_ context.Context, request tempo.ChargeRequest) error {
-            if request.Amount != "500000" ||
-                !strings.EqualFold(request.Currency, tempo.DefaultCurrencyForChain(42431)) ||
-                !strings.EqualFold(request.Recipient, "0x70997970c51812dc3a010c7d01b50e0d17dc79c8") ||
-                request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != 42431 ||
-                len(request.MethodDetails.Splits) != 0 {
-                return fmt.Errorf("unexpected payment terms")
-            }
-            return nil
-        },
 		PrivateKey: os.Getenv("MPP_PRIVATE_KEY"),
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 	})
@@ -152,28 +139,6 @@ func main() {
 	fmt.Printf("paid request for %q from %s with receipt %s\n", body.Data, body.Payer, receipt.Reference)
 }
 ```
-
-### Payment authorization
-
-Clients reject nonzero payments unless `PaymentPolicy` explicitly authorizes the
-normalized request before signing or broadcasting. A policy must bound the amount
-in token base units and check currency, recipient (including splits), and chain.
-For a working bounded policy, see `examples/internal/devnet.PaymentPolicy`:
-
-```go
-method, err := charge.New(charge.Config{
-    PrivateKey: privateKey,
-    ChainID: chainID,
-    PaymentPolicy: func(ctx context.Context, request tempo.ChargeRequest) error {
-        // Application policy: validate the token, payee, chain, and total budget.
-        return budget.Authorize(ctx, request)
-    },
-})
-```
-
-The callback may run concurrently. A per-payment cap does not bound cumulative
-spending; reserve any shared budget atomically. Zero-amount identity proofs do not
-require payment approval and never authorize a token transfer.
 
 ## Examples
 
