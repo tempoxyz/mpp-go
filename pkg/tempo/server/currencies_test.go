@@ -628,7 +628,7 @@ func issueOffers(t *testing.T, payment *mppserver.Mpp, params mppserver.ChargePa
 
 func payWithHash(t *testing.T, rpc *mockRPC, challenge *mpp.Challenge) *mpp.Credential {
 	t.Helper()
-	method, err := chargeclient.New(chargeclient.Config{
+	method, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey:     testPrivateKey,
 		RPC:            rpc,
 		ChainID:        int64(rpc.chainID),
