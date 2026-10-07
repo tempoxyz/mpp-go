@@ -12,7 +12,7 @@ import (
 func TestMethodBuildChargeRequest(t *testing.T) {
 	t.Parallel()
 
-	moderatoIntent, err := NewIntent(IntentConfig{RPCURL: tempotx.RpcUrlModerato})
+	moderatoIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -49,7 +49,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		},
 		{
 			name: "rejects unknown chain without intent rpc",
-			config: MethodConfig{
+			config: MethodConfig{Intent: testStoredIntent(),
 				ChainID:   999999,
 				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 			},
@@ -59,7 +59,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		},
 		{
 			name: "includes external id and fee payer url",
-			config: MethodConfig{
+			config: MethodConfig{Intent: testStoredIntent(),
 				Currency:    "0x20c0000000000000000000000000000000000001",
 				Recipient:   "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 				ChainID:     42431,
@@ -90,7 +90,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		},
 		{
 			name: "includes splits and request modes",
-			config: MethodConfig{
+			config: MethodConfig{Intent: testStoredIntent(),
 				Currency:       "0x20c0000000000000000000000000000000000001",
 				Recipient:      "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 				ChainID:        42431,
@@ -126,7 +126,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		},
 		{
 			name: "preserves push mode",
-			config: MethodConfig{
+			config: MethodConfig{Intent: testStoredIntent(),
 				Currency:  "0x20c0000000000000000000000000000000000001",
 				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 				ChainID:   42431,

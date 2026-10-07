@@ -1,6 +1,8 @@
 package chargeserver
 
 import (
+	"fmt"
+
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 )
@@ -44,7 +46,9 @@ type Config struct {
 	FeePayerPolicies map[string]FeePayerPolicy
 	// FeeToken fixes the fee token a local fee payer pays gas in; see IntentConfig.FeeToken.
 	FeeToken string
-	// Store persists replay-protection keys for hash and proof credentials.
+	// Store is required to verify payments. Use a persistent store shared by all
+	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
+	// An explicit tempo.NewMemoryStore() is only suitable for single-process development.
 	Store tempo.Store
 	// Relay delegates credential validation and finalization to Tempo API or a compatible MPP relay.
 	Relay *RelayConfig
@@ -68,7 +72,11 @@ func MethodFromConfig(config Config) (*Method, error) {
 		SupportedModes: append([]tempo.ChargeMode(nil), config.SupportedModes...),
 	}
 	if methodConfig.Intent == nil {
-		intent, err := NewIntent(IntentConfig{
+		buildIntent := NewIntent
+		if config.Relay != nil {
+			buildIntent = newIntent
+		}
+		intent, err := buildIntent(IntentConfig{
 			RPC:                   config.RPC,
 			RPCURL:                config.RPCURL,
 			FeePayerSigner:        config.FeePayerSigner,
@@ -88,7 +96,7 @@ func MethodFromConfig(config Config) (*Method, error) {
 		if err != nil {
 			return nil, err
 		}
-		method := NewMethod(methodConfig)
+		method := newMethod(methodConfig)
 		intent, err := relay.intent(method.intent.Name())
 		if err != nil {
 			return nil, err
@@ -96,6 +104,9 @@ func MethodFromConfig(config Config) (*Method, error) {
 		method.intent = intent
 		method.supportsUnknownChain = true
 		return method, nil
+	}
+	if !hasReplayStore(methodConfig.Intent.store) {
+		return nil, fmt.Errorf("tempo server: a replay Store is required")
 	}
 	return NewMethod(methodConfig), nil
 }

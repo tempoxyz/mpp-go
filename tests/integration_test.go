@@ -938,7 +938,7 @@ func newSigner(t *testing.T) *temposigner.Signer {
 func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *temposigner.Signer) *httptest.Server {
 	t.Helper()
 
-	intent, err := chargeserver.NewIntent(chargeserver.IntentConfig{
+	intent, err := chargeserver.NewIntent(chargeserver.IntentConfig{Store: tempo.NewMemoryStore(),
 		RPCURL:         rpcURL,
 		FeePayerSigner: feePayerSigner,
 	})
