@@ -114,14 +114,16 @@ const MaxRequestBodyBytes = 4 << 20
 
 // RequestBodyError maps oversized bodies to HTTP 413 and other read failures to 400.
 func RequestBodyError(err error) *mpp.PaymentError {
-	result := mpp.ErrBadRequest("failed to read request body")
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		result.Status = http.StatusRequestEntityTooLarge
-		result.Title = "Request body too large"
-		result.Detail = "request body exceeds payment middleware limit"
+		return &mpp.PaymentError{
+			Type:   "about:blank",
+			Status: http.StatusRequestEntityTooLarge,
+			Title:  http.StatusText(http.StatusRequestEntityTooLarge),
+			Detail: "request body exceeds payment middleware limit",
+		}
 	}
-	return result
+	return mpp.ErrBadRequest("failed to read request body")
 }
 
 // ReadRequestBody reads and restores r.Body so middleware can verify body digests

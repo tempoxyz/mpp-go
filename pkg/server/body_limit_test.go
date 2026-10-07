@@ -1,12 +1,14 @@
 package server
 
 import (
-	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 type countingBody struct {
@@ -28,7 +30,10 @@ func TestRequestBodyLimit(t *testing.T) {
 			if size > MaxRequestBodyBytes {
 				require.Error(t, err)
 				require.Nil(t, body)
-				require.Equal(t, http.StatusRequestEntityTooLarge, RequestBodyError(err).Status)
+				problem := RequestBodyError(err)
+				require.Equal(t, http.StatusRequestEntityTooLarge, problem.Status)
+				require.Equal(t, mpp.ErrorType("about:blank"), problem.Type)
+				require.Equal(t, http.StatusText(http.StatusRequestEntityTooLarge), problem.Title)
 			} else {
 				require.NoError(t, err)
 				restored, err := io.ReadAll(r.Body)

@@ -1,6 +1,8 @@
 package fiberadapter
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -286,4 +288,25 @@ func TestOversizedBodyRejectedBeforePayment(t *testing.T) {
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusRequestEntityTooLarge, response.StatusCode)
+}
+
+func TestChargeMiddlewareRejectsEncodedBodiesBeforeDecompression(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, err := io.WriteString(writer, strings.Repeat("x", server.MaxRequestBodyBytes+1))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.Less(t, compressed.Len(), server.MaxRequestBodyBytes)
+	for _, encoding := range []string{"gzip", "br", "deflate", "gzip, br", "unknown"} {
+		t.Run(encoding, func(t *testing.T) {
+			app := fiberfw.New()
+			app.Post("/", ChargeMiddleware(nil, server.ChargeParams{}), func(*fiberfw.Ctx) error { t.Fatal("handler called"); return nil })
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(compressed.Bytes()))
+			req.Header.Set("Content-Encoding", encoding)
+			response, err := app.Test(req)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			require.Equal(t, http.StatusUnsupportedMediaType, response.StatusCode)
+		})
+	}
 }
