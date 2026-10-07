@@ -170,6 +170,7 @@ func abs(value int) int {
 
 // ExtractAuthorizationScheme returns the first authorization value that matches
 // the requested scheme from a possibly merged Authorization header.
+// Oversized headers return an empty value without parsing.
 func ExtractAuthorizationScheme(header, scheme string) string {
 	if len(header) > maxAuthorizationPayload {
 		return ""
@@ -184,7 +185,8 @@ func ExtractAuthorizationScheme(header, scheme string) string {
 }
 
 // ExtractAuthorizationSchemeStrict returns a single authorization value that
-// matches scheme, or an error if the header includes multiple matching values.
+// matches scheme, or an error if the header is oversized or includes multiple
+// matching values.
 func ExtractAuthorizationSchemeStrict(header, scheme string) (string, error) {
 	if len(header) > maxAuthorizationPayload {
 		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
