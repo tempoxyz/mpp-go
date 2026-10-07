@@ -1,9 +1,10 @@
 package chargeserver
 
 import (
-	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSponsoredValidityDeadline(t *testing.T) {
@@ -26,4 +27,12 @@ func TestSponsoredValidityDeadline(t *testing.T) {
 		})
 	}
 	require.Error(t, validateFeePayerDeadline(0, now))
+}
+
+func TestSponsoredValidityDeadlineRoundsUpFractionalSeconds(t *testing.T) {
+	for _, nanos := range []int64{1, 100_000_000, 900_000_000, 999_999_999} {
+		now := time.Unix(2_000_000_000, nanos)
+		require.Error(t, validateFeePayerDeadline(uint64(now.Unix()+15), now))
+		require.NoError(t, validateFeePayerDeadline(uint64(now.Unix()+16), now))
+	}
 }

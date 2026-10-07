@@ -45,7 +45,11 @@ const feePayerMaxValidityWindow = 15 * time.Minute
 const feePayerMinValidityWindow = 15 * time.Second
 
 func validateFeePayerDeadline(validBefore uint64, now time.Time) error {
-	if validBefore < uint64(now.Add(feePayerMinValidityWindow).Unix()) {
+	minimum := uint64(now.Add(feePayerMinValidityWindow).Unix())
+	if now.Nanosecond() != 0 {
+		minimum++
+	}
+	if validBefore < minimum {
 		return mpp.ErrVerificationFailed("fee payer transaction needs at least 15 seconds of remaining validity")
 	}
 	return nil
