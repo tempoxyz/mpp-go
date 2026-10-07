@@ -188,10 +188,11 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 	if request.Amount == "" || request.Currency == "" || request.Recipient == "" {
 		return ChargeRequest{}, fmt.Errorf("tempo: charge request requires amount, currency, and recipient")
 	}
-	if _, err := parseBaseUnitAmount(request.Amount); err != nil {
+	amount, err := parseBaseUnitAmount(request.Amount)
+	if err != nil {
 		return ChargeRequest{}, err
 	}
-	var err error
+	request.Amount = amount.String()
 	request.Currency, err = normalizeAddress("currency", request.Currency)
 	if err != nil {
 		return ChargeRequest{}, err
