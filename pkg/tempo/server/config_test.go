@@ -13,7 +13,7 @@ import (
 func TestMethodFromConfigBuildsMethod(t *testing.T) {
 	t.Parallel()
 
-	method, err := MethodFromConfig(Config{
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 	})

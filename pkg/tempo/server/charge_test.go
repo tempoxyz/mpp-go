@@ -1117,7 +1117,7 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 
 func TestChargeFlow_HashCredentialAcceptsAttributionMemo(t *testing.T) {
 	ctx := context.Background()
-	method := NewMethod(MethodConfig{
+	method := NewMethod(MethodConfig{Intent: testStoredIntent(),
 		Currency:  testCurrency,
 		Recipient: testRecipient,
 		Decimals:  6,

@@ -47,3 +47,21 @@ func TestPaymentPolicyBeforeSigning(t *testing.T) {
 		}
 	}
 }
+
+func TestPaymentPolicyReceivesVerifiedChainWhenChallengeOmitsIt(t *testing.T) {
+	rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
+	called := false
+	method, err := New(Config{PrivateKey: testPrivateKey, RPC: rpc, ChainID: 42431,
+		PaymentPolicy: func(_ context.Context, request tempo.ChargeRequest) error {
+			called = true
+			require.NotNil(t, request.MethodDetails.ChainID)
+			require.EqualValues(t, 42431, *request.MethodDetails.ChainID)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{Amount: "0.5", Currency: testCurrency, Recipient: testRecipient, Decimals: 6})
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	require.True(t, called)
+}

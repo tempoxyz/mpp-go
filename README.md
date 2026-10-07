@@ -356,7 +356,8 @@ The callback may run concurrently. A per-payment cap does not bound cumulative
 spending; reserve any shared budget atomically. Zero-amount identity proofs do not
 require payment approval and never authorize a token transfer.
 
-Local verifiers require an explicit `Store` before verifying any payment. All
+Local verifier construction requires an explicit `Store`, so an unconfigured
+server cannot issue payable challenges. All
 replicas must share persistent replay keys, with atomic `PutIfAbsent`, no eviction,
 and fail-closed behavior on storage errors. `tempo.NewMemoryStore()` is an explicit
 single-process development choice; it loses replay protection on restart. Existing

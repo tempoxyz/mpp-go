@@ -39,7 +39,7 @@ type Config struct {
 	CredentialType tempo.CredentialType
 	// PaymentPolicy must authorize every nonzero payment before signing or broadcasting.
 	// Nil rejects paid challenges. Check the normalized amount (including splits),
-	// currency, recipient, and chain; enforce cumulative budgets atomically if needed.
+	// currency, recipient, and verified RPC chain; enforce cumulative budgets atomically if needed.
 	// The callback may run concurrently and must not mutate the request.
 	PaymentPolicy func(context.Context, tempo.ChargeRequest) error
 }
@@ -163,7 +163,10 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	if m.paymentPolicy == nil {
 		return nil, fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
 	}
-	if err := m.paymentPolicy(ctx, request); err != nil {
+	policyRequest := request
+	verifiedChainID := int64(chainID)
+	policyRequest.MethodDetails.ChainID = &verifiedChainID
+	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
 		return nil, fmt.Errorf("tempo client: payment rejected by policy: %w", err)
 	}
 	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)

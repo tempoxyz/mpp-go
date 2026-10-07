@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"net/http"
 	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 )
 

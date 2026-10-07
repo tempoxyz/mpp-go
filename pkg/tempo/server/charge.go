@@ -121,6 +121,14 @@ type validatedChargeCredential struct {
 
 // NewIntent constructs a Tempo charge verifier.
 func NewIntent(config IntentConfig) (*Intent, error) {
+	if config.Store == nil {
+		return nil, fmt.Errorf("tempo server: a shared persistent replay Store is required; use MemoryStore only for single-process development")
+	}
+	return newIntent(config)
+}
+
+// newIntent also builds relay metadata; relay verification owns its replay store.
+func newIntent(config IntentConfig) (*Intent, error) {
 	feePayerPrivateKey := config.FeePayerPrivateKey
 	if feePayerPrivateKey == "" && config.FeePayerPrivateKeyEnv != "" {
 		feePayerPrivateKey = os.Getenv(config.FeePayerPrivateKeyEnv)

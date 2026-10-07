@@ -2,12 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"net/http"
 	"net/http/httptest"
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	"github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 

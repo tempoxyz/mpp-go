@@ -65,7 +65,7 @@ var _ mppserver.ChargeOffersBuilder = (*Method)(nil)
 // tempo.DefaultCurrenciesForChain for the configured chain, or for the chain
 // inferred from the intent's RPC URL when ChainID is zero. With no custom RPC,
 // it defaults to mainnet. NewMethod panics
-// when the currency configuration is invalid (see MethodConfig.Currencies);
+// when Intent is missing or the currency configuration is invalid (see MethodConfig.Currencies);
 // use MethodFromConfig to receive the error instead.
 func NewMethod(config MethodConfig) *Method {
 	decimals := config.Decimals
@@ -74,7 +74,7 @@ func NewMethod(config MethodConfig) *Method {
 	}
 	intent := config.Intent
 	if intent == nil {
-		intent, _ = NewIntent(IntentConfig{})
+		panic("tempo server: Intent must be configured with a replay Store")
 	}
 	chainID := config.ChainID
 	if chainID == 0 {

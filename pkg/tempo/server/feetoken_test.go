@@ -323,10 +323,11 @@ func TestSponsoredDefaultsEmitEveryOffer(t *testing.T) {
 		{ChainID: tempotx.ChainIdMainnet, FeePayerURL: "https://fee-payer.example.com"},
 	} {
 		config.Recipient = testRecipient
+		config.Intent = testStoredIntent()
 		method := NewMethod(config)
 		assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))
 	}
-	moderato := NewMethod(MethodConfig{ChainID: tempotx.ChainIdModerato, FeePayer: true, Recipient: testRecipient})
+	moderato := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, FeePayer: true, Recipient: testRecipient})
 	assert.Equal(t, checksummed(ousdAddress, pathUSDAddress), offerCurrencies(t, moderato, mppserver.ChargeParams{Amount: "1", FeePayer: true}, tempotx.ChainIdModerato))
 }
 
@@ -382,7 +383,7 @@ func (r *staticCallRPC) SendRequest(context.Context, string, ...interface{}) (*t
 func TestFeeTokenRequiresLocalFeePayer(t *testing.T) {
 	for _, url := range []string{"", "https://sponsor.example.test"} {
 		t.Run(url, func(t *testing.T) {
-			_, err := MethodFromConfig(Config{FeeToken: usdceAddress, FeePayerURL: url})
+			_, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(), FeeToken: usdceAddress, FeePayerURL: url})
 			require.ErrorContains(t, err, "FeeToken requires a local fee payer")
 		})
 	}

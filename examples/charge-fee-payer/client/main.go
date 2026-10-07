@@ -37,7 +37,7 @@ func main() {
 	}
 
 	method, err := charge.New(charge.Config{
-		PaymentPolicy: devnet.PaymentPolicy(chainID), ChainID: chainID, PrivateKey: privateKey, RPCURL: rpcURL})
+		PaymentPolicy: devnet.PaymentPolicy(chainID, devnet.Recipient), ChainID: chainID, PrivateKey: privateKey, RPCURL: rpcURL})
 	if err != nil {
 		log.Fatal(err)
 	}

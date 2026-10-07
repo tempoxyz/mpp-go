@@ -17,7 +17,7 @@ type clientResult struct {
 
 func runClient(ctx context.Context, url, rpcURL string, chainID int64) (*clientResult, error) {
 	method, err := charge.New(charge.Config{
-		PaymentPolicy: devnet.PaymentPolicy(chainID),
+		PaymentPolicy: devnet.PaymentPolicy(chainID, devnet.Recipient),
 		ChainID:       chainID,
 		PrivateKey:    devnet.PayerPrivateKey,
 		RPCURL:        rpcURL,

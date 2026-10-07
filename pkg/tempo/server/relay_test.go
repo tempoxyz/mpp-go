@@ -194,7 +194,7 @@ func TestRelayIntentExposesCredentialHooks(t *testing.T) {
 			},
 		}
 	})
-	method, err := MethodFromConfig(Config{
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		ChainID:   42431,
 		Currency:  testCurrency,
 		Recipient: testRecipient,
@@ -397,7 +397,7 @@ func TestMethodFromConfigAppliesRelayToCustomIntent(t *testing.T) {
 
 func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
 	t.Parallel()
-	method, err := MethodFromConfig(Config{
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		ChainID:   999999,
 		Currency:  testCurrency,
 		Recipient: testRecipient,

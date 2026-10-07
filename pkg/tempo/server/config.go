@@ -70,7 +70,11 @@ func MethodFromConfig(config Config) (*Method, error) {
 		SupportedModes: append([]tempo.ChargeMode(nil), config.SupportedModes...),
 	}
 	if methodConfig.Intent == nil {
-		intent, err := NewIntent(IntentConfig{
+		buildIntent := NewIntent
+		if config.Relay != nil {
+			buildIntent = newIntent
+		}
+		intent, err := buildIntent(IntentConfig{
 			RPC:                   config.RPC,
 			RPCURL:                config.RPCURL,
 			FeePayerSigner:        config.FeePayerSigner,

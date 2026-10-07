@@ -17,9 +17,12 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeProof).CreateCredential(context.Background(), buildChallenge(t, request))
 	require.NoError(t, err)
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
-	require.NoError(t, err)
-	_, err = intent.Verify(context.Background(), credential, request.Map())
-	require.ErrorContains(t, err, "shared persistent replay Store")
+	require.ErrorContains(t, err, "replay Store is required")
+	require.Nil(t, intent)
+	method, err := MethodFromConfig(Config{RPC: rpc})
+	require.ErrorContains(t, err, "replay Store is required")
+	require.Nil(t, method)
+	require.Panics(t, func() { NewMethod(MethodConfig{}) })
 	require.Empty(t, rpc.sentRawTxs)
 
 	store := tempo.NewMemoryStore()
@@ -70,4 +73,12 @@ func TestSponsoredValidityDeadline(t *testing.T) {
 		})
 	}
 	require.Error(t, validateFeePayerDeadline(0, now))
+}
+
+func testStoredIntent() *Intent {
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
+	if err != nil {
+		panic(err)
+	}
+	return intent
 }
