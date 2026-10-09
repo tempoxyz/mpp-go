@@ -19,6 +19,10 @@ type Challenge struct {
 	Expires     string            `json:"expires,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Opaque      map[string]string `json:"opaque,omitempty"`
+	// opaqueB64 keeps the issuer's encoded opaque parameter when it differs
+	// from the canonical encoding of Opaque, so that formatting echoes it
+	// unchanged.
+	opaqueB64 string
 	// Header is the HTTP field for the Payment credential. Empty means the
 	// implicit default, Authorization. When set, it is advertised as the
 	// challenge header parameter and bound into the challenge ID.
@@ -36,6 +40,9 @@ type ChallengeEcho struct {
 	Digest  string            `json:"digest,omitempty"`
 	Opaque  map[string]string `json:"opaque,omitempty"`
 	Header  string            `json:"header,omitempty"`
+	// opaqueB64 keeps the issuer's encoded opaque parameter when it differs
+	// from the canonical encoding of Opaque.
+	opaqueB64 string
 }
 
 // ChallengeOption configures optional fields when creating a new Challenge.
@@ -272,6 +279,8 @@ func (c *Challenge) ToEcho() ChallengeEcho {
 		Digest:  c.Digest,
 		Opaque:  c.Opaque,
 		Header:  AdvertisedCredentialHeader(c.Header),
+
+		opaqueB64: c.opaqueB64,
 	}
 }
 
@@ -286,6 +295,8 @@ func (e ChallengeEcho) toChallenge() Challenge {
 		Expires:    e.Expires,
 		Opaque:     e.Opaque,
 		Header:     AdvertisedCredentialHeader(e.Header),
+
+		opaqueB64: e.opaqueB64,
 	}
 }
 
@@ -420,4 +431,38 @@ func opaqueForJSON(opaque map[string]string) any {
 		return result
 	}
 	return opaque
+}
+
+// preservedOpaqueB64 returns encoded when the canonical encoding of opaque
+// does not reproduce it. The canonical encoding is used in all other cases.
+func preservedOpaqueB64(opaque map[string]string, encoded string) string {
+	if encoded == "" || b64EncodeSortedStringMap(opaque) == encoded {
+		return ""
+	}
+	return encoded
+}
+
+// wireOpaque returns the opaque parameter to put on the wire. It returns the
+// issuer's encoding when that encoding still decodes to opaque. Otherwise it
+// returns the canonical encoding of opaque. Clients must not modify opaque, and
+// servers can bind the challenge ID to the encoded value.
+func wireOpaque(opaque map[string]string, encoded string) string {
+	if encoded != "" && opaqueEncodes(opaque, encoded) {
+		return encoded
+	}
+	return b64EncodeSortedStringMap(opaque)
+}
+
+func opaqueEncodes(opaque map[string]string, encoded string) bool {
+	decoded, err := B64Decode(encoded)
+	if err != nil || len(decoded) != len(opaque) {
+		return false
+	}
+	for key, value := range decoded {
+		want, ok := opaque[key]
+		if !ok || anyStr(value) != want {
+			return false
+		}
+	}
+	return true
 }

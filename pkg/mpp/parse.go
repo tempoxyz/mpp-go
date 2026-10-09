@@ -269,6 +269,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 	}
 
 	var opaque map[string]string
+	var preservedOpaque string
 	if opaqueB64, ok := params["opaque"]; ok && opaqueB64 != "" {
 		opaqueMap, err := B64Decode(opaqueB64)
 		if err != nil {
@@ -278,6 +279,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 		for k, v := range opaqueMap {
 			opaque[k] = anyStr(v)
 		}
+		preservedOpaque = preservedOpaqueB64(opaque, opaqueB64)
 	}
 
 	return &Challenge{
@@ -292,6 +294,8 @@ func ParseChallenge(header string) (*Challenge, error) {
 		Description: description,
 		Opaque:      opaque,
 		Header:      credentialHeader,
+
+		opaqueB64: preservedOpaque,
 	}, nil
 }
 
@@ -360,7 +364,7 @@ func formatAuthenticate(c *Challenge, realm string, rejectCRLF bool) (string, er
 	}
 
 	if c.Opaque != nil {
-		if err := add("opaque", b64EncodeSortedStringMap(c.Opaque)); err != nil {
+		if err := add("opaque", wireOpaque(c.Opaque, c.opaqueB64)); err != nil {
 			return "", err
 		}
 	}
@@ -509,6 +513,7 @@ func ParseCredential(header string) (*Credential, error) {
 			for key, value := range decoded {
 				echo.Opaque[key] = anyStr(value)
 			}
+			echo.opaqueB64 = preservedOpaqueB64(echo.Opaque, opaque)
 		case map[string]any:
 			echo.Opaque = make(map[string]string, len(opaque))
 			for key, value := range opaque {
@@ -550,7 +555,7 @@ func FormatAuthorization(c *Credential) string {
 		if raw, ok := c.Challenge.Opaque["_raw"]; ok {
 			challengeDict["opaque"] = raw
 		} else {
-			challengeDict["opaque"] = b64EncodeSortedStringMap(c.Challenge.Opaque)
+			challengeDict["opaque"] = wireOpaque(c.Challenge.Opaque, c.Challenge.opaqueB64)
 		}
 	}
 
