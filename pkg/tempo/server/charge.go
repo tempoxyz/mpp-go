@@ -43,6 +43,18 @@ var feeControllerAddress = common.HexToAddress("0xfeec00000000000000000000000000
 const balanceOfSelector = "70a08231"
 
 const feePayerMaxValidityWindow = 15 * time.Minute
+const feePayerMinValidityWindow = 15 * time.Second
+
+func validateFeePayerDeadline(validBefore uint64, now time.Time) error {
+	minimum := uint64(now.Add(feePayerMinValidityWindow).Unix())
+	if now.Nanosecond() != 0 {
+		minimum++
+	}
+	if validBefore < minimum {
+		return mpp.ErrVerificationFailed("fee payer transaction needs at least 15 seconds of remaining validity")
+	}
+	return nil
+}
 
 type sourceDID struct {
 	chainID int64
@@ -451,8 +463,8 @@ func (i *Intent) validateTransaction(
 		if !tx.AwaitingFeePayer {
 			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
-		if tx.ValidBefore == 0 || time.Now().Unix() >= int64(tx.ValidBefore) {
-			return mpp.ErrVerificationFailed("fee payer transaction has expired")
+		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+			return err
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
@@ -538,6 +550,9 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
 		releaseSponsoredClaim = true
+		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+			return nil, err
+		}
 		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
 			tx.FeeToken = feeToken
@@ -607,6 +622,11 @@ func (i *Intent) broadcastTransaction(
 		return nil, err
 	}
 
+	if request.MethodDetails.FeePayer {
+		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	serialized, err := tempotx.Serialize(tx, nil)
 	if err != nil {
 		return nil, mpp.ErrVerificationFailed("failed to serialize transaction")
@@ -1518,7 +1538,7 @@ func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string, policy
 				}
 			}
 		}
-		if int64(tx.ValidBefore) > maxValidBefore {
+		if tx.ValidBefore > uint64(maxValidBefore) {
 			return mpp.ErrInvalidPayload("fee payer transaction validity window exceeds sponsor policy")
 		}
 	}
