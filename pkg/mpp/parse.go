@@ -426,7 +426,6 @@ func escapeQuoted(value string) string {
 // Expected format: Payment <base64url-json>
 // The JSON payload contains: challenge (echo), payload, and optional source.
 func ParseCredential(header string) (*Credential, error) {
-	header = strings.TrimSpace(header)
 	if len(header) > maxHeaderPayload {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
