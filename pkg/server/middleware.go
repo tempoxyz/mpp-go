@@ -302,7 +302,7 @@ func WritePaymentError(w http.ResponseWriter, err error) {
 		return
 	}
 
-	w.WriteHeader(http.StatusPaymentRequired)
-	problem := mpp.ErrVerificationFailed(err.Error())
+	problem := mpp.ErrInternalPaymentError(err)
+	w.WriteHeader(problem.Status)
 	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
 }

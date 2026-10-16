@@ -214,7 +214,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			}
 			return challengeResultError(challenge, pe)
 		}
-		return challengeResultError(challenge, mpp.ErrVerificationFailed(err.Error()))
+		// An error that is not a PaymentError is unexpected: report it as an
+		// internal payment error so its text is not sent to the client.
+		return challengeResultError(challenge, mpp.ErrInternalPaymentError(err))
 	}
 
 	// 9. Return result.
