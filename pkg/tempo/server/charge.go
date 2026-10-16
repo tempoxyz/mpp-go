@@ -540,14 +540,15 @@ func (i *Intent) broadcastTransaction(
 		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
 			return nil, err
 		}
-		// Reserve the payer-signed envelope rather than the challenge ID: the
-		// ID is a deterministic HMAC over the challenge fields, so distinct
-		// payers presented the same challenge (identical route, request and
-		// millisecond expiry) must not lock each other out. Byte-identical
-		// resubmissions still collide here before any co-signing happens.
-		clientTxHash, err := credentialTransactionHash(validated.payload.Signature)
+		// Preserve reservations from earlier versions while their credentials remain valid.
+		if _, exists, err := i.store.Get(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)); err != nil {
+			return nil, err
+		} else if exists {
+			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
+		}
+		clientTxHash, err := sponsoredTransactionHash(tx, sender)
 		if err != nil {
-			return nil, mpp.ErrMalformedCredential("failed to decode fee payer transaction")
+			return nil, mpp.ErrMalformedCredential("failed to hash fee payer transaction")
 		}
 		sponsoredClaimKey = tempo.ChargeSponsoredTransactionStoreKey(clientTxHash)
 		accepted, err := i.store.PutIfAbsent(ctx, sponsoredClaimKey, clientTxHash)
@@ -738,14 +739,15 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0)), nil
 }
 
-// credentialTransactionHash returns the keccak256 hash of a hex-encoded
-// transaction credential, independent of its 0x prefix or hex casing.
-func credentialTransactionHash(serialized string) (string, error) {
-	encoded, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(serialized, "0x"), "0X"))
+// sponsoredTransactionHash binds the verified payer to the canonical signing payload.
+// Wire encodings, sponsor-selected fee tokens and alternate signatures must not
+// create additional sponsorship authorizations for the same payer transaction.
+func sponsoredTransactionHash(tx *tempotx.Tx, sender common.Address) (string, error) {
+	payload, err := tempotx.GetSignPayload(tx)
 	if err != nil {
-		return "", fmt.Errorf("decode transaction: %w", err)
+		return "", err
 	}
-	return crypto.Keccak256Hash(encoded).Hex(), nil
+	return crypto.Keccak256Hash(sender.Bytes(), payload.Bytes()).Hex(), nil
 }
 
 // deserializeTransactionCredential accepts both the broadcast transaction

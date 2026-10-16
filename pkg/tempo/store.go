@@ -83,7 +83,7 @@ func ChargeSponsoredChallengeStoreKey(challengeID string) string {
 
 // ChargeSponsoredTransactionStoreKey normalizes a replay-protection key for a
 // sponsored Tempo transaction awaiting co-signature, keyed by the keccak256
-// hash of the payer-signed envelope.
+// hash of the verified payer and canonical sender signing payload.
 func ChargeSponsoredTransactionStoreKey(hash string) string {
 	return ReplayKeyPrefix + "sponsor:" + strings.ToLower(hash)
 }

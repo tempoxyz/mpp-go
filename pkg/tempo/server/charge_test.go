@@ -1549,6 +1549,54 @@ func TestChargeFlow_FeePayerDistinctPayersShareChallenge(t *testing.T) {
 	require.Len(t, rpc.sentRawTxs, 2)
 }
 
+func TestChargeFlow_FeePayerCanonicalReplay(t *testing.T) {
+	for _, firstFeePayerForm := range []bool{false, true} {
+		t.Run(fmt.Sprint(firstFeePayerForm), func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, true, nil)
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			normal := credential.Payload["signature"].(string)
+			tx, err := tempotx.Deserialize(normal)
+			require.NoError(t, err)
+			sender, err := tempotx.VerifySignature(tx)
+			require.NoError(t, err)
+			alternate, err := tempotx.Serialize(tx, &tempotx.SerializeOptions{Format: tempotx.FormatFeePayer, Sender: sender})
+			require.NoError(t, err)
+			forms := []string{normal, alternate}
+			if firstFeePayerForm {
+				forms[0], forms[1] = forms[1], forms[0]
+			}
+			intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
+			require.NoError(t, err)
+			credential.Payload["signature"] = forms[0]
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+			credential.Payload["signature"] = forms[1]
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.ErrorContains(t, err, "sponsored transaction already used")
+			require.Len(t, rpc.sentRawTxs, 1)
+		})
+	}
+}
+
+func TestChargeFlow_FeePayerHonorsLegacyReservation(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	challenge := buildChallenge(t, request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, challenge)
+	require.NoError(t, err)
+	store := tempo.NewMemoryStore()
+	require.NoError(t, store.Put(ctx, tempo.ChargeSponsoredChallengeStoreKey(challenge.ID), challenge.ID))
+	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store, FeePayerPrivateKey: feePayerKey})
+	require.NoError(t, err)
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "fee payer challenge already used")
+	require.Empty(t, rpc.sentRawTxs)
+}
+
 func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
