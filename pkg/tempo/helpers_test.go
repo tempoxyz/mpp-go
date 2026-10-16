@@ -22,7 +22,6 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 		ChainID:     42431,
 		FeePayer:    true,
 		FeePayerURL: "https://fee-payer.example.com",
-		Memo:        "0x" + strings.ToUpper(strings.Repeat("ab", 32)),
 		Splits: []SplitParams{{
 			Amount:    "0.10",
 			Memo:      "0x" + strings.Repeat("cd", 32),
@@ -46,10 +45,7 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 		"request.Recipient = %q", request.Recipient) {
 		return
 	}
-	if !assert.Equalf(t, "0x"+strings.Repeat("ab", 32), request.MethodDetails.Memo,
-		"request.MethodDetails.Memo = %q", request.MethodDetails.Memo) {
-		return
-	}
+	assert.NotContains(t, request.Map()["methodDetails"], "memo")
 	if !assert.Equalf(t, "https://fee-payer.example.com", request.MethodDetails.FeePayerURL,
 		"request.MethodDetails.FeePayerURL = %q", request.MethodDetails.FeePayerURL) {
 		return
@@ -84,14 +80,18 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 
 }
 
-func TestNormalizeChargeRequest_RejectsInvalidMemo(t *testing.T) {
+func TestNormalizeChargeRequest_RejectsInvalidSplitMemo(t *testing.T) {
 	t.Parallel()
 
 	_, err := NormalizeChargeRequest(ChargeRequestParams{
 		Amount:    "1",
 		Currency:  "0x20c0000000000000000000000000000000000001",
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-		Memo:      "0x1234",
+		Splits: []SplitParams{{
+			Amount:    "0.10",
+			Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+			Memo:      "0x1234",
+		}},
 	})
 	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "memo must be exactly 32 bytes"),
 		"NormalizeChargeRequest() error = %v, want invalid memo error", err) {
@@ -177,38 +177,16 @@ func TestEncodeAttribution_VerifiesServerFingerprint(t *testing.T) {
 
 }
 
-func TestMatchTransferCalldata_MemoAndAttributionFallback(t *testing.T) {
+func TestMatchTransferCalldata_Attribution(t *testing.T) {
 	t.Parallel()
 
 	amount := big.NewInt(500000)
 	recipient := "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
-	explicitMemo := "0x" + strings.Repeat("ab", 32)
-
-	explicitRequest := ChargeRequest{
+	implicitRequest := ChargeRequest{
 		Amount:    amount.String(),
 		Currency:  "0x20c0000000000000000000000000000000000001",
 		Recipient: common.HexToAddress(recipient).Hex(),
-		MethodDetails: MethodDetails{
-			Memo: explicitMemo,
-		},
 	}
-
-	calldata, err := EncodeTransferWithMemo(recipient, amount, explicitMemo)
-	if !assert.NoErrorf(t, err,
-		"EncodeTransferWithMemo() error = %v", err) {
-		return
-	}
-	if !assert.True(t, MatchTransferCalldata(calldata, explicitRequest, "ignored.example.com", "ignored-challenge"),
-		"MatchTransferCalldata() = false, want true for explicit memo") {
-		return
-	}
-	if !assert.False(t, MatchTransferCalldata(calldata+"01", explicitRequest, "ignored.example.com", "ignored-challenge"),
-		"MatchTransferCalldata() = true, want false for padded explicit memo calldata") {
-		return
-	}
-
-	implicitRequest := explicitRequest
-	implicitRequest.MethodDetails.Memo = ""
 	attributionMemo := EncodeAttribution("api.example.com", "cli-app", "challenge-1")
 	attributedCalldata, err := EncodeTransferWithMemo(recipient, amount, attributionMemo)
 	if !assert.NoErrorf(t, err,

@@ -22,6 +22,8 @@ func main() {
 	}
 
 	method, err := charge.MethodFromConfig(charge.Config{
+		// Development only: replicas need a shared persistent store.
+		Store:          tempo.NewMemoryStore(),
 		RPCURL:         rpcURL,
 		ChainID:        chainID,
 		Currency:       devnet.Currency,

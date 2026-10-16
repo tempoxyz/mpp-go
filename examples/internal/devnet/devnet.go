@@ -3,7 +3,9 @@ package devnet
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -92,4 +94,20 @@ func waitForReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[
 		time.Sleep(receiptWaitPollPeriod)
 	}
 	return nil, fmt.Errorf("transaction receipt not found for %s", hash)
+}
+
+// PaymentPolicy permits at most one token per payment to the example payee on
+// the configured chain. Applications should also enforce their own total budget.
+func PaymentPolicy(chainID int64, recipient string) func(context.Context, tempo.ChargeRequest) error {
+	return func(_ context.Context, request tempo.ChargeRequest) error {
+		amount, ok := new(big.Int).SetString(request.Amount, 10)
+		if !ok || amount.Sign() < 0 || amount.Cmp(big.NewInt(1_000_000)) > 0 ||
+			!strings.EqualFold(request.Currency, Currency) ||
+			!strings.EqualFold(request.Recipient, recipient) ||
+			request.MethodDetails.ChainID == nil || *request.MethodDetails.ChainID != chainID ||
+			len(request.MethodDetails.Splits) != 0 {
+			return fmt.Errorf("payment exceeds the example's amount, currency, recipient, or chain policy")
+		}
+		return nil
+	}
 }

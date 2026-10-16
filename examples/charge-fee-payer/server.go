@@ -7,6 +7,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	"github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
@@ -17,6 +18,8 @@ type exampleServer struct {
 
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
 	method, err := charge.MethodFromConfig(charge.Config{
+		// Development only: replicas need a shared persistent store.
+		Store:              tempo.NewMemoryStore(),
 		RPCURL:             rpcURL,
 		ChainID:            chainID,
 		Currency:           devnet.Currency,

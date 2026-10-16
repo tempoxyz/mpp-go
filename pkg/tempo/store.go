@@ -23,7 +23,8 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// MemoryStore is the default in-process replay-protection store.
+// MemoryStore is an opt-in development replay store. It does not protect across
+// processes or restarts; production replicas must share a persistent Store.
 type MemoryStore struct {
 	mu     sync.Mutex
 	values map[string]string

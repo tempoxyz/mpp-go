@@ -36,7 +36,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
 		body, err := server.ReadRequestBody(c.Request)
 		if err != nil {
-			server.WritePaymentError(c.Writer, mpp.ErrBadRequest("failed to read request body"))
+			server.WritePaymentError(c.Writer, server.RequestBodyError(err))
 			c.Abort()
 			return
 		}
@@ -47,7 +47,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		result, err := m.Charge(c.Request.Context(), chargeParams)
 		if err != nil {
 			if result != nil && result.Challenge != nil {
-				server.WritePaymentErrorWithChallenge(c.Writer, err, result.Challenge, m.Realm())
+				server.WritePaymentErrorWithChallenges(c.Writer, err, result.Challenges, m.Realm())
 				c.Abort()
 				return
 			}
@@ -57,7 +57,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		}
 
 		if result.Challenge != nil {
-			server.WriteChallenge(c.Writer, result.Challenge, m.Realm())
+			server.WriteChallenges(c.Writer, result.Challenges, m.Realm())
 			c.Abort()
 			return
 		}

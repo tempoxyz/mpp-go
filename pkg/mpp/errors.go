@@ -25,8 +25,8 @@ const (
 	ErrorTypeInvalidChallenge    ErrorType = "https://paymentauth.org/problems/invalid-challenge"
 	ErrorTypeVerificationFailed  ErrorType = "https://paymentauth.org/problems/verification-failed"
 	ErrorTypePaymentExpired      ErrorType = "https://paymentauth.org/problems/payment-expired"
-	ErrorTypeInvalidPayload      ErrorType = "https://mpp.dev/errors/invalid-payload"
-	ErrorTypeBadRequest          ErrorType = "https://mpp.dev/errors/bad-request"
+	ErrorTypeInvalidPayload      ErrorType = "https://paymentauth.org/problems/invalid-payload"
+	ErrorTypeBadRequest          ErrorType = "https://paymentauth.org/problems/bad-request"
 	ErrorTypePaymentInsufficient ErrorType = "https://paymentauth.org/problems/payment-insufficient"
 	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
 )
@@ -60,7 +60,7 @@ func (t ErrorType) Title() string {
 // Status returns the default HTTP status for the error type.
 func (t ErrorType) Status() int {
 	switch t {
-	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypePaymentInsufficient:
+	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient:
 		return http.StatusPaymentRequired
 	default:
 		return http.StatusBadRequest
@@ -153,7 +153,7 @@ func ErrPaymentExpired(expires string) *PaymentError {
 	return newPaymentError(ErrorTypePaymentExpired, fmt.Sprintf("payment expired at %s", expires))
 }
 
-// ErrInvalidPayload returns a 400 error for invalid payment payloads.
+// ErrInvalidPayload returns a 402 error for invalid payment payloads.
 func ErrInvalidPayload(reason string) *PaymentError {
 	return newPaymentError(ErrorTypeInvalidPayload, reason)
 }

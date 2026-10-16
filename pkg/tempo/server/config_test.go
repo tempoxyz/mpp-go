@@ -13,7 +13,7 @@ import (
 func TestMethodFromConfigBuildsMethod(t *testing.T) {
 	t.Parallel()
 
-	method, err := MethodFromConfig(Config{
+	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 	})
@@ -37,8 +37,9 @@ func TestMethodFromConfigBuildsMethod(t *testing.T) {
 		"request.MethodDetails.ChainID = %v, want %d", request.MethodDetails.ChainID, tempotx.ChainIdModerato) {
 		return
 	}
-	if !assert.Equalf(t, tempotx.AlphaUSDAddress.Hex(), request.Currency,
-		"request.Currency = %q, want %q", request.Currency, tempotx.AlphaUSDAddress.Hex()) {
+	// Moderato's first default offer is OUSD (followed by pathUSD).
+	if !assert.Equalf(t, tempo.OUSDAddress, request.Currency,
+		"request.Currency = %q, want %q", request.Currency, tempo.OUSDAddress) {
 		return
 	}
 
@@ -46,7 +47,7 @@ func TestMethodFromConfigBuildsMethod(t *testing.T) {
 
 func TestNewIntentLoadsFeePayerPrivateKeyFromEnv(t *testing.T) {
 	t.Setenv("FEE_PAYER_KEY", feePayerKey)
-	intent, err := NewIntent(IntentConfig{FeePayerPrivateKeyEnv: "FEE_PAYER_KEY"})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerPrivateKeyEnv: "FEE_PAYER_KEY"})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -59,7 +60,7 @@ func TestNewIntentLoadsFeePayerPrivateKeyFromEnv(t *testing.T) {
 }
 
 func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
-	intent, err := NewIntent(IntentConfig{})
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	if !assert.NoErrorf(t, err,
 		"NewIntent() error = %v", err) {
 		return
@@ -102,7 +103,7 @@ func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
 }
 
 func TestNewIntentRejectsInvalidFeePayerPolicy(t *testing.T) {
-	_, err := NewIntent(IntentConfig{
+	_, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 		FeePayerPolicies: map[string]FeePayerPolicy{
 			testCurrency: {
 				MaxFeePerGas:         big.NewInt(1),

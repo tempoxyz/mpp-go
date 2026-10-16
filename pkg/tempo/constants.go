@@ -28,4 +28,9 @@ const (
 	TransferWithMemoCalldataLength = 4 + 32 + 32 + 32
 	// MainnetUSDCAddress is Circle's USDC contract on Tempo mainnet.
 	MainnetUSDCAddress = "0x20C000000000000000000000b9537d11c60E8b50"
+	// OUSDAddress is the OpenUSD (OUSD) contract, deployed at the same address
+	// on Tempo mainnet and Moderato.
+	OUSDAddress = "0x20c0000000000000000000006a37DA5C996874BE"
+	// PathUSDAddress is the pathUSD contract on Tempo networks.
+	PathUSDAddress = "0x20c0000000000000000000000000000000000000"
 )

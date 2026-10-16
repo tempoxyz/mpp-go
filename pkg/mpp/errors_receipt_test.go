@@ -65,7 +65,7 @@ func TestPaymentErrorConstructors(t *testing.T) {
 			name:   "invalid payload",
 			err:    ErrInvalidPayload("invalid payload"),
 			want:   ErrorTypeInvalidPayload,
-			status: http.StatusBadRequest,
+			status: http.StatusPaymentRequired,
 			detail: "invalid payload",
 		},
 		{
@@ -124,6 +124,8 @@ func TestProblemTypeURIsUseCanonicalBase(t *testing.T) {
 		{got: ErrorTypeInvalidChallenge, want: "https://paymentauth.org/problems/invalid-challenge"},
 		{got: ErrorTypeVerificationFailed, want: "https://paymentauth.org/problems/verification-failed"},
 		{got: ErrorTypePaymentExpired, want: "https://paymentauth.org/problems/payment-expired"},
+		{got: ErrorTypeInvalidPayload, want: "https://paymentauth.org/problems/invalid-payload"},
+		{got: ErrorTypeBadRequest, want: "https://paymentauth.org/problems/bad-request"},
 		{got: ErrorTypePaymentInsufficient, want: "https://paymentauth.org/problems/payment-insufficient"},
 		{got: ErrorTypeMethodUnsupported, want: "https://paymentauth.org/problems/method-unsupported"},
 	}

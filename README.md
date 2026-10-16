@@ -54,11 +54,14 @@ import (
 	"net/http"
 
 	"github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
 func main() {
 	method, _ := charge.MethodFromConfig(charge.Config{
+        // Development only; use a shared persistent Store in production.
+        Store: tempo.NewMemoryStore(),
 		RPCURL: "https://rpc.moderato.tempo.xyz",
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
@@ -98,6 +101,16 @@ handler := server.ChargeMiddleware(payment, server.ChargeParams{
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": "paid content"})
 }))
 ```
+
+### Explicit replay storage
+
+Local verifier construction requires an explicit `Store`, so an unconfigured
+server cannot issue payable challenges. All
+replicas must share persistent replay keys, with atomic `PutIfAbsent`, no eviction,
+and fail-closed behavior on storage errors. `tempo.NewMemoryStore()` is an explicit
+single-process development choice; it loses replay protection on restart. Existing
+applications relying on the implicit memory store must configure storage. Relay
+verification delegates replay protection to the relay.
 
 ### Client
 

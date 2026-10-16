@@ -35,7 +35,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
 			body, err := server.ReadRequestBody(c.Request())
 			if err != nil {
-				server.WritePaymentError(c.Response(), mpp.ErrBadRequest("failed to read request body"))
+				server.WritePaymentError(c.Response(), server.RequestBodyError(err))
 				return nil
 			}
 			if len(body) > 0 {
@@ -45,7 +45,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			result, err := m.Charge(c.Request().Context(), chargeParams)
 			if err != nil {
 				if result != nil && result.Challenge != nil {
-					server.WritePaymentErrorWithChallenge(c.Response(), err, result.Challenge, m.Realm())
+					server.WritePaymentErrorWithChallenges(c.Response(), err, result.Challenges, m.Realm())
 					return nil
 				}
 				server.WritePaymentError(c.Response(), err)
@@ -53,7 +53,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			}
 
 			if result.Challenge != nil {
-				server.WriteChallenge(c.Response(), result.Challenge, m.Realm())
+				server.WriteChallenges(c.Response(), result.Challenges, m.Realm())
 				return nil
 			}
 

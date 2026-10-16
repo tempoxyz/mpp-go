@@ -252,3 +252,13 @@ func newTestServer(t *testing.T, method server.Method, realm, secretKey string, 
 	require.NoError(t, err)
 	return payment
 }
+
+func TestOversizedBodyRejectedBeforePayment(t *testing.T) {
+	router := ginfw.New()
+	router.POST("/", ChargeMiddleware(nil, server.ChargeParams{}), func(c *ginfw.Context) { t.Fatal("handler called") })
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", server.MaxRequestBodyBytes+1)))
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}

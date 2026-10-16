@@ -38,10 +38,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	recipient := os.Getenv("RECIPIENT")
+	if recipient == "" {
+		log.Fatal("set RECIPIENT to the merchant address printed by the example server")
+	}
 	method, err := charge.New(charge.Config{
-		PrivateKey: privateKey,
-		ChainID:    chainID,
-		RPCURL:     rpcURL,
+		PaymentPolicy: devnet.PaymentPolicy(chainID, recipient),
+		PrivateKey:    privateKey,
+		ChainID:       chainID,
+		RPCURL:        rpcURL,
 	})
 	if err != nil {
 		log.Fatal(err)

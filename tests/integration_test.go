@@ -86,7 +86,7 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -180,7 +180,7 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, feePayerSigner)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -256,7 +256,7 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
 	require.NoError(t, err)
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  rootSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -312,7 +312,7 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:         payerSigner,
 		RPCURL:         rpcURL,
 		ChainID:        int64(chainID),
@@ -407,7 +407,7 @@ func TestIntegrationChargeFlow_HashCredentialRequiresSource(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:         payerSigner,
 		RPCURL:         rpcURL,
 		ChainID:        int64(chainID),
@@ -484,7 +484,7 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -551,7 +551,7 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -626,7 +626,7 @@ func TestIntegrationChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -699,7 +699,7 @@ func TestIntegrationChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
 	server := newPaidServer(t, rpcURL, chainID, nil)
 	defer server.Close()
 
-	clientMethod, err := chargeclient.New(chargeclient.Config{
+	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
 		RPCURL:  rpcURL,
 		ChainID: int64(chainID),
@@ -938,7 +938,7 @@ func newSigner(t *testing.T) *temposigner.Signer {
 func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *temposigner.Signer) *httptest.Server {
 	t.Helper()
 
-	intent, err := chargeserver.NewIntent(chargeserver.IntentConfig{
+	intent, err := chargeserver.NewIntent(chargeserver.IntentConfig{Store: tempo.NewMemoryStore(),
 		RPCURL:         rpcURL,
 		FeePayerSigner: feePayerSigner,
 	})

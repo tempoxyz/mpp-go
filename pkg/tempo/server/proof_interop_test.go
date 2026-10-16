@@ -61,7 +61,7 @@ func TestVerifyProof_RejectsCrossAccountAccessKeyReplay(t *testing.T) {
 	{
 		rpc := newMockRPC(request)
 		rpc.callResult = encodeActiveKeyInfo(accessKey.Address(), time.Now().Add(time.Hour).Unix())
-		intent, err := NewIntent(IntentConfig{RPC: rpc})
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 		assert.NoError(t, err)
 		credential := &mpp.Credential{
 			Challenge: challenge.ToEcho(),
@@ -80,7 +80,7 @@ func TestVerifyProof_RejectsCrossAccountAccessKeyReplay(t *testing.T) {
 	{
 		rpc := newMockRPC(request)
 		rpc.callResult = encodeActiveKeyInfo(accessKey.Address(), time.Now().Add(time.Hour).Unix())
-		intent, err := NewIntent(IntentConfig{RPC: rpc})
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 		assert.NoError(t, err)
 		credential := &mpp.Credential{
 			Challenge: challenge.ToEcho(),

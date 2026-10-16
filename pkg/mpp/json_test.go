@@ -320,3 +320,22 @@ func TestChallengeJSONRoundTripRejectsLossyLargeIntegerRequest(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not exactly representable by JCS")
 }
+
+func TestAuthorizationExtractionBoundsRawHeader(t *testing.T) {
+	for _, header := range []string{
+		"Bearer " + strings.Repeat("a", maxHeaderPayload) + ", Payment abc",
+		strings.Repeat(" ", maxHeaderPayload) + "Payment abc",
+		"Payment " + strings.Repeat("a", maxHeaderPayload),
+		strings.Repeat("Basic a,", maxHeaderPayload),
+	} {
+		_, err := FindPaymentAuthorizationStrict(header)
+		require.ErrorContains(t, err, "exceeds maximum size")
+		require.Empty(t, FindPaymentAuthorization(header))
+		_, err = ParseCredential(header)
+		require.ErrorContains(t, err, "exceeds maximum size")
+	}
+	header := "Payment " + strings.Repeat("a", maxHeaderPayload-len("Payment "))
+	got, err := FindPaymentAuthorizationStrict(header)
+	require.NoError(t, err)
+	require.Equal(t, header, got)
+}
