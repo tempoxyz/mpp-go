@@ -75,6 +75,12 @@ func ChargeStoreKey(hash string) string {
 	return ReplayKeyPrefix + strings.ToLower(hash)
 }
 
+// ChargeSponsoredChallengeStoreKey returns the legacy challenge reservation key.
+// Deprecated: use ChargeSponsoredTransactionStoreKey with a payer-signed transaction hash.
+func ChargeSponsoredChallengeStoreKey(challengeID string) string {
+	return ReplayKeyPrefix + "sponsor:" + challengeID
+}
+
 // ChargeSponsoredTransactionStoreKey normalizes a replay-protection key for a
 // sponsored Tempo transaction awaiting co-signature, keyed by the keccak256
 // hash of the payer-signed envelope.

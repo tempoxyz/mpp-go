@@ -1521,6 +1521,7 @@ func TestChargeFlow_FeePayerDistinctPayersShareChallenge(t *testing.T) {
 	require.NoError(t, err)
 
 	secondPayer, err := chargeclient.New(chargeclient.Config{
+		PaymentPolicy:  func(context.Context, tempo.ChargeRequest) error { return nil },
 		PrivateKey:     secondPayerPrivateKey,
 		RPC:            rpc,
 		ChainID:        42431,

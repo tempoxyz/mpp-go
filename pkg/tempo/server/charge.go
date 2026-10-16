@@ -738,10 +738,6 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0)), nil
 }
 
-// deserializeTransactionCredential accepts both the broadcast transaction
-// envelope (0x76) and the fee-payer signing form (0x78). tempo-go v0.5 only
-// decodes 0x76, so the 0x78 body is validated and converted to the equivalent
-// awaiting-fee-payer shape before delegating the remaining decoding.
 // credentialTransactionHash returns the keccak256 hash of a hex-encoded
 // transaction credential, independent of its 0x prefix or hex casing.
 func credentialTransactionHash(serialized string) (string, error) {
@@ -752,6 +748,10 @@ func credentialTransactionHash(serialized string) (string, error) {
 	return crypto.Keccak256Hash(encoded).Hex(), nil
 }
 
+// deserializeTransactionCredential accepts both the broadcast transaction
+// envelope (0x76) and the fee-payer signing form (0x78). tempo-go v0.5 only
+// decodes 0x76, so the 0x78 body is validated and converted to the equivalent
+// awaiting-fee-payer shape before delegating the remaining decoding.
 func deserializeTransactionCredential(serialized string) (*tempotx.Tx, bool, error) {
 	hexValue := serialized
 	if strings.HasPrefix(hexValue, "0x") || strings.HasPrefix(hexValue, "0X") {
