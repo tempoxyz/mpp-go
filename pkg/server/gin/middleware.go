@@ -102,7 +102,7 @@ func (w *paymentReceiptWriter) WriteString(body string) (int, error) {
 }
 
 func (w *paymentReceiptWriter) prepare(status int) {
-	if status >= http.StatusBadRequest {
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		w.Header().Del(mpp.HeaderPaymentReceipt)
 		return
 	}

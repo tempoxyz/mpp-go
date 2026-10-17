@@ -379,6 +379,24 @@ func TestServeVerifiedOmitsReceiptFromFailedResponse(t *testing.T) {
 	assert.Empty(t, w.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
+func TestServeVerifiedOmitsReceiptFromRedirectResponse(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	serveVerified(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/elsewhere", http.StatusFound)
+		}),
+		w,
+		req,
+		&mpp.Credential{},
+		mpp.Success("tempo", "0xreceipt"),
+	)
+
+	assert.Equal(t, http.StatusFound, w.Code)
+	assert.Equal(t, "/elsewhere", w.Header().Get("Location"))
+	assert.Empty(t, w.Header().Get(mpp.HeaderPaymentReceipt))
+}
+
 type optionalResponseWriter struct {
 	header  http.Header
 	body    bytes.Buffer
