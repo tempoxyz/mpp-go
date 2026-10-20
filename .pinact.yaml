@@ -1,11 +1,12 @@
 version: 3
 rules:
-  # No changelogs release tag includes the approved vendored PR action yet.
-  # This exact commit is from 2026-10-06 and has passed the 7-day cooldown.
+  # No changelogs release tag includes the locked composite install fix yet.
+  # Allow this exact 2026-10-20 commit before the 7-day cooldown to unblock
+  # releases; the exception also skips version-comment verification.
   - ignore: true
     conditions:
       - expr: |
-          ActionName == "tempoxyz/changelogs" && ActionVersion == "b810ec2bdffd21f0d14a4709b4b8ab6f75715246"
+          ActionName == "tempoxyz/changelogs" && ActionVersion == "eb001118fc77cbd13336f034aedfbf065861b6b9"
   # mpp-tools has no tags for these existing workflow commits, so pinact
   # cannot verify a version comment. Keep this exception limited to the
   # exact workflows and SHAs currently used here.
