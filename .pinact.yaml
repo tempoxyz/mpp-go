@@ -1,5 +1,11 @@
 version: 3
 rules:
+  # No changelogs release tag includes the approved vendored PR action yet.
+  # This exact commit is from 2026-10-06 and has passed the 7-day cooldown.
+  - ignore: true
+    conditions:
+      - expr: |
+          ActionName == "tempoxyz/changelogs" && ActionVersion == "b810ec2bdffd21f0d14a4709b4b8ab6f75715246"
   # mpp-tools has no tags for these existing workflow commits, so pinact
   # cannot verify a version comment. Keep this exception limited to the
   # exact workflows and SHAs currently used here.
