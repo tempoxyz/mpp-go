@@ -28,7 +28,18 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go mod verify
+          cache: false
+      # setup-go's built-in cache used one key for Lint and Integration, so
+      # only one of them could save it and Lint ran cold. Each job keys its own.
+      - name: Cache Go modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-lint-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-lint-
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
@@ -51,6 +62,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
+          cache: false
       - name: Cache Go modules
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -79,6 +91,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Cache Go modules
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -93,8 +106,9 @@ jobs:
       - name: Start Tempo localnet
         run: docker compose up -d --wait
 
+      # The unit tests already run with -race; these mostly wait on the localnet.
       - name: Run integration tests
-        run: go test -race -count=1 -tags=integration -timeout=120s ./tests/...
+        run: go test -count=1 -tags=integration -timeout=120s ./tests/...
 
       - name: Stop Tempo localnet
         if: always()
