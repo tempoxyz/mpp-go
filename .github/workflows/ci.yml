@@ -88,6 +88,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Pull while Go and its cache are set up; `docker compose up` reuses the image.
+      - name: Pull Tempo localnet image
+        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -99,9 +102,11 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-integration-${{ hashFiles('**/go.sum') }}
+          # A new prefix since dropping -race: the old entry holds race-built
+          # packages, and an exact key hit never saves the new ones.
+          key: ${{ runner.os }}-go-integration-norace-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-integration-
+            ${{ runner.os }}-go-integration-norace-
 
       - name: Start Tempo localnet
         run: docker compose up -d --wait
