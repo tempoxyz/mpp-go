@@ -108,6 +108,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-integration-norace-
 
+      # Compile the integration tests while the image is still pulling;
+      # -run '^$' builds the test binaries without running anything.
+      - name: Build integration tests
+        run: go test -count=1 -tags=integration -run '^$' ./tests/...
+
       - name: Start Tempo localnet
         run: docker compose up -d --wait
 
