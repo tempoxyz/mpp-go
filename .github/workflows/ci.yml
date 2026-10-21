@@ -91,7 +91,7 @@ jobs:
       # Start the containers in the background so pulling and booting them
       # overlaps the setup below; a later step waits for `up --wait` to finish.
       - name: Start Tempo localnet
-        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") &
+        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") > /dev/null 2>&1 &
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
