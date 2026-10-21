@@ -88,9 +88,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Pull while Go and its cache are set up; `docker compose up` reuses the image.
-      - name: Pull Tempo localnet image
-        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
+      # Start the containers in the background so pulling and booting them
+      # overlaps the setup below; a later step waits for `up --wait` to finish.
+      - name: Start Tempo localnet
+        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") &
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -108,13 +109,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-integration-norace-
 
-      # Compile the integration tests while the image is still pulling;
-      # -run '^$' builds the test binaries without running anything.
-      - name: Build integration tests
-        run: go test -count=1 -tags=integration -run '^$' ./tests/...
-
-      - name: Start Tempo localnet
-        run: docker compose up -d --wait
+      - name: Wait for Tempo localnet
+        run: |
+          timeout 180 bash -c 'until [[ -s "$RUNNER_TEMP/compose-up.status" ]]; do sleep 0.5; done' || true
+          cat "$RUNNER_TEMP/compose-up.log"
+          [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
 
       # The unit tests already run with -race; these mostly wait on the localnet.
       - name: Run integration tests
