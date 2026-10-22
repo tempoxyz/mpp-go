@@ -137,7 +137,7 @@ func TestMppCharge_OffersShareExplicitExpiresMetaAndDigest(t *testing.T) {
 	require.Len(t, result.Challenges, 3)
 	for _, challenge := range result.Challenges {
 		assert.Equal(t, expires, challenge.Expires)
-		assert.Equal(t, map[string]string{"trace": "abc"}, challenge.Opaque)
+		assert.Equal(t, map[string]string{"trace": "abc"}, applicationMeta(challenge.Opaque))
 		assert.Equal(t, mpp.BodyDigest.Compute([]byte(`{"q":1}`)), challenge.Digest)
 		assert.Equal(t, "coffee", challenge.Description)
 	}

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -307,6 +308,39 @@ func TestChargeMiddlewareRejectsEncodedBodiesBeforeDecompression(t *testing.T) {
 			require.NoError(t, err)
 			defer response.Body.Close()
 			require.Equal(t, http.StatusUnsupportedMediaType, response.StatusCode)
+		})
+	}
+}
+
+type countedStream struct{ remaining, read int }
+
+func (r *countedStream) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.remaining)
+	clear(p[:n])
+	r.remaining -= n
+	r.read += n
+	return n, nil
+}
+func TestChargeMiddlewareBoundsStream(t *testing.T) {
+	for _, size := range []int{32, server.MaxRequestBodyBytes + 1000} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+			stream := &countedStream{remaining: size}
+			app := fiberfw.New()
+			app.Use(func(c *fiberfw.Ctx) error { c.Request().SetBodyStream(stream, -1); return c.Next() })
+			app.Post("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/paid", nil))
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			if size > server.MaxRequestBodyBytes {
+				assert.Equal(t, 413, resp.StatusCode)
+			} else {
+				assert.Equal(t, 402, resp.StatusCode)
+			}
+			assert.LessOrEqual(t, stream.read, server.MaxRequestBodyBytes+1)
 		})
 	}
 }

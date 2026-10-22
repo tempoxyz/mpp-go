@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
-	"reflect"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -280,7 +280,7 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 		if err != nil {
 			return composedEntry{}, false, err
 		}
-		if !reflect.DeepEqual(cred.Challenge.Opaque, entry.params.Meta) {
+		if !maps.Equal(applicationMeta(cred.Challenge.Opaque), entry.params.Meta) {
 			continue
 		}
 		for _, request := range requests {

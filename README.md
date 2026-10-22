@@ -330,3 +330,18 @@ Licensed under either of [Apache License, Version 2.0](./LICENSE-APACHE) or [MIT
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
+
+### Payment request safety
+
+Hash-mode clients validate the credential header size before broadcasting. For custom clients,
+serialize with `mpp.FormatAuthorizationStrict(credential)` and handle its error.
+
+Server-issued challenges have random opaque `_mpp_nonce` metadata. Do not set
+that reserved key. Bind authenticated application context with
+`ChargeParams{Meta: map[string]string{"account": authenticatedAccountID}}` when
+a payment must authorize a specific caller. Derive this ID from trusted
+session authentication, never directly from request input. Nonces prevent
+challenge collisions; they do not make leaked complete credentials safe.
+Low-level challenge constructors remain deterministic, so custom issuance must
+supply its own unique, authenticated context. Existing challenges remain valid
+until their original expiry.

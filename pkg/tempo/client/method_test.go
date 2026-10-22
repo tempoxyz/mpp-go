@@ -274,3 +274,30 @@ func buildChallenge(t *testing.T, params tempo.ChargeRequestParams) *mpp.Challen
 		mpp.WithExpires(mpp.Expires.Minutes(5)),
 	)
 }
+
+func TestHashCredentialSizePreflight(t *testing.T) {
+	for _, size := range []int{10, 9000} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			rpc := &mockRPC{chainID: 42431}
+			method, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil }, ChainID: 42431, CredentialType: tempo.CredentialTypeHash, PrivateKey: testPrivateKey, RPC: rpc})
+			if !assert.NoError(t, err) {
+				return
+			}
+			challenge := buildChallenge(t, tempo.ChargeRequestParams{Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431})
+			challenge.Request["_mppx_scope"] = map[string]any{"query": strings.Repeat("a", size)}
+			challenge.RequestB64 = ""
+			_, err = mpp.FormatAuthenticateStrict(challenge, challenge.Realm)
+			if !assert.NoError(t, err) {
+				return
+			}
+			_, err = method.CreateCredential(context.Background(), challenge)
+			if size == 9000 {
+				assert.Error(t, err)
+				assert.Empty(t, rpc.sentRawTxs)
+			} else {
+				assert.NoError(t, err)
+				assert.Len(t, rpc.sentRawTxs, 1)
+			}
+		})
+	}
+}

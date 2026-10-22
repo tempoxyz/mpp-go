@@ -3,6 +3,7 @@ package fiberadapter
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -46,8 +47,24 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 			})
 			return nil
 		}
-		body := c.BodyRaw()
+		var body []byte
+		if c.Request().IsBodyStream() {
+			var err error
+			body, err = io.ReadAll(io.LimitReader(c.Request().BodyStream(), server.MaxRequestBodyBytes+1))
+			_ = c.Request().CloseBodyStream()
+			if err != nil {
+				c.Response().Header.SetConnectionClose()
+				WritePaymentError(c, server.RequestBodyError(err))
+				return nil
+			}
+			if len(body) <= server.MaxRequestBodyBytes {
+				c.Request().SetBodyRaw(body)
+			}
+		} else {
+			body = c.BodyRaw()
+		}
 		if len(body) > server.MaxRequestBodyBytes {
+			c.Response().Header.SetConnectionClose()
 			WritePaymentError(c, server.RequestBodyError(&http.MaxBytesError{Limit: server.MaxRequestBodyBytes}))
 			return nil
 		}

@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
-	"reflect"
 	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -79,9 +81,19 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
-	if params.Meta != nil {
-		opts = append(opts, mpp.WithMeta(params.Meta))
+	if _, reserved := params.Meta["_mpp_nonce"]; reserved {
+		return nil, mpp.ErrBadRequest("_mpp_nonce is reserved for challenge issuance")
 	}
+	meta := maps.Clone(params.Meta)
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generating challenge nonce: %w", err)
+	}
+	meta["_mpp_nonce"] = hex.EncodeToString(nonce)
+	opts = append(opts, mpp.WithMeta(meta))
 	if params.Header != "" {
 		opts = append(opts, mpp.WithHeader(params.Header))
 	}
@@ -191,7 +203,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 		}
 	}
-	if !reflect.DeepEqual(echoed.Opaque, challenge.Opaque) {
+	// The nonce is authenticated by the echoed HMAC, not compared with the
+	// fresh challenge. Application metadata must still match exactly.
+	if !maps.Equal(applicationMeta(echoed.Opaque), params.Meta) {
 		return challengeResultError(challenge, mpp.ErrInvalidChallenge(
 			echoed.ID,
 			"credential opaque metadata does not match this route's requirements",
@@ -275,4 +289,10 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 		opts = append(opts, mpp.WithHeader(cred.Challenge.Header))
 	}
 	return opts
+}
+
+func applicationMeta(meta map[string]string) map[string]string {
+	result := maps.Clone(meta)
+	delete(result, "_mpp_nonce")
+	return result
 }

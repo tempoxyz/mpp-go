@@ -524,3 +524,27 @@ func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 	}
 
 }
+
+func TestChallengeIssuanceNonce(t *testing.T) {
+	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.Expires.Minutes(5), Meta: map[string]string{"order": "one"}}
+	first, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	second, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	require.NotEqual(t, first.Challenge.ID, second.Challenge.ID)
+	require.Len(t, first.Challenge.Opaque["_mpp_nonce"], 64)
+	require.Equal(t, map[string]string{"order": "one"}, params.Meta)
+	cred := &mpp.Credential{Challenge: first.Challenge.ToEcho(), Payload: map[string]any{}}
+	params.Authorization = cred.ToAuthorization()
+	result, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	require.NotNil(t, result.Receipt)
+	cred.Challenge.Opaque["_mpp_nonce"] = second.Challenge.Opaque["_mpp_nonce"]
+	params.Authorization = cred.ToAuthorization()
+	_, err = VerifyOrChallenge(context.Background(), params)
+	require.Error(t, err)
+	params.Authorization = ""
+	params.Meta["_mpp_nonce"] = "fixed"
+	_, err = VerifyOrChallenge(context.Background(), params)
+	require.Error(t, err)
+}

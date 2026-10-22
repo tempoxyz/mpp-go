@@ -71,8 +71,8 @@ func TestTransportRegeneratesInvalidPayloadWithFixedExpiry(t *testing.T) {
 					assert.Equal(t, []string{"1", "2"}, proofs)
 				}
 				require.NotEmpty(t, ids)
-				for _, id := range ids {
-					assert.Equal(t, ids[0], id)
+				for _, id := range ids[1:] {
+					assert.NotEqual(t, ids[0], id)
 				}
 			})
 		}

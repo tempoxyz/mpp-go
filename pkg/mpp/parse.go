@@ -564,6 +564,15 @@ func FormatAuthorization(c *Credential) string {
 	return SchemePayment + " " + b64EncodeAny(payload)
 }
 
+// FormatAuthorizationStrict formats a credential and enforces the wire size limit.
+func FormatAuthorizationStrict(c *Credential) (string, error) {
+	header := FormatAuthorization(c)
+	if len(header) > maxHeaderPayload {
+		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
+	}
+	return header, nil
+}
+
 // ParsePaymentReceipt parses a Payment-Receipt header value into a Receipt.
 //
 // Expected format: <base64url-json>

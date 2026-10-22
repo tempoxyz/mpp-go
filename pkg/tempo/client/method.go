@@ -178,6 +178,15 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 
 	payload := tempo.ChargeCredentialPayload{Type: credentialType}
 	if credentialType == tempo.CredentialTypeHash {
+		// A transaction hash is 32 bytes, encoded as 0x-prefixed hex.
+		preflight := &mpp.Credential{
+			Challenge: challenge.ToEcho(),
+			Payload:   tempo.ChargeCredentialPayload{Type: credentialType, Hash: "0x" + strings.Repeat("0", 64)}.Map(),
+			Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
+		}
+		if _, err := mpp.FormatAuthorizationStrict(preflight); err != nil {
+			return nil, err
+		}
 		hash, err := rpc.SendRawTransaction(ctx, rawTx)
 		if err != nil {
 			return nil, fmt.Errorf("tempo client: send raw transaction: %w", err)
@@ -187,11 +196,15 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 		payload.Signature = rawTx
 	}
 
-	return &mpp.Credential{
+	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   payload.Map(),
 		Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
-	}, nil
+	}
+	if _, err := mpp.FormatAuthorizationStrict(credential); err != nil {
+		return nil, err
+	}
+	return credential, nil
 }
 
 func (m *Method) buildTransfer(
