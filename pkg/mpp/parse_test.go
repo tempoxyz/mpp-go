@@ -790,3 +790,66 @@ func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
 			"challenge for amount %d was issued by this server and must verify", amount)
 	}
 }
+func TestParseChallengeKeepsParamsAfterMalformedDescription(t *testing.T) {
+	t.Parallel()
+
+	// A legacy description may carry unescaped quotes. Only that value is
+	// malformed; the canonical order puts description ahead of digest, expires,
+	// header and opaque, so those must still be read.
+	const (
+		prefix = `Payment id="ch_1", realm="api.example.com", method="tempo", intent="charge", ` +
+			`request="eyJhbW91bnQiOiIxMDAifQ", `
+		suffix = `digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=", ` +
+			`expires="2026-01-29T12:05:00.000Z", header="Payment-Authorization"`
+	)
+
+	tests := []struct {
+		name        string
+		description string
+		want        string
+	}{
+		{
+			name:        "unescaped quotes",
+			description: `description="Payment for "Premium" service", `,
+			want:        "Payment for ",
+		},
+		{
+			name:        "unescaped quotes around a comma",
+			description: `description="Payment for "a, b" service", `,
+			want:        "Payment for ",
+		},
+		{
+			name:        "single unescaped quote",
+			description: `description="Payment for "Premium service", `,
+			want:        "Payment for ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ParseChallenge(prefix + tt.description + suffix)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, got.Description)
+			assert.Equal(t, "sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=", got.Digest)
+			assert.Equal(t, "2026-01-29T12:05:00.000Z", got.Expires)
+			assert.Equal(t, HeaderPaymentAuthorization, got.Header)
+		})
+	}
+}
+
+func TestParseChallengeMalformedDescriptionBeforeRequiredParams(t *testing.T) {
+	t.Parallel()
+
+	header := `Payment id="ch_1", description="Payment for "Premium" service", ` +
+		`realm="api.example.com", method="tempo", intent="charge", request="eyJhbW91bnQiOiIxMDAifQ"`
+
+	got, err := ParseChallenge(header)
+	require.NoError(t, err)
+
+	assert.Equal(t, "ch_1", got.ID)
+	assert.Equal(t, "api.example.com", got.Realm)
+	assert.Equal(t, "tempo", got.Method)
+}
