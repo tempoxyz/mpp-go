@@ -15,9 +15,9 @@ import (
 
 // VerifyParams contains the parameters for VerifyOrChallenge.
 type VerifyParams struct {
-	// DisableChallengeNonce supports the first phase of a rolling upgrade.
-	// Enable nonce issuance only after every verifier understands nonce metadata.
-	DisableChallengeNonce bool
+	// EnableChallengeNonce opts into unique issuance after every replica has
+	// nonce-aware verification. The default preserves legacy issuance for rollout.
+	EnableChallengeNonce bool
 	// Authorization is the incoming Authorization header value.
 	Authorization string
 	// Intent verifies Credentials for this request.
@@ -88,7 +88,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return nil, mpp.ErrBadRequest("_mpp_nonce is reserved for challenge issuance")
 	}
 	meta := maps.Clone(params.Meta)
-	if !params.DisableChallengeNonce {
+	if params.EnableChallengeNonce {
 		if meta == nil {
 			meta = make(map[string]string)
 		}
