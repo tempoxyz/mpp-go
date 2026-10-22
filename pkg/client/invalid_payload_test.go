@@ -118,3 +118,26 @@ func TestTransportInvalidPayloadResponseClassification(t *testing.T) {
 		})
 	}
 }
+
+func TestTransportReusesNoncedCredentialAfterTransientFailure(t *testing.T) {
+	attempts := 0
+	intent, err := server.NewIntent("charge", server.IntentHooks{Verify: func(_ context.Context, _ *mpp.Credential, _ map[string]any) (*mpp.Receipt, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, mpp.ErrVerificationFailed("receipt not visible")
+		}
+		return mpp.Success("tempo", "paid"), nil
+	}})
+	require.NoError(t, err)
+	payment, err := server.New(rejectingMethod{intent}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	require.NoError(t, err)
+	srv := httptest.NewServer(server.ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50", Expires: mpp.Expires.Minutes(5)})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })))
+	defer srv.Close()
+	method := new(regeneratingMethod)
+	resp, err := New([]Method{method}).Get(context.Background(), srv.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
+	assert.Equal(t, 2, attempts)
+}

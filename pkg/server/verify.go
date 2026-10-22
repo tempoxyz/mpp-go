@@ -15,6 +15,9 @@ import (
 
 // VerifyParams contains the parameters for VerifyOrChallenge.
 type VerifyParams struct {
+	// DisableChallengeNonce supports the first phase of a rolling upgrade.
+	// Enable nonce issuance only after every verifier understands nonce metadata.
+	DisableChallengeNonce bool
 	// Authorization is the incoming Authorization header value.
 	Authorization string
 	// Intent verifies Credentials for this request.
@@ -85,15 +88,20 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return nil, mpp.ErrBadRequest("_mpp_nonce is reserved for challenge issuance")
 	}
 	meta := maps.Clone(params.Meta)
-	if meta == nil {
-		meta = make(map[string]string)
+	if !params.DisableChallengeNonce {
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		nonce := make([]byte, 32)
+		if _, err := rand.Read(nonce); err != nil {
+			return nil, fmt.Errorf("generating challenge nonce: %w", err)
+		}
+		meta["_mpp_nonce"] = hex.EncodeToString(nonce)
 	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("generating challenge nonce: %w", err)
+	if meta != nil {
+		opts = append(opts, mpp.WithMeta(meta))
 	}
-	meta["_mpp_nonce"] = hex.EncodeToString(nonce)
-	opts = append(opts, mpp.WithMeta(meta))
+
 	if params.Header != "" {
 		opts = append(opts, mpp.WithHeader(params.Header))
 	}
@@ -226,9 +234,12 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			if pe.Status != http.StatusPaymentRequired {
 				return nil, pe
 			}
-			return challengeResultError(challenge, pe)
+			if pe.Type == mpp.ErrorTypeInvalidPayload {
+				return challengeResultError(challenge, pe)
+			}
+			return challengeResultError(echoedChallenge, pe)
 		}
-		return challengeResultError(challenge, mpp.ErrVerificationFailed(err.Error()))
+		return challengeResultError(echoedChallenge, mpp.ErrVerificationFailed(err.Error()))
 	}
 
 	// 9. Return result.

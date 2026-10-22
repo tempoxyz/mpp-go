@@ -345,3 +345,10 @@ challenge collisions; they do not make leaked complete credentials safe.
 Low-level challenge constructors remain deterministic, so custom issuance must
 supply its own unique, authenticated context. Existing challenges remain valid
 until their original expiry.
+
+For rolling upgrades, first set `ChargeParams.DisableChallengeNonce: true` on
+all routes (or the equivalent `VerifyParams` field), deploy nonce-aware
+verification everywhere, then remove the flag to enable issuance. This temporary
+phase retains fixed-expiry collision risk. Old replicas reject newly nonced
+credentials, potentially after a hash payment has settled; do not mix them
+without this staging, an atomic rollout, or version-sticky retries.

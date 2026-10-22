@@ -277,6 +277,9 @@ func (m *Mpp) VerifyCredential(ctx context.Context, credential *mpp.Credential) 
 
 // ChargeParams contains the parameters for a charge operation.
 type ChargeParams struct {
+	// DisableChallengeNonce temporarily disables issuance, not verification,
+	// while upgrading every replica to a nonce-aware verifier.
+	DisableChallengeNonce bool
 	// Authorization is the incoming Authorization header value.
 	Authorization string
 	// PaymentAuthorization is the incoming Payment-Authorization header value.
@@ -444,17 +447,18 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
 	selected := selectChargeOffer(authorization, requests)
 	verifyParams := VerifyParams{
-		Authorization: authorization,
-		Intent:        intent,
-		Request:       requests[selected],
-		Body:          params.Body,
-		Realm:         m.realm,
-		SecretKey:     m.secretKey,
-		Method:        m.method.Name(),
-		Description:   params.Description,
-		Meta:          params.Meta,
-		Expires:       expires,
-		Header:        m.advertisedCredentialHeader(),
+		DisableChallengeNonce: params.DisableChallengeNonce,
+		Authorization:         authorization,
+		Intent:                intent,
+		Request:               requests[selected],
+		Body:                  params.Body,
+		Realm:                 m.realm,
+		SecretKey:             m.secretKey,
+		Method:                m.method.Name(),
+		Description:           params.Description,
+		Meta:                  params.Meta,
+		Expires:               expires,
+		Header:                m.advertisedCredentialHeader(),
 	}
 	result, err := VerifyOrChallenge(ctx, verifyParams)
 	if result == nil {

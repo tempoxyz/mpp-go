@@ -548,3 +548,19 @@ func TestChallengeIssuanceNonce(t *testing.T) {
 	_, err = VerifyOrChallenge(context.Background(), params)
 	require.Error(t, err)
 }
+
+func TestChallengeNonceStagedRollout(t *testing.T) {
+	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.Expires.Minutes(5), DisableChallengeNonce: true}
+	legacy, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	require.Empty(t, legacy.Challenge.Opaque)
+	params.DisableChallengeNonce = false
+	fresh, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	require.NotEmpty(t, fresh.Challenge.Opaque["_mpp_nonce"])
+	params.DisableChallengeNonce = true
+	params.Authorization = fresh.Challenge.NewCredential(map[string]any{}).ToAuthorization()
+	result, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	require.NotNil(t, result.Receipt)
+}

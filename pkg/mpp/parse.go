@@ -529,6 +529,14 @@ func ParseCredential(header string) (*Credential, error) {
 //
 // Output format: Payment <base64url-json>
 func FormatAuthorization(c *Credential) string {
+	header, _ := formatAuthorization(c)
+	return header
+}
+
+func formatAuthorization(c *Credential) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("mpp: credential is nil")
+	}
 	challengeDict := map[string]any{
 		"id":      c.Challenge.ID,
 		"realm":   c.Challenge.Realm,
@@ -549,7 +557,11 @@ func FormatAuthorization(c *Credential) string {
 		if raw, ok := c.Challenge.Opaque["_raw"]; ok {
 			challengeDict["opaque"] = raw
 		} else {
-			challengeDict["opaque"] = b64EncodeSortedStringMap(c.Challenge.Opaque)
+			encoded, err := b64EncodeSortedStringMapWithError(c.Challenge.Opaque)
+			if err != nil {
+				return "", err
+			}
+			challengeDict["opaque"] = encoded
 		}
 	}
 
@@ -561,12 +573,19 @@ func FormatAuthorization(c *Credential) string {
 		payload["source"] = c.Source
 	}
 
-	return SchemePayment + " " + b64EncodeAny(payload)
+	encoded, err := encodeStableJSON(payload)
+	if err != nil {
+		return "", err
+	}
+	return SchemePayment + " " + base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
 // FormatAuthorizationStrict formats a credential and enforces the wire size limit.
 func FormatAuthorizationStrict(c *Credential) (string, error) {
-	header := FormatAuthorization(c)
+	header, err := formatAuthorization(c)
+	if err != nil {
+		return "", err
+	}
 	if len(header) > maxHeaderPayload {
 		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
