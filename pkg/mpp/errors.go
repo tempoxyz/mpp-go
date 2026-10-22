@@ -31,6 +31,10 @@ const (
 	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
 )
 
+// ErrorTypeInternalPaymentError identifies an unexpected failure while
+// processing a payment, reported without the underlying error text.
+const ErrorTypeInternalPaymentError ErrorType = "https://paymentauth.org/problems/internal-payment-error"
+
 // Title returns the default RFC 9457 title for the error type.
 func (t ErrorType) Title() string {
 	switch t {
@@ -52,6 +56,8 @@ func (t ErrorType) Title() string {
 		return "Payment Insufficient"
 	case ErrorTypeMethodUnsupported:
 		return "Method Unsupported"
+	case ErrorTypeInternalPaymentError:
+		return "Internal Payment Error"
 	default:
 		return "MPP Error"
 	}
@@ -62,6 +68,8 @@ func (t ErrorType) Status() int {
 	switch t {
 	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient:
 		return http.StatusPaymentRequired
+	case ErrorTypeInternalPaymentError:
+		return http.StatusInternalServerError
 	default:
 		return http.StatusBadRequest
 	}
@@ -76,16 +84,24 @@ type PaymentError struct {
 	Hint   string    `json:"hint,omitempty"`
 	// Details contains safe machine-readable error metadata.
 	Details map[string]any `json:"details,omitempty"`
+
+	// cause is the unexpected error behind an internal payment error. It is
+	// reachable through errors.Is and errors.As but never serialized.
+	cause error
 }
 
 func (e *PaymentError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Title, e.Detail)
 }
 
-// Unwrap lets errors.Is match against ErrVerification for verification errors.
+// Unwrap lets errors.Is match against ErrVerification for verification errors
+// and exposes the original cause of an internal payment error.
 func (e *PaymentError) Unwrap() error {
-	if e.Type == ErrorTypeVerificationFailed {
+	switch e.Type {
+	case ErrorTypeVerificationFailed:
 		return ErrVerification
+	case ErrorTypeInternalPaymentError:
+		return e.cause
 	}
 	return nil
 }
@@ -146,6 +162,15 @@ func ErrInvalidChallenge(challengeID, reason string) *PaymentError {
 // ErrVerificationFailed returns a 402 error for failed payment verification.
 func ErrVerificationFailed(reason string) *PaymentError {
 	return newPaymentError(ErrorTypeVerificationFailed, reason)
+}
+
+// ErrInternalPaymentError returns a 500 error for an unexpected failure while
+// processing a payment. The response carries a fixed detail; cause stays
+// available to the server through errors.Is and errors.As.
+func ErrInternalPaymentError(cause error) *PaymentError {
+	pe := newPaymentError(ErrorTypeInternalPaymentError, "An internal payment error occurred.")
+	pe.cause = cause
+	return pe
 }
 
 // ErrPaymentExpired returns a 402 error for expired payment challenges.

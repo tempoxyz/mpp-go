@@ -26,11 +26,13 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 	}
 
 	genericErrorResponse := httptest.NewRecorder()
-	WritePaymentError(genericErrorResponse, errors.New("verification failed"))
-	if !assert.Equalf(t, http.StatusPaymentRequired, genericErrorResponse.Code,
-		"genericErrorResponse.Code = %d, want %d", genericErrorResponse.Code, http.StatusPaymentRequired) {
+	WritePaymentError(genericErrorResponse, errors.New("rpc key sk-SENTINEL rejected"))
+	if !assert.Equalf(t, http.StatusInternalServerError, genericErrorResponse.Code,
+		"genericErrorResponse.Code = %d, want %d", genericErrorResponse.Code, http.StatusInternalServerError) {
 		return
 	}
+	assert.Contains(t, genericErrorResponse.Body.String(), string(mpp.ErrorTypeInternalPaymentError))
+	assert.NotContains(t, genericErrorResponse.Body.String(), "SENTINEL")
 
 }
 

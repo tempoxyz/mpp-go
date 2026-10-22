@@ -3,7 +3,9 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,12 +39,20 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 					problem *mpp.PaymentError
 					status  int
 					uri     string
+					// raw, when set, is what the intent returns instead of problem: an
+					// ordinary error whose text must not reach the client.
+					raw error
 				}{
-					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload"},
-					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request"},
+					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload", nil},
+					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request", nil},
+					{"unexpected error", mpp.ErrInternalPaymentError(nil), 500, "https://paymentauth.org/problems/internal-payment-error",
+						errors.New("dial https://rpc.example/v1/sk-SENTINEL: connection refused")},
 				} {
 					t.Run(fmt.Sprintf("%s/split=%t/wrapped=%t/%s", framework, split, wrapped, tc.name), func(t *testing.T) {
 						var intentErr error = tc.problem
+						if tc.raw != nil {
+							intentErr = tc.raw
+						}
 						if wrapped {
 							intentErr = fmt.Errorf("method context: %w", intentErr)
 						}
@@ -120,8 +130,11 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						assert.Empty(t, rejected.Header.Get(mpp.HeaderPaymentReceipt))
 						assert.Equal(t, "application/problem+json", rejected.Header.Get("Content-Type"))
 						assert.Equal(t, "no-store", rejected.Header.Get("Cache-Control"))
+						body, err := io.ReadAll(rejected.Body)
+						require.NoError(t, err)
+						assert.NotContains(t, string(body), "SENTINEL")
 						var problem mpp.PaymentError
-						require.NoError(t, json.NewDecoder(rejected.Body).Decode(&problem))
+						require.NoError(t, json.Unmarshal(body, &problem))
 						assert.Equal(t, tc.uri, string(problem.Type))
 						assert.Equal(t, tc.status, problem.Status)
 						assert.Equal(t, tc.problem.Detail, problem.Detail)

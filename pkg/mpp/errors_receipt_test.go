@@ -89,6 +89,13 @@ func TestPaymentErrorConstructors(t *testing.T) {
 			status: http.StatusBadRequest,
 			detail: `payment method "stripe" is not supported`,
 		},
+		{
+			name:   "internal payment error",
+			err:    ErrInternalPaymentError(errors.New("rpc unreachable")),
+			want:   ErrorTypeInternalPaymentError,
+			status: http.StatusInternalServerError,
+			detail: "An internal payment error occurred.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +135,7 @@ func TestProblemTypeURIsUseCanonicalBase(t *testing.T) {
 		{got: ErrorTypeBadRequest, want: "https://paymentauth.org/problems/bad-request"},
 		{got: ErrorTypePaymentInsufficient, want: "https://paymentauth.org/problems/payment-insufficient"},
 		{got: ErrorTypeMethodUnsupported, want: "https://paymentauth.org/problems/method-unsupported"},
+		{got: ErrorTypeInternalPaymentError, want: "https://paymentauth.org/problems/internal-payment-error"},
 	}
 
 	for _, tt := range tests {
@@ -176,6 +184,23 @@ func TestPaymentErrorHelpers(t *testing.T) {
 	if got := nonVerification.ProblemDetails(""); got["challengeId"] != nil {
 		assert.Failf(t, "", "problem[challengeId] = %#v, want nil", got["challengeId"])
 		return
+	}
+}
+
+func TestInternalPaymentErrorKeepsCauseOutOfProblemDetails(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("dial https://rpc.example/v1/sk-SENTINEL: connection refused")
+	err := ErrInternalPaymentError(cause)
+
+	assert.Equal(t, "Internal Payment Error", err.Title)
+	assert.True(t, errors.Is(err, cause), "errors.Is(err, cause) = false, want true")
+	assert.False(t, errors.Is(err, ErrVerification), "an internal error is not a verification failure")
+	assert.NotContains(t, err.Error(), "SENTINEL")
+	for key, value := range err.ProblemDetails("challenge-1") {
+		if text, ok := value.(string); ok {
+			assert.NotContainsf(t, text, "SENTINEL", "problem[%s] leaks the cause", key)
+		}
 	}
 }
 
