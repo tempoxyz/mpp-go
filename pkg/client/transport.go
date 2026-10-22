@@ -111,6 +111,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		drainAndClose(resp.Body)
 
+		// Prepare the retry before paying for it. A credential created for a
+		// request that cannot be sent again is spent without ever reaching
+		// the server.
+		retry, err := t.cloneRequest(baseRequest)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
+		}
+
 		key := credentialKey{
 			id: selected.challenge.ID,
 			method: methodKey{
@@ -122,23 +130,23 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if cred == nil {
 			cred, err = selected.method.CreateCredential(baseRequest.Context(), selected.challenge)
 			if err != nil {
+				if retry.Body != nil {
+					_ = retry.Body.Close()
+				}
 				return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
 			}
 			credentials[key] = cred
 		}
 
-		request, err = t.cloneRequest(baseRequest)
-		if err != nil {
-			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
-		}
 		authorization, err := mpp.FormatAuthorizationStrict(cred)
 		if err != nil {
-			if request.Body != nil {
-				_ = request.Body.Close()
+			if retry.Body != nil {
+				_ = retry.Body.Close()
 			}
 			return nil, err
 		}
-		request.Header.Set(selected.challenge.CredentialHeader(), authorization)
+		retry.Header.Set(selected.challenge.CredentialHeader(), authorization)
+		request = retry
 		sentCredential = key
 	}
 }
