@@ -537,3 +537,17 @@ func TestChallengeNewCredential(t *testing.T) {
 	}
 
 }
+
+func TestErrCredentialReplayed(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []string{"transaction hash already used", "proof credential already used"} {
+		replayed := ErrCredentialReplayed(reason)
+		assert.Equal(t, http.StatusForbidden, replayed.Status)
+		assert.ErrorIs(t, replayed, ErrVerification)
+		want := ErrVerificationFailed(reason).ProblemDetails("challenge-id")
+		want["status"] = http.StatusForbidden
+		assert.Equal(t, want, replayed.ProblemDetails("challenge-id"))
+	}
+	assert.Equal(t, "credential has already been used", ErrCredentialReplayed("").Detail)
+}

@@ -392,6 +392,10 @@ func TestIntentValidatePushAndProofCredentialsDoesNotConsumeReplayState(t *testi
 			require.NoError(t, err)
 			_, err = intent.Broadcast(ctx, credential, request.Map())
 			require.ErrorContains(t, err, "already used")
+			var replayed *mpp.PaymentError
+			require.ErrorAs(t, err, &replayed)
+			assert.Equal(t, http.StatusForbidden, replayed.Status)
+			assert.Equal(t, mpp.ErrorTypeVerificationFailed, replayed.Type)
 			assert.Equal(t, 2, store.putIfAbsentCalls)
 		})
 	}
