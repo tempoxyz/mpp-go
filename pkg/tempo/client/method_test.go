@@ -2,6 +2,7 @@ package chargeclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
@@ -354,8 +356,7 @@ func TestCreateCredentialSharesInFlightSigning(t *testing.T) {
 	go call(0)
 	<-entered
 	go call(1)
-	// Give the second call time to join the in-flight signing.
-	time.Sleep(50 * time.Millisecond)
+	waitForSigningWaiters(t, method, 1)
 	close(release)
 	wg.Wait()
 
@@ -363,10 +364,159 @@ func TestCreateCredentialSharesInFlightSigning(t *testing.T) {
 	assert.NoError(t, errs[1])
 	assert.Equal(t, int32(1), policyCalls.Load())
 	assert.Equal(t, credentials[0].Payload, credentials[1].Payload)
+	// Each caller owns its credential's maps.
+	credentials[0].Payload["type"] = "mutated"
+	assert.NotEqual(t, "mutated", credentials[1].Payload["type"])
 
 	// A settled signing is not reused: a later call signs again.
 	third, err := method.CreateCredential(context.Background(), challenge)
 	assert.NoError(t, err)
 	assert.NotNil(t, third)
+	assert.Equal(t, int32(2), policyCalls.Load())
+}
+
+// waitForSigningWaiters waits until n calls have joined an in-flight signing.
+func waitForSigningWaiters(t *testing.T, method *Method, n int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		method.signingMu.Lock()
+		defer method.signingMu.Unlock()
+		for _, call := range method.signing {
+			if call.waiters >= n {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, time.Millisecond)
+}
+
+func TestCreateCredentialRetriesWhenLeadingContextEnds(t *testing.T) {
+	t.Parallel()
+
+	var policyCalls atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	method, err := New(Config{
+		ChainID:    42431,
+		PrivateKey: testPrivateKey,
+		RPC:        &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"},
+		PaymentPolicy: func(ctx context.Context, _ tempo.ChargeRequest) error {
+			policyCalls.Add(1)
+			entered <- struct{}{}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	require.NoError(t, err)
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: true,
+	})
+
+	leaderCtx, cancel := context.WithCancel(context.Background())
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := method.CreateCredential(leaderCtx, challenge)
+		leaderErr <- err
+	}()
+	<-entered
+	waiterResult := make(chan error, 1)
+	go func() {
+		credential, err := method.CreateCredential(context.Background(), challenge)
+		if err == nil && credential == nil {
+			err = errors.New("nil credential")
+		}
+		waiterResult <- err
+	}()
+	waitForSigningWaiters(t, method, 1)
+	cancel()
+	assert.ErrorIs(t, <-leaderErr, context.Canceled)
+	// The waiter signs again under its own live context.
+	<-entered
+	close(release)
+	assert.NoError(t, <-waiterResult)
+	assert.Equal(t, int32(2), policyCalls.Load())
+}
+
+func TestCreateCredentialWaitersFailWhenSigningPanics(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	method, err := New(Config{
+		ChainID:    42431,
+		PrivateKey: testPrivateKey,
+		RPC:        &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"},
+		PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+			entered <- struct{}{}
+			<-release
+			panic("policy exploded")
+		},
+	})
+	require.NoError(t, err)
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: true,
+	})
+
+	leaderPanic := make(chan any, 1)
+	go func() {
+		defer func() { leaderPanic <- recover() }()
+		_, _ = method.CreateCredential(context.Background(), challenge)
+	}()
+	<-entered
+	waiterErr := make(chan error, 1)
+	go func() {
+		_, err := method.CreateCredential(context.Background(), challenge)
+		waiterErr <- err
+	}()
+	waitForSigningWaiters(t, method, 1)
+	close(release)
+	assert.Equal(t, "policy exploded", <-leaderPanic)
+	assert.ErrorIs(t, <-waiterErr, errSigningPanicked)
+}
+
+func TestCreateCredentialDoesNotShareAcrossDifferentChallenges(t *testing.T) {
+	t.Parallel()
+
+	var policyCalls atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	method, err := New(Config{
+		ChainID:    42431,
+		PrivateKey: testPrivateKey,
+		RPC:        &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"},
+		PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+			policyCalls.Add(1)
+			entered <- struct{}{}
+			<-release
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	params := tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: true,
+	}
+	first := buildChallenge(t, params)
+	params.Amount = "0.75"
+	second := buildChallenge(t, params)
+	// Same ID and realm, different request: must not join the first signing.
+	second.ID, second.Realm = first.ID, first.Realm
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for _, challenge := range []*mpp.Challenge{first, second} {
+		go func() {
+			defer wg.Done()
+			_, err := method.CreateCredential(context.Background(), challenge)
+			assert.NoError(t, err)
+		}()
+	}
+	<-entered
+	<-entered
+	close(release)
+	wg.Wait()
 	assert.Equal(t, int32(2), policyCalls.Load())
 }
