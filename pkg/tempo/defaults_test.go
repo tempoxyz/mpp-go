@@ -1,6 +1,7 @@
 package tempo
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -147,4 +148,23 @@ func TestRPCURLForChain(t *testing.T) {
 
 		})
 	}
+}
+
+func TestDefaultFeeTokensForChain(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{PathUSDAddress, MainnetUSDCAddress}, DefaultFeeTokensForChain(tempotx.ChainIdMainnet))
+	assert.Equal(t, []string{PathUSDAddress, tempotx.AlphaUSDAddress.Hex()}, DefaultFeeTokensForChain(tempotx.ChainIdModerato))
+	for _, chainID := range []int64{tempotx.ChainIdMainnet, tempotx.ChainIdModerato} {
+		assert.NotContains(t, DefaultFeeTokensForChain(chainID), MACHAddress)
+	}
+}
+
+func TestIsMACHCurrency(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, IsMACHCurrency(tempotx.ChainIdMainnet, MACHAddress))
+	assert.True(t, IsMACHCurrency(tempotx.ChainIdModerato, strings.ToLower(MACHAddress)))
+	assert.False(t, IsMACHCurrency(1, MACHAddress))
+	assert.False(t, IsMACHCurrency(tempotx.ChainIdModerato, PathUSDAddress))
 }

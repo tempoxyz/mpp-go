@@ -28,6 +28,8 @@ type mockRPC struct {
 	gasPrice    string
 	estimateGas string
 	sentRawTxs  []string
+	// balances maps lowercase TIP-20 token addresses to eth_call balanceOf results.
+	balances map[string]string
 }
 
 func (m *mockRPC) GetChainID(context.Context) (uint64, error) {
@@ -43,8 +45,15 @@ func (m *mockRPC) SendRawTransaction(_ context.Context, serialized string) (stri
 	return "0xabc123", nil
 }
 
-func (m *mockRPC) SendRequest(_ context.Context, method string, _ ...interface{}) (*temporpc.JSONRPCResponse, error) {
+func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
 	switch method {
+	case "eth_call":
+		call := params[0].(map[string]any)
+		balance, ok := m.balances[strings.ToLower(call["to"].(string))]
+		if !ok {
+			balance = "0x0"
+		}
+		return &temporpc.JSONRPCResponse{Result: balance}, nil
 	case "eth_gasPrice":
 		return &temporpc.JSONRPCResponse{Result: m.gasPrice}, nil
 	case "eth_estimateGas":

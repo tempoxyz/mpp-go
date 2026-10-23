@@ -33,4 +33,7 @@ const (
 	OUSDAddress = "0x20c0000000000000000000006a37DA5C996874BE"
 	// PathUSDAddress is the pathUSD contract on Tempo networks.
 	PathUSDAddress = "0x20c0000000000000000000000000000000000000"
+	// MACHAddress is the MACH token, deployed at the same address on Tempo
+	// mainnet and Moderato. MACH can be charged but cannot pay transaction fees.
+	MACHAddress = "0x20c000000000000000000000f37de3740ADec032"
 )

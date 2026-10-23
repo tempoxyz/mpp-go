@@ -3,6 +3,7 @@ package chargeclient
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
@@ -257,7 +258,11 @@ func (m *Method) buildTransfer(
 		if err != nil {
 			return "", fmt.Errorf("tempo client: get nonce: %w", err)
 		}
-		builder.SetNonce(nonce).SetFeeToken(token)
+		feeToken := token
+		if tempo.IsMACHCurrency(chainID, request.Currency) {
+			feeToken = m.resolveStablecoinFeeToken(ctx, rpc, chainID)
+		}
+		builder.SetNonce(nonce).SetFeeToken(feeToken)
 	}
 	tx, err := builder.BuildAndValidate()
 	if err != nil {
@@ -334,6 +339,38 @@ func transferDataHex(transfer transfer) string {
 		return dataHex
 	}
 	return tempo.EncodeTransfer(transfer.recipient, transfer.amount)
+}
+
+// resolveStablecoinFeeToken picks the gas token for a charge whose currency
+// cannot pay transaction fees, such as MACH: the first default fee token the
+// payer holds a balance of, else the first default fee token.
+func (m *Method) resolveStablecoinFeeToken(ctx context.Context, rpc tempo.RPCClient, chainID int64) common.Address {
+	tokens := tempo.DefaultFeeTokensForChain(chainID)
+	for _, token := range tokens {
+		if m.hasTokenBalance(ctx, rpc, common.HexToAddress(token)) {
+			return common.HexToAddress(token)
+		}
+	}
+	return common.HexToAddress(tokens[0])
+}
+
+// hasTokenBalance reports whether the payer holds a nonzero TIP-20 balance.
+// Lookup failures count as no balance.
+func (m *Method) hasTokenBalance(ctx context.Context, rpc tempo.RPCClient, token common.Address) bool {
+	account := common.LeftPadBytes(m.signer.Address().Bytes(), 32)
+	response, err := rpc.SendRequest(ctx, "eth_call", map[string]any{
+		"to":   token.Hex(),
+		"data": "0x70a08231" + hex.EncodeToString(account),
+	}, "latest")
+	if err != nil || response.CheckError() != nil {
+		return false
+	}
+	result, ok := response.Result.(string)
+	if !ok {
+		return false
+	}
+	balance, err := tempo.ParseHexBigInt(result)
+	return err == nil && balance.Sign() > 0
 }
 
 // TODO(tempo-go): replace these JSON-RPC helpers with shared transaction-prep

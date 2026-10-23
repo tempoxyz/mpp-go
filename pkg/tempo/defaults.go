@@ -101,3 +101,20 @@ func DefaultCurrenciesForChain(chainID int64) []string {
 		return []string{DefaultCurrencyForChain(chainID)}
 	}
 }
+
+// IsMACHCurrency reports whether currency is the MACH token on a chain where
+// it is deployed.
+func IsMACHCurrency(chainID int64, currency string) bool {
+	return IsKnownChainID(chainID) && strings.EqualFold(strings.TrimSpace(currency), MACHAddress)
+}
+
+// DefaultFeeTokensForChain returns the stablecoins used for Tempo transaction
+// fees by default on a chain: pathUSD, then the chain's default currency.
+// The returned slice is a fresh copy.
+func DefaultFeeTokensForChain(chainID int64) []string {
+	tokens := []string{PathUSDAddress}
+	if currency := DefaultCurrencyForChain(chainID); !strings.EqualFold(currency, PathUSDAddress) {
+		tokens = append(tokens, currency)
+	}
+	return tokens
+}
