@@ -575,6 +575,26 @@ func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
 
 }
 
+func TestTransport_RoundTrip_RejectsRelayedTempoProof(t *testing.T) {
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	challenge = mpp.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{
+		"amount": "0", "currency": "0x3333333333333333333333333333333333333333",
+		"recipient": "0x2222222222222222222222222222222222222222",
+	})
+
+	method := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
+	tr := NewTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := tr.RoundTrip(req)
+	require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
+	assert.Equal(t, 0, method.calls)
+}
+
 func TestTransport_RoundTrip_StandaloneRefusesRedirectedPayment(t *testing.T) {
 	// A standalone Transport (no Client.Do wrapper) plugged into a redirect
 	// following http.Client must not auto-pay an origin reached via redirect.

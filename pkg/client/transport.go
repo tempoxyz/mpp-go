@@ -334,5 +334,11 @@ func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
 	if !sameOriginURL(req.URL, origin) {
 		return fmt.Errorf("mpp: refusing payment for redirected origin %q", requestOrigin(req.URL))
 	}
+	// A zero-amount Tempo proof can authenticate the payer at the realm named
+	// in the challenge. The HTTP server that sent it must own that realm.
+	if challenge.Method == "tempo" && challenge.Intent == "charge" &&
+		challenge.Request["amount"] == "0" && !strings.EqualFold(challenge.Realm, req.URL.Hostname()) {
+		return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q", challenge.Realm, requestOrigin(req.URL))
+	}
 	return nil
 }
