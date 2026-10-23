@@ -659,6 +659,10 @@ func TestTransport_RoundTrip_AllowsPinnedNonHostnameProofRealm(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, 1, method.calls)
+	req, _ = http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err = NewTransport([]Method{method}, nil, WithTransportTrustedProofRealm(srv.URL, "mpp payment")).RoundTrip(req)
+	require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
+	assert.Equal(t, 1, method.calls)
 }
 
 func TestTransport_RoundTrip_StandaloneRefusesRedirectedPayment(t *testing.T) {

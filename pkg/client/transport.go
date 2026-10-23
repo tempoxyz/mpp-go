@@ -363,7 +363,7 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, challenge *mpp.Chal
 	if challenge.Method == "tempo" && challenge.Intent == "charge" &&
 		isZeroTempoAmount(challenge.Request["amount"]) &&
 		!strings.EqualFold(challenge.Realm, req.URL.Hostname()) &&
-		!strings.EqualFold(challenge.Realm, t.trustedProofRealms[requestOrigin(req.URL)]) {
+		challenge.Realm != t.trustedProofRealms[requestOrigin(req.URL)] {
 		return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q", challenge.Realm, requestOrigin(req.URL))
 	}
 	return nil
