@@ -207,7 +207,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 				mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
 			)
 		}
-		if time.Now().UTC().After(expiresTime) {
+		if challengeExpired(expiresTime, time.Now()) {
 			return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 		}
 	}
