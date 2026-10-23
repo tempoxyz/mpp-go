@@ -2,16 +2,13 @@ package chargeserver
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -118,32 +115,48 @@ func TestRelayVerifyValidatesAndBroadcastsCredential(t *testing.T) {
 	assert.Equal(t, credential.Source, validateCall.Body["source"])
 	assert.Equal(t, validateCall.Body, broadcastCall.Body)
 	assert.Equal(t, "/mpp/v1/mpp/broadcast", broadcastCall.Path)
-	raw, err := hexutil.Decode("0x1234")
-	require.NoError(t, err)
-	assert.Equal(t, "mpp_"+crypto.Keccak256Hash(raw).Hex(), broadcastCall.IdempotencyKey)
+	assert.Empty(t, broadcastCall.IdempotencyKey)
 }
 
-func TestRelayIdempotencyKeyUsesCanonicalNamespace(t *testing.T) {
+func TestRelayConsumesCredentialOnceWithoutCachedReceipt(t *testing.T) {
 	t.Parallel()
-	// Canonical mppx namespaces relay broadcast idempotency keys with `mpp_`
-	// (src/tempo/server/Relay.ts:235,239). The key must match byte-for-byte so
-	// the relay can deduplicate equivalent canonical and Go submissions.
-	transaction := relayTestCredential(map[string]any{"type": "transaction", "signature": "0x1234"})
-	raw, err := hexutil.Decode("0x1234")
-	require.NoError(t, err)
-	txInput, err := marshalRelayInput(transaction)
-	require.NoError(t, err)
-	txKey := relayIdempotencyKey(transaction, txInput)
-	assert.Equal(t, "mpp_"+crypto.Keccak256Hash(raw).Hex(), txKey)
-	assert.NotContains(t, txKey, "mppx_")
+	for _, payload := range []map[string]any{
+		{"type": "transaction", "signature": "0x1234"},
+		{"type": "hash", "hash": "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890"},
+		{"type": "proof", "signature": "0x1234"},
+	} {
+		t.Run(payload["type"].(string), func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			consumed := false
+			server, calls := relayTestServer(t, func(path string) any {
+				if path == "/v1/mpp/validate" {
+					return map[string]any{"success": true}
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if consumed {
+					// A relay replays a cached receipt only for a repeated idempotency key.
+					return map[string]any{"success": false, "error": map[string]any{"code": "already_used", "message": "Used"}}
+				}
+				consumed = true
+				return map[string]any{
+					"success": true,
+					"receipt": map[string]any{"method": "tempo", "reference": "0xabc", "timestamp": "2026-07-22T00:00:00Z"},
+				}
+			})
+			intent := newRelayIntentForTest(t, server.URL)
+			credential := relayTestCredential(payload)
 
-	fallback := relayTestCredential(map[string]any{"type": "hash", "hash": "0xabc"})
-	input, err := marshalRelayInput(fallback)
-	require.NoError(t, err)
-	digest := sha256.Sum256(input)
-	key := relayIdempotencyKey(fallback, input)
-	assert.Equal(t, "mpp_0x"+hex.EncodeToString(digest[:]), key)
-	assert.NotContains(t, key, "mppx_")
+			_, err := intent.Verify(context.Background(), credential, nil)
+			require.NoError(t, err)
+			_, err = intent.Verify(context.Background(), credential, nil)
+			require.ErrorIs(t, err, mpp.ErrVerification)
+			for range 4 {
+				assert.Empty(t, (<-calls).IdempotencyKey)
+			}
+		})
+	}
 }
 
 func TestRelayFinalizesPushCredential(t *testing.T) {
@@ -173,10 +186,7 @@ func TestRelayFinalizesPushCredential(t *testing.T) {
 	assert.Equal(t, "/v1/mpp/validate", validateCall.Path)
 	assert.Equal(t, "/v1/mpp/broadcast", broadcastCall.Path)
 
-	input, err := marshalRelayInput(credential)
-	require.NoError(t, err)
-	digest := sha256.Sum256(input)
-	assert.Equal(t, "mpp_0x"+hex.EncodeToString(digest[:]), broadcastCall.IdempotencyKey)
+	assert.Empty(t, broadcastCall.IdempotencyKey)
 }
 
 func TestRelayIntentExposesCredentialHooks(t *testing.T) {
