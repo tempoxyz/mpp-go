@@ -496,7 +496,7 @@ func (i *Intent) broadcastCredential(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
 		return mpp.Success(tempo.MethodName, hash, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeProof:
@@ -506,7 +506,7 @@ func (i *Intent) broadcastCredential(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("proof credential already used")
+			return nil, mpp.ErrCredentialReplayed("proof credential already used")
 		}
 		return mpp.Success(tempo.MethodName, challengeID, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeTransaction:
@@ -544,7 +544,7 @@ func (i *Intent) broadcastTransaction(
 		if _, exists, err := i.store.Get(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)); err != nil {
 			return nil, err
 		} else if exists {
-			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
+			return nil, mpp.ErrCredentialReplayed("fee payer challenge already used")
 		}
 		clientTxHash, err := sponsoredTransactionHash(tx, sender)
 		if err != nil {
@@ -556,7 +556,7 @@ func (i *Intent) broadcastTransaction(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("sponsored transaction already used")
+			return nil, mpp.ErrCredentialReplayed("sponsored transaction already used")
 		}
 		releaseSponsoredClaim = true
 		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
@@ -653,7 +653,7 @@ func (i *Intent) broadcastTransaction(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
 	}
 
@@ -681,7 +681,7 @@ func (i *Intent) broadcastTransaction(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
 	}
 	return mpp.Success(
