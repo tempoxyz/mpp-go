@@ -1982,3 +1982,60 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	}
 	assert.Equal(t, 1, successes)
 }
+
+func TestChargeFlow_TransactionCredentialSourceMustMatchSenderAndChain(t *testing.T) {
+	ctx := context.Background()
+	// No chainId in the challenge: the source must match the RPC's chain.
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+	})
+	require.NoError(t, err)
+	require.Nil(t, request.MethodDetails.ChainID)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	sender, err := parseSourceDID(credential.Source)
+	require.NoError(t, err)
+	require.NotNil(t, sender)
+
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "different sender",
+			source: tempo.ProofSource(int64(rpc.chainID), common.HexToAddress("0x00000000000000000000000000000000000000a2")),
+			want:   "credential source does not match transaction signer",
+		},
+		{
+			name:   "different chain",
+			source: tempo.ProofSource(int64(rpc.chainID)+1, common.HexToAddress(sender.address)),
+			want:   "credential source chain id does not match the challenge",
+		},
+		{
+			name:   "malformed",
+			source: "invalid-source",
+			want:   "credential source is invalid",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tampered := *credential
+			tampered.Source = tc.source
+			_, err := intent.Validate(ctx, &tampered, request.Map())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+	assert.Empty(t, rpc.sentRawTxs)
+
+	_, err = intent.Validate(ctx, credential, request.Map())
+	require.NoError(t, err)
+}

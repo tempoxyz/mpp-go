@@ -430,8 +430,18 @@ func (i *Intent) validateTransaction(
 	if err != nil {
 		return mpp.ErrInvalidPayload("transaction signature is invalid")
 	}
-	if validated.source != nil && !strings.EqualFold(validated.source.address, sender.Hex()) {
-		return mpp.ErrInvalidPayload("credential source does not match transaction signer")
+	if validated.source != nil {
+		// A challenge without a chainId is bound to the chain the RPC serves.
+		chainID, err := resolveChallengeChainID(ctx, validated.rpc, request)
+		if err != nil {
+			return err
+		}
+		if validated.source.chainID != chainID {
+			return mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
+		}
+		if !strings.EqualFold(validated.source.address, sender.Hex()) {
+			return mpp.ErrInvalidPayload("credential source does not match transaction signer")
+		}
 	}
 	tx.From = sender
 
