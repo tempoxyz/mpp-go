@@ -179,6 +179,11 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	payload := tempo.ChargeCredentialPayload{Type: credentialType}
 	if credentialType == tempo.CredentialTypeHash {
 		// A transaction hash is 32 bytes, encoded as 0x-prefixed hex.
+		//
+		// The preflight assumes the server accepts the same 64 KiB Authorization
+		// limit as this client and mppx. mpp-go servers released before that
+		// limit reject credentials over 16 KiB only after this payment has been
+		// broadcast, so upgrade servers before clients.
 		preflight := &mpp.Credential{
 			Challenge: challenge.ToEcho(),
 			Payload:   tempo.ChargeCredentialPayload{Type: credentialType, Hash: "0x" + strings.Repeat("0", 64)}.Map(),
