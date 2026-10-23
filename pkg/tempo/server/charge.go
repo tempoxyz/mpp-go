@@ -43,7 +43,7 @@ var feeControllerAddress = common.HexToAddress("0xfeec00000000000000000000000000
 const balanceOfSelector = "70a08231"
 
 const feePayerMaxValidityWindow = 15 * time.Minute
-const feePayerMinValidityWindow = 15 * time.Second
+const feePayerMinValidityWindow = tempo.FeePayerMinRemainingValidity
 
 func validateFeePayerDeadline(validBefore uint64, now time.Time) error {
 	minimum := uint64(now.Add(feePayerMinValidityWindow).Unix())

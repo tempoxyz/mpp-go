@@ -14,8 +14,24 @@ const (
 	DefaultDecimals = 6
 	// DefaultGasLimit is the fallback gas limit when estimation is unavailable.
 	DefaultGasLimit = uint64(1_000_000)
+	// SponsoredValidBeforeWindow is how far ahead of now a client sets the
+	// expiring-nonce valid_before of a sponsored (fee-payer) charge
+	// transaction, capped at the second after the challenge expiry. Servers
+	// require FeePayerMinRemainingValidity of validity left when they verify,
+	// co-sign and broadcast, so a 60 second window leaves about 45 seconds for
+	// clock skew between client and server, signing and round trips. This is
+	// deliberately wider than mppx's 25 seconds, which leaves only about 10.
+	SponsoredValidBeforeWindow = 60 * time.Second
 	// FeePayerWindow is the client-side validity window used for sponsored charges.
-	FeePayerWindow = 25 * time.Second
+	//
+	// Deprecated: use SponsoredValidBeforeWindow.
+	FeePayerWindow = SponsoredValidBeforeWindow
+	// FeePayerMinRemainingValidity is the minimum validity a sponsored charge
+	// must keep: servers reject sponsored transactions with less remaining
+	// before valid_before, refuse to issue sponsored challenges that expire
+	// sooner than this after issuance, and clients refuse to sign sponsored
+	// challenges that expire sooner than this.
+	FeePayerMinRemainingValidity = 15 * time.Second
 	// ReplayKeyPrefix is the storage namespace for charge replay protection.
 	ReplayKeyPrefix = "mppx:charge:"
 	// TransferSelector is the TIP-20 transfer selector.

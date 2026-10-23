@@ -3,6 +3,7 @@ package chargeclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -160,6 +161,14 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
 	}
 
+	var validBefore uint64
+	if request.MethodDetails.FeePayer {
+		validBefore, err = sponsoredValidBefore(challenge.Expires, time.Now())
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if m.paymentPolicy == nil {
 		return nil, fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
 	}
@@ -171,7 +180,7 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	}
 	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 
-	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, int64(chainID))
+	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, int64(chainID), validBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -218,6 +227,7 @@ func (m *Method) buildTransfer(
 	request tempo.ChargeRequest,
 	memo string,
 	chainID int64,
+	validBefore uint64,
 ) (string, error) {
 	transfers, err := buildTransfers(request, memo)
 	if err != nil {
@@ -251,7 +261,7 @@ func (m *Method) buildTransfer(
 			SetSponsored(true).
 			SetNonceKey(new(big.Int).Set(tempo.ExpiringNonceKey)).
 			SetNonce(0).
-			SetValidBefore(uint64(time.Now().Add(tempo.FeePayerWindow).Unix()))
+			SetValidBefore(validBefore)
 	} else {
 		nonce, err := rpc.GetTransactionCount(ctx, m.signer.Address().Hex())
 		if err != nil {
@@ -276,6 +286,45 @@ func (m *Method) buildTransfer(
 		return serialized + strings.TrimPrefix(strings.ToLower(m.signer.Address().Hex()), "0x") + feePayerMarker, nil
 	}
 	return serialized, nil
+}
+
+// ErrSponsoredChallengeExpiresTooSoon reports a sponsored (fee-payer) charge
+// challenge that expires less than tempo.FeePayerMinRemainingValidity from
+// now. The client refuses it before signing or broadcasting anything, since a
+// server would reject the sponsored transaction for too little validity.
+var ErrSponsoredChallengeExpiresTooSoon = errors.New("tempo client: sponsored challenge expires too soon")
+
+// sponsoredValidBefore returns the expiring-nonce valid_before for a sponsored
+// charge: now + tempo.SponsoredValidBeforeWindow, capped at the second after
+// the challenge expiry (valid_before is an exclusive whole-second bound). It
+// refuses challenges that expire less than tempo.FeePayerMinRemainingValidity
+// from now.
+func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
+	validBefore := now.Add(tempo.SponsoredValidBeforeWindow).Unix()
+	if expires == "" {
+		return uint64(validBefore), nil
+	}
+	expiry, err := parseChallengeExpiry(expires)
+	if err != nil {
+		return 0, fmt.Errorf("tempo client: invalid challenge expires %q: %w", expires, err)
+	}
+	if remaining := expiry.Sub(now); remaining < tempo.FeePayerMinRemainingValidity {
+		return 0, fmt.Errorf("%w: %s left before %s, need at least %s",
+			ErrSponsoredChallengeExpiresTooSoon, remaining.Truncate(time.Millisecond), expires, tempo.FeePayerMinRemainingValidity)
+	}
+	if challengeMax := expiry.Unix() + 1; challengeMax < validBefore {
+		validBefore = challengeMax
+	}
+	return uint64(validBefore), nil
+}
+
+// parseChallengeExpiry parses a challenge expiry using RFC 3339 and the
+// millisecond format emitted by the mpp.Expires helpers.
+func parseChallengeExpiry(value string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t, nil
+	}
+	return time.Parse("2006-01-02T15:04:05.000Z", value)
 }
 
 func (m *Method) signProof(chainID int64, challengeID, realm string) (string, error) {

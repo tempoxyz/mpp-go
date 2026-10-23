@@ -5,6 +5,7 @@ package chargeserver
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
@@ -170,6 +171,12 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	if feePayerURL == "" {
 		feePayerURL = m.feePayerURL
 	}
+	feePayer := params.FeePayer || m.feePayer
+	if feePayer {
+		if err := validateSponsoredChallengeExpiry(params.Expires, time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
 		Amount:         params.Amount,
 		Currency:       currency,
@@ -178,7 +185,7 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		Description:    params.Description,
 		ExternalID:     params.ExternalID,
 		ChainID:        chainID,
-		FeePayer:       params.FeePayer || m.feePayer,
+		FeePayer:       feePayer,
 		FeePayerURL:    feePayerURL,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
 		SupportedModes: resolvedModes(params.SupportedModes, m.supportedModes),
@@ -187,6 +194,25 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		return nil, err
 	}
 	return request.Map(), nil
+}
+
+// validateSponsoredChallengeExpiry rejects a sponsored charge whose challenge
+// would expire less than tempo.FeePayerMinRemainingValidity after issuance.
+// Clients refuse such challenges and the server would reject their sponsored
+// transactions for too little remaining validity, so issuing one is a
+// configuration error. An empty expires uses the 5 minute default.
+func validateSponsoredChallengeExpiry(expires string, now time.Time) error {
+	if expires == "" {
+		return nil
+	}
+	expiry, err := parseExpires(expires)
+	if err != nil {
+		return fmt.Errorf("tempo server: invalid Expires %q: %w", expires, err)
+	}
+	if expiry.Sub(now) < tempo.FeePayerMinRemainingValidity {
+		return fmt.Errorf("tempo server: sponsored charge challenges must expire at least %s after issuance, got Expires %q", tempo.FeePayerMinRemainingValidity, expires)
+	}
+	return nil
 }
 
 func resolvedModes(requestModes, defaultModes []tempo.ChargeMode) []tempo.ChargeMode {
