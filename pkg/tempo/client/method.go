@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -53,6 +54,16 @@ type Method struct {
 	clientID       string
 	credentialType tempo.CredentialType
 	paymentPolicy  func(context.Context, tempo.ChargeRequest) error
+
+	signingMu sync.Mutex
+	signing   map[string]*signingCall
+}
+
+// signingCall is one in-flight CreateCredential shared by concurrent callers.
+type signingCall struct {
+	done       chan struct{}
+	credential *mpp.Credential
+	err        error
 }
 
 var _ mppclient.Method = (*Method)(nil)
@@ -99,7 +110,46 @@ func (m *Method) Intent() string {
 }
 
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
+//
+// Concurrent calls for the same challenge share one in-flight signing, so they
+// cannot produce two independently settleable transactions. Once that signing
+// finishes, successfully or not, a later call signs afresh.
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
+	if challenge == nil {
+		return nil, fmt.Errorf("tempo client: challenge is required")
+	}
+	key := challenge.ID + "|" + challenge.Realm
+	m.signingMu.Lock()
+	if call, ok := m.signing[key]; ok {
+		m.signingMu.Unlock()
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if call.err != nil {
+			return nil, call.err
+		}
+		credential := *call.credential
+		return &credential, nil
+	}
+	call := &signingCall{done: make(chan struct{})}
+	if m.signing == nil {
+		m.signing = map[string]*signingCall{}
+	}
+	m.signing[key] = call
+	m.signingMu.Unlock()
+	defer func() {
+		m.signingMu.Lock()
+		delete(m.signing, key)
+		m.signingMu.Unlock()
+		close(call.done)
+	}()
+	call.credential, call.err = m.createCredential(ctx, challenge)
+	return call.credential, call.err
+}
+
+func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge.Method != tempo.MethodName {
 		return nil, fmt.Errorf("tempo client: unsupported challenge method %q", challenge.Method)
 	}

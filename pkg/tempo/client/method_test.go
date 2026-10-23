@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/assert"
@@ -311,4 +314,59 @@ func TestHashCredentialSizePreflight(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateCredentialSharesInFlightSigning(t *testing.T) {
+	t.Parallel()
+
+	var policyCalls atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	method, err := New(Config{
+		ChainID:    42431,
+		PrivateKey: testPrivateKey,
+		RPC:        &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"},
+		PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+			policyCalls.Add(1)
+			entered <- struct{}{}
+			<-release
+			return nil
+		},
+	})
+	assert.NoError(t, err)
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+		ChainID:   42431,
+		FeePayer:  true,
+	})
+
+	var wg sync.WaitGroup
+	credentials := make([]*mpp.Credential, 2)
+	errs := make([]error, 2)
+	call := func(index int) {
+		defer wg.Done()
+		credentials[index], errs[index] = method.CreateCredential(context.Background(), challenge)
+	}
+	wg.Add(2)
+	go call(0)
+	<-entered
+	go call(1)
+	// Give the second call time to join the in-flight signing.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	assert.NoError(t, errs[0])
+	assert.NoError(t, errs[1])
+	assert.Equal(t, int32(1), policyCalls.Load())
+	assert.Equal(t, credentials[0].Payload, credentials[1].Payload)
+
+	// A settled signing is not reused: a later call signs again.
+	third, err := method.CreateCredential(context.Background(), challenge)
+	assert.NoError(t, err)
+	assert.NotNil(t, third)
+	assert.Equal(t, int32(2), policyCalls.Load())
 }
