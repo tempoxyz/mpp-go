@@ -498,6 +498,7 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 	client := mppclient.New(
 		[]mppclient.Method{clientMethod},
 		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+		mppclient.WithTrustedTempoProofRealm(server.URL, "127.0.0.1"),
 	)
 	response, err := client.Get(ctx, server.URL+"/paid-proof")
 	if !assert.NoErrorf(t, err,
@@ -565,6 +566,7 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	client := mppclient.New(
 		[]mppclient.Method{clientMethod},
 		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+		mppclient.WithTrustedTempoProofRealm(server.URL, "127.0.0.1"),
 	)
 	response, err := client.Get(ctx, server.URL+"/paid-proof")
 	if !assert.NoErrorf(t, err,
