@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,12 +38,18 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 					problem *mpp.PaymentError
 					status  int
 					uri     string
+					cause   error
 				}{
-					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload"},
-					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request"},
+					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload", nil},
+					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request", nil},
+					{"internal error", mpp.ErrInternalPayment(), 500, "https://paymentauth.org/problems/internal-payment-error", errors.New("rpc 10.0.0.7: connection refused")},
+					{"verification sentinel", mpp.ErrVerificationFailed("payment verification failed"), 402, "https://paymentauth.org/problems/verification-failed", mpp.ErrVerification},
 				} {
 					t.Run(fmt.Sprintf("%s/split=%t/wrapped=%t/%s", framework, split, wrapped, tc.name), func(t *testing.T) {
 						var intentErr error = tc.problem
+						if tc.cause != nil {
+							intentErr = tc.cause
+						}
 						if wrapped {
 							intentErr = fmt.Errorf("method context: %w", intentErr)
 						}
@@ -126,7 +133,8 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						assert.Equal(t, tc.status, problem.Status)
 						assert.Equal(t, tc.problem.Detail, problem.Detail)
 						assert.Equal(t, tc.problem.Title, problem.Title)
-						if tc.status == http.StatusBadRequest {
+						assert.NotContains(t, problem.Detail, "10.0.0.7")
+						if tc.status != http.StatusPaymentRequired {
 							assert.Empty(t, rejected.Header.Get(mpp.HeaderWWWAuthenticate))
 							return
 						}
@@ -147,6 +155,28 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestChargeKeepsCauseOfInternalPaymentError(t *testing.T) {
+	cause := fmt.Errorf("replay store: %w", context.Canceled)
+	intent, err := server.NewIntent("charge", server.IntentHooks{
+		Verify: func(context.Context, *mpp.Credential, map[string]any) (*mpp.Receipt, error) { return nil, cause },
+	})
+	require.NoError(t, err)
+	payment, err := server.New(paymentErrorMethod{intent}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	require.NoError(t, err)
+	params := server.ChargeParams{Amount: "0.50"}
+	initial, err := payment.Charge(context.Background(), params)
+	require.NoError(t, err)
+	params.Authorization = initial.Challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"}).ToAuthorization()
+
+	_, err = payment.Charge(context.Background(), params)
+	var problem *mpp.PaymentError
+	require.ErrorAs(t, err, &problem)
+	assert.Equal(t, mpp.ErrorTypeInternalPayment, problem.Type)
+	assert.Equal(t, mpp.ErrInternalPayment().Detail, problem.Detail)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.NotContains(t, err.Error(), "replay store")
 }
 
 func TestWriteWrappedPaymentError(t *testing.T) {

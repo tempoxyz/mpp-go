@@ -29,6 +29,7 @@ const (
 	ErrorTypeBadRequest          ErrorType = "https://paymentauth.org/problems/bad-request"
 	ErrorTypePaymentInsufficient ErrorType = "https://paymentauth.org/problems/payment-insufficient"
 	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
+	ErrorTypeInternalPayment     ErrorType = "https://paymentauth.org/problems/internal-payment-error"
 )
 
 // Title returns the default RFC 9457 title for the error type.
@@ -52,6 +53,8 @@ func (t ErrorType) Title() string {
 		return "Payment Insufficient"
 	case ErrorTypeMethodUnsupported:
 		return "Method Unsupported"
+	case ErrorTypeInternalPayment:
+		return "Internal Payment Error"
 	default:
 		return "MPP Error"
 	}
@@ -62,6 +65,8 @@ func (t ErrorType) Status() int {
 	switch t {
 	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient:
 		return http.StatusPaymentRequired
+	case ErrorTypeInternalPayment:
+		return http.StatusInternalServerError
 	default:
 		return http.StatusBadRequest
 	}
@@ -76,18 +81,34 @@ type PaymentError struct {
 	Hint   string    `json:"hint,omitempty"`
 	// Details contains safe machine-readable error metadata.
 	Details map[string]any `json:"details,omitempty"`
+
+	// cause is the underlying error, kept for callers and logs but never
+	// serialized into the problem details.
+	cause error
 }
 
 func (e *PaymentError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Title, e.Detail)
 }
 
-// Unwrap lets errors.Is match against ErrVerification for verification errors.
+// Unwrap returns the cause attached with WithCause, if any, so errors.Is and
+// errors.As reach it. Otherwise verification errors unwrap to ErrVerification.
 func (e *PaymentError) Unwrap() error {
+	if e.cause != nil {
+		return e.cause
+	}
 	if e.Type == ErrorTypeVerificationFailed {
 		return ErrVerification
 	}
 	return nil
+}
+
+// WithCause returns a copy of e that unwraps to cause. The cause is not part
+// of the problem details sent to clients.
+func (e *PaymentError) WithCause(cause error) *PaymentError {
+	c := *e
+	c.cause = cause
+	return &c
 }
 
 func newPaymentError(kind ErrorType, detail string) *PaymentError {
@@ -173,4 +194,10 @@ func ErrMethodUnsupported(method string) *PaymentError {
 	pe := newPaymentError(ErrorTypeMethodUnsupported, fmt.Sprintf("payment method %q is not supported", method))
 	pe.Hint = HintMethodUnsupported
 	return pe
+}
+
+// ErrInternalPayment returns a 500 error for unexpected payment processing
+// failures. Its detail is fixed so internal error messages are never exposed.
+func ErrInternalPayment() *PaymentError {
+	return newPaymentError(ErrorTypeInternalPayment, "An internal payment error occurred.")
 }
