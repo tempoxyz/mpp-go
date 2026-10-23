@@ -260,7 +260,8 @@ func (m *Method) buildTransfer(
 		}
 		feeToken := token
 		if tempo.IsMACHCurrency(chainID, request.Currency) {
-			feeToken = m.resolveStablecoinFeeToken(ctx, rpc, chainID)
+			maxFee := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), gasPrice)
+			feeToken = m.resolveStablecoinFeeToken(ctx, rpc, chainID, maxFee)
 		}
 		builder.SetNonce(nonce).SetFeeToken(feeToken)
 	}
@@ -341,36 +342,58 @@ func transferDataHex(transfer transfer) string {
 	return tempo.EncodeTransfer(transfer.recipient, transfer.amount)
 }
 
+// feeTokenUnitScale converts a fee in gas-price units (18 decimals) to TIP-20
+// fee-token base units (6 decimals).
+var feeTokenUnitScale = big.NewInt(1_000_000_000_000)
+
 // resolveStablecoinFeeToken picks the gas token for a charge whose currency
-// cannot pay transaction fees, such as MACH: the first default fee token the
-// payer holds a balance of, else the first default fee token.
-func (m *Method) resolveStablecoinFeeToken(ctx context.Context, rpc tempo.RPCClient, chainID int64) common.Address {
+// cannot pay transaction fees, such as MACH: the first default fee token whose
+// balance covers maxFee (gas limit times max fee per gas), else the first one
+// the payer holds any balance of, else the first default fee token.
+func (m *Method) resolveStablecoinFeeToken(ctx context.Context, rpc tempo.RPCClient, chainID int64, maxFee *big.Int) common.Address {
 	tokens := tempo.DefaultFeeTokensForChain(chainID)
+	required := new(big.Int).Add(maxFee, new(big.Int).Sub(feeTokenUnitScale, big.NewInt(1)))
+	required.Quo(required, feeTokenUnitScale)
+	var funded *common.Address
 	for _, token := range tokens {
-		if m.hasTokenBalance(ctx, rpc, common.HexToAddress(token)) {
-			return common.HexToAddress(token)
+		address := common.HexToAddress(token)
+		balance := m.tokenBalance(ctx, rpc, address)
+		if balance.Sign() <= 0 {
+			continue
 		}
+		if balance.Cmp(required) >= 0 {
+			return address
+		}
+		if funded == nil {
+			funded = &address
+		}
+	}
+	if funded != nil {
+		return *funded
 	}
 	return common.HexToAddress(tokens[0])
 }
 
-// hasTokenBalance reports whether the payer holds a nonzero TIP-20 balance.
-// Lookup failures count as no balance.
-func (m *Method) hasTokenBalance(ctx context.Context, rpc tempo.RPCClient, token common.Address) bool {
+// tokenBalance returns the payer's TIP-20 balance. Lookup failures count as
+// a zero balance.
+func (m *Method) tokenBalance(ctx context.Context, rpc tempo.RPCClient, token common.Address) *big.Int {
 	account := common.LeftPadBytes(m.signer.Address().Bytes(), 32)
 	response, err := rpc.SendRequest(ctx, "eth_call", map[string]any{
 		"to":   token.Hex(),
 		"data": "0x70a08231" + hex.EncodeToString(account),
 	}, "latest")
 	if err != nil || response.CheckError() != nil {
-		return false
+		return new(big.Int)
 	}
 	result, ok := response.Result.(string)
 	if !ok {
-		return false
+		return new(big.Int)
 	}
 	balance, err := tempo.ParseHexBigInt(result)
-	return err == nil && balance.Sign() > 0
+	if err != nil {
+		return new(big.Int)
+	}
+	return balance
 }
 
 // TODO(tempo-go): replace these JSON-RPC helpers with shared transaction-prep

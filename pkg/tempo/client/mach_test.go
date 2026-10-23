@@ -19,6 +19,7 @@ func TestMACHChargeUsesStablecoinFeeToken(t *testing.T) {
 	tests := []struct {
 		name         string
 		currency     string
+		gasPrice     string
 		balances     map[string]string
 		wantFeeToken string
 	}{
@@ -33,6 +34,21 @@ func TestMACHChargeUsesStablecoinFeeToken(t *testing.T) {
 			currency:     tempo.MACHAddress,
 			balances:     map[string]string{strings.ToLower(tempo.PathUSDAddress): "0x1", strings.ToLower(alphaUSD): "0x1"},
 			wantFeeToken: tempo.PathUSDAddress,
+		},
+		{
+			// 20 gwei max fee per gas: the fee is far above one base unit.
+			name:         "dust pathUSD skipped for token covering the fee",
+			currency:     tempo.MACHAddress,
+			gasPrice:     "0x4a817c800",
+			balances:     map[string]string{strings.ToLower(tempo.PathUSDAddress): "0x1", strings.ToLower(alphaUSD): "0xf4240"},
+			wantFeeToken: alphaUSD,
+		},
+		{
+			name:         "no token covers the fee falls back to first funded",
+			currency:     tempo.MACHAddress,
+			gasPrice:     "0x4a817c800",
+			balances:     map[string]string{strings.ToLower(alphaUSD): "0x1"},
+			wantFeeToken: alphaUSD,
 		},
 		{
 			name:         "unfunded falls back to pathUSD",
@@ -50,7 +66,11 @@ func TestMACHChargeUsesStablecoinFeeToken(t *testing.T) {
 			t.Run(string(kind)+"/"+tt.name, func(t *testing.T) {
 				t.Parallel()
 
-				rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208", balances: tt.balances}
+				gasPrice := tt.gasPrice
+				if gasPrice == "" {
+					gasPrice = "0x1"
+				}
+				rpc := &mockRPC{chainID: 42431, gasPrice: gasPrice, estimateGas: "0x5208", balances: tt.balances}
 				method, err := New(Config{
 					PaymentPolicy:  func(context.Context, tempo.ChargeRequest) error { return nil },
 					ChainID:        42431,
