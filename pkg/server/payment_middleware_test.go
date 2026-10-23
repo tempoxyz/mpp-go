@@ -27,8 +27,8 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 
 	genericErrorResponse := httptest.NewRecorder()
 	WritePaymentError(genericErrorResponse, errors.New("verification failed"))
-	if !assert.Equalf(t, http.StatusPaymentRequired, genericErrorResponse.Code,
-		"genericErrorResponse.Code = %d, want %d", genericErrorResponse.Code, http.StatusPaymentRequired) {
+	if !assert.Equalf(t, http.StatusInternalServerError, genericErrorResponse.Code,
+		"genericErrorResponse.Code = %d, want %d", genericErrorResponse.Code, http.StatusInternalServerError) {
 		return
 	}
 

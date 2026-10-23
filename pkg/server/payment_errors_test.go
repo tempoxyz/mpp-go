@@ -3,7 +3,9 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,12 +39,18 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 					problem *mpp.PaymentError
 					status  int
 					uri     string
+					// err, when set, is the verifier error; problem is then the expected response.
+					err error
 				}{
-					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload"},
-					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request"},
+					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload", nil},
+					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request", nil},
+					{"internal error", mpp.ErrInternalPayment(nil), 500, "https://paymentauth.org/problems/internal-payment-error", errors.New("rpc https://rpc.example/key=sentinel-secret-123 unavailable")},
 				} {
 					t.Run(fmt.Sprintf("%s/split=%t/wrapped=%t/%s", framework, split, wrapped, tc.name), func(t *testing.T) {
 						var intentErr error = tc.problem
+						if tc.err != nil {
+							intentErr = tc.err
+						}
 						if wrapped {
 							intentErr = fmt.Errorf("method context: %w", intentErr)
 						}
@@ -120,8 +128,11 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						assert.Empty(t, rejected.Header.Get(mpp.HeaderPaymentReceipt))
 						assert.Equal(t, "application/problem+json", rejected.Header.Get("Content-Type"))
 						assert.Equal(t, "no-store", rejected.Header.Get("Cache-Control"))
+						rawProblem, err := io.ReadAll(rejected.Body)
+						require.NoError(t, err)
+						assert.NotContains(t, string(rawProblem), "sentinel-secret-123")
 						var problem mpp.PaymentError
-						require.NoError(t, json.NewDecoder(rejected.Body).Decode(&problem))
+						require.NoError(t, json.Unmarshal(rawProblem, &problem))
 						assert.Equal(t, tc.uri, string(problem.Type))
 						assert.Equal(t, tc.status, problem.Status)
 						assert.Equal(t, tc.problem.Detail, problem.Detail)

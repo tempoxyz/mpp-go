@@ -291,6 +291,8 @@ func setAuthenticateHeaders(header http.Header, values []string) {
 }
 
 // WritePaymentError serializes MPP verification errors as problem details.
+// Errors that are not *mpp.PaymentError are unexpected failures: they are
+// reported as a generic 500 internal-payment-error without their message.
 func WritePaymentError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -302,7 +304,7 @@ func WritePaymentError(w http.ResponseWriter, err error) {
 		return
 	}
 
-	w.WriteHeader(http.StatusPaymentRequired)
-	problem := mpp.ErrVerificationFailed(err.Error())
+	problem := mpp.ErrInternalPayment(err)
+	w.WriteHeader(problem.Status)
 	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
 }

@@ -29,6 +29,7 @@ const (
 	ErrorTypeBadRequest          ErrorType = "https://paymentauth.org/problems/bad-request"
 	ErrorTypePaymentInsufficient ErrorType = "https://paymentauth.org/problems/payment-insufficient"
 	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
+	ErrorTypeInternalPayment     ErrorType = "https://paymentauth.org/problems/internal-payment-error"
 )
 
 // Title returns the default RFC 9457 title for the error type.
@@ -52,6 +53,8 @@ func (t ErrorType) Title() string {
 		return "Payment Insufficient"
 	case ErrorTypeMethodUnsupported:
 		return "Method Unsupported"
+	case ErrorTypeInternalPayment:
+		return "Internal Payment Error"
 	default:
 		return "MPP Error"
 	}
@@ -62,6 +65,8 @@ func (t ErrorType) Status() int {
 	switch t {
 	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient:
 		return http.StatusPaymentRequired
+	case ErrorTypeInternalPayment:
+		return http.StatusInternalServerError
 	default:
 		return http.StatusBadRequest
 	}
@@ -76,6 +81,11 @@ type PaymentError struct {
 	Hint   string    `json:"hint,omitempty"`
 	// Details contains safe machine-readable error metadata.
 	Details map[string]any `json:"details,omitempty"`
+
+	// cause is the original error behind an internal payment error. It is
+	// available through errors.Unwrap for server-side logging and is never
+	// serialized.
+	cause error
 }
 
 func (e *PaymentError) Error() string {
@@ -83,11 +93,12 @@ func (e *PaymentError) Error() string {
 }
 
 // Unwrap lets errors.Is match against ErrVerification for verification errors.
+// For internal payment errors it returns the original cause.
 func (e *PaymentError) Unwrap() error {
 	if e.Type == ErrorTypeVerificationFailed {
 		return ErrVerification
 	}
-	return nil
+	return e.cause
 }
 
 func newPaymentError(kind ErrorType, detail string) *PaymentError {
@@ -172,5 +183,14 @@ func ErrPaymentInsufficient(reason string) *PaymentError {
 func ErrMethodUnsupported(method string) *PaymentError {
 	pe := newPaymentError(ErrorTypeMethodUnsupported, fmt.Sprintf("payment method %q is not supported", method))
 	pe.Hint = HintMethodUnsupported
+	return pe
+}
+
+// ErrInternalPayment returns a 500 error for unexpected payment processing
+// failures. Its detail is generic so internal error text never reaches
+// clients; cause is kept for server-side inspection via errors.Unwrap.
+func ErrInternalPayment(cause error) *PaymentError {
+	pe := newPaymentError(ErrorTypeInternalPayment, "An internal payment error occurred.")
+	pe.cause = cause
 	return pe
 }

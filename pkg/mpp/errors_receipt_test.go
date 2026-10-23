@@ -1,6 +1,7 @@
 package mpp
 
 import (
+	"encoding/json"
 	"errors"
 	"github.com/stretchr/testify/assert"
 	"net/http"
@@ -536,4 +537,18 @@ func TestChallengeNewCredential(t *testing.T) {
 		return
 	}
 
+}
+
+func TestErrInternalPayment_HidesCause(t *testing.T) {
+	cause := errors.New("rpc key=sentinel-secret")
+	err := ErrInternalPayment(cause)
+
+	assert.Equal(t, http.StatusInternalServerError, err.Status)
+	assert.Equal(t, ErrorTypeInternalPayment, err.Type)
+	assert.True(t, errors.Is(err, cause))
+	assert.False(t, errors.Is(err, ErrVerification))
+	assert.NotContains(t, err.Error(), "sentinel-secret")
+	body, marshalErr := json.Marshal(err.ProblemDetails(""))
+	assert.NoError(t, marshalErr)
+	assert.NotContains(t, string(body), "sentinel-secret")
 }

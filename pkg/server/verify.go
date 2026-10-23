@@ -239,7 +239,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			}
 			return challengeResultError(echoedChallenge, pe)
 		}
-		return challengeResultError(echoedChallenge, mpp.ErrVerificationFailed(err.Error()))
+		// Unexpected verifier failures may carry RPC URLs, credentials or
+		// other internal details: report a generic 500 without the message.
+		return challengeResultError(echoedChallenge, mpp.ErrInternalPayment(err))
 	}
 
 	// 9. Return result.
