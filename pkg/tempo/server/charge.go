@@ -3,6 +3,7 @@ package chargeserver
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
@@ -664,7 +666,7 @@ func (i *Intent) broadcastTransaction(
 	txHash, err := rpc.SendRawTransaction(ctx, serialized)
 	if err != nil {
 		// The node may have included the transaction before its RPC reply failed.
-		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized)
+		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized, err)
 		if !ok {
 			if reservedHash != "" {
 				_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
@@ -896,20 +898,43 @@ func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, chal
 
 // lookupConfirmedReceipt checks once, without rebroadcasting, whether a
 // transaction whose submission returned an error was confirmed anyway.
-func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized string) (string, map[string]any, bool) {
+func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized string, sendErr error) (string, map[string]any, bool) {
 	hash, err := tempotx.ComputeHash(serialized)
 	if err != nil {
 		return "", nil, false
 	}
-	response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash.Hex())
-	if err != nil || response.CheckError() != nil {
-		return "", nil, false
+	// eth_sendRawTransaction is async, so a transaction the node accepted is
+	// usually still pending when the reply fails: poll like fetchReceipt. A
+	// JSON-RPC error means the node answered and rejected it, so check once.
+	attempts := receiptRetryAttempts
+	var rpcErr *temporpc.JSONRPCError
+	if errors.As(sendErr, &rpcErr) {
+		attempts = 1
 	}
-	receipt, ok := response.Result.(map[string]any)
-	if !ok || len(receipt) == 0 || asString(receipt["status"]) != "0x1" {
-		return "", nil, false
+	// The send may have failed because ctx ended; the lookup still needs to run.
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(attempts)*receiptRetryDelay)
+	defer cancel()
+	for attempt := 0; attempt < attempts; attempt++ {
+		response, err := rpc.SendRequest(lookupCtx, "eth_getTransactionReceipt", hash.Hex())
+		if err == nil && response.CheckError() == nil {
+			if receipt, ok := response.Result.(map[string]any); ok && len(receipt) > 0 {
+				if asString(receipt["status"]) != "0x1" {
+					return "", nil, false
+				}
+				return hash.Hex(), receipt, true
+			}
+		}
+		if attempt < attempts-1 {
+			timer := time.NewTimer(receiptRetryDelay)
+			select {
+			case <-lookupCtx.Done():
+				timer.Stop()
+				return "", nil, false
+			case <-timer.C:
+			}
+		}
 	}
-	return hash.Hex(), receipt, true
+	return "", nil, false
 }
 
 // fetchReceipt polls until a Tempo receipt appears because tempo-go does not

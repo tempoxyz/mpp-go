@@ -2046,3 +2046,66 @@ func TestChargeFlow_TransactionCredentialDoesNotRecoverRevertedChargeAfterSubmis
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "transaction submission failed")
 }
+
+func TestChargeFlow_TransactionCredentialRecoversPendingChargeAfterSubmissionError(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	var mined map[string]any
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		mined = buildReceipt(raw, request, sender)
+		// The send timed out with the caller's context while the transaction
+		// was still pending in the mempool.
+		cancel()
+		return "", nil, context.Canceled
+	}
+	lookups := 0
+	rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+		lookups++
+		if lookups < 2 {
+			return &temporpc.JSONRPCResponse{}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: mined}, nil
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	assert.Equal(t, 2, lookups)
+}
+
+func TestChargeFlow_TransactionCredentialChecksOnceAfterRejectedSubmission(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	rpc.onSend = func(string) (string, map[string]any, error) {
+		return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"})
+	}
+	lookups := 0
+	rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+		lookups++
+		return &temporpc.JSONRPCResponse{}, nil
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "transaction submission failed")
+	assert.Equal(t, 1, lookups)
+}
