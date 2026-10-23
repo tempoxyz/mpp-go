@@ -180,7 +180,13 @@ func (r *relayClient) broadcast(ctx context.Context, credential *mpp.Credential)
 	// Send no idempotency key: a cached settlement receipt must not authorize
 	// another protected operation, so the relay consumes each credential once.
 	broadcast, err := r.post(ctx, r.broadcastURL, input)
-	if err != nil || !broadcast.Success || broadcast.Receipt == nil {
+	if err != nil {
+		// The relay may have settled the payment before the exchange failed.
+		// Without an idempotency key a retry cannot recover the receipt, so tell
+		// the app the outcome is unknown and must be reconciled separately.
+		return nil, relaySettlementUnknown()
+	}
+	if !broadcast.Success || broadcast.Receipt == nil {
 		return nil, relayFailure(credential, broadcast.Error)
 	}
 	return parseRelayReceipt(broadcast.Receipt)
@@ -270,6 +276,16 @@ func relayFailure(credential *mpp.Credential, relayErr *relayError) error {
 	if relayErr != nil {
 		err.Details = safeRelayErrorDetails(relayErr.Code)
 	}
+	return err
+}
+
+// relaySettlementUnknownCode marks a broadcast whose outcome is unknown because
+// the relay exchange failed after the request may have been sent.
+const relaySettlementUnknownCode = "settlement_unknown"
+
+func relaySettlementUnknown() error {
+	err := mpp.ErrVerificationFailed("payment verification failed")
+	err.Details = map[string]any{"code": relaySettlementUnknownCode}
 	return err
 }
 

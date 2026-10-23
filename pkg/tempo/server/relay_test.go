@@ -287,7 +287,6 @@ func TestRelayBoundaryFailuresAreGeneric(t *testing.T) {
 	}{
 		{name: "validation malformed", validate: "not a relay response"},
 		{name: "validation missing success", validate: map[string]any{}},
-		{name: "broadcast malformed", validate: map[string]any{"success": true}, broadcast: "not a relay response"},
 		{name: "broadcast missing receipt", validate: map[string]any{"success": true}, broadcast: map[string]any{"success": true}},
 		{name: "receipt wrong method", validate: map[string]any{"success": true}, broadcast: map[string]any{"success": true, "receipt": map[string]any{"method": "stripe", "reference": "0xabc", "timestamp": "2026-07-22T00:00:00Z"}}},
 		{name: "receipt invalid timestamp", validate: map[string]any{"success": true}, broadcast: map[string]any{"success": true, "receipt": map[string]any{"method": "tempo", "reference": "0xabc", "timestamp": "invalid"}}},
@@ -307,6 +306,41 @@ func TestRelayBoundaryFailuresAreGeneric(t *testing.T) {
 			require.ErrorAs(t, err, &paymentErr)
 			assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
 			assert.Empty(t, paymentErr.Details)
+		})
+	}
+}
+
+func TestRelayBroadcastExchangeFailureIsSettlementUnknown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		respond func(http.ResponseWriter)
+	}{
+		{name: "malformed body", respond: func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte("not a relay response"))
+		}},
+		{name: "server error", respond: func(w http.ResponseWriter) {
+			http.Error(w, "private relay detail", http.StatusBadGateway)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/mpp/validate" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+					return
+				}
+				tt.respond(w)
+			}))
+			t.Cleanup(server.Close)
+
+			_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}), nil)
+			var paymentErr *mpp.PaymentError
+			require.ErrorAs(t, err, &paymentErr)
+			assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
+			assert.Equal(t, map[string]any{"code": "settlement_unknown"}, paymentErr.Details)
+			assert.NotContains(t, paymentErr.Error(), "private relay detail")
 		})
 	}
 }
