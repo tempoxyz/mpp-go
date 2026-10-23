@@ -498,7 +498,11 @@ func (i *Intent) broadcastCredential(
 		if !accepted {
 			return nil, mpp.ErrVerificationFailed("transaction hash already used")
 		}
-		return mpp.Success(tempo.MethodName, hash, mpp.WithExternalID(validated.request.ExternalID)), nil
+		options := []mpp.ReceiptOption{mpp.WithExternalID(validated.request.ExternalID)}
+		if hashPaymentFundedByCurrency(ctx, credential, validated) {
+			options = append(options, mpp.WithFundingCurrency(validated.request.Currency))
+		}
+		return mpp.Success(tempo.MethodName, hash, options...), nil
 	case tempo.CredentialTypeProof:
 		challengeID := credential.Challenge.ID
 		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(challengeID), challengeID)
@@ -684,11 +688,67 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrVerificationFailed("transaction hash already used")
 		}
 	}
+	// transactionMatches accepted only the expected transfers of the charge
+	// currency, so that currency funded the payment.
 	return mpp.Success(
 		tempo.MethodName,
 		txHash,
 		mpp.WithExternalID(request.ExternalID),
+		mpp.WithFundingCurrency(request.Currency),
 	), nil
+}
+
+// hashPaymentFundedByCurrency reports whether a verified push payment was sent
+// by the credential's payer and consists only of the expected transfers of the
+// charge currency. Only then does the receipt report the funding currency; a
+// lookup failure or any other call pattern leaves it unset without failing the
+// already verified payment.
+func hashPaymentFundedByCurrency(ctx context.Context, credential *mpp.Credential, validated *validatedChargeCredential) bool {
+	response, err := validated.rpc.SendRequest(ctx, "eth_getTransactionByHash", validated.payload.Hash)
+	if err != nil || response.CheckError() != nil {
+		return false
+	}
+	transaction, ok := response.Result.(map[string]any)
+	if !ok || !strings.EqualFold(asString(transaction["from"]), validated.sender.Hex()) {
+		return false
+	}
+	var calls []any
+	if rawCalls, ok := transaction["calls"].([]any); ok {
+		calls = rawCalls
+	} else if to := asString(transaction["to"]); transaction["to"] != nil && to != "" {
+		calls = []any{map[string]any{"to": to, "input": transaction["input"], "value": transaction["value"]}}
+	}
+	request := validated.request
+	expected := expectedTransfers(request)
+	if len(calls) != len(expected) {
+		return false
+	}
+	actual := make([]decodedTransfer, 0, len(calls))
+	for _, rawCall := range calls {
+		call, ok := rawCall.(map[string]any)
+		if !ok || !strings.EqualFold(asString(call["to"]), request.Currency) {
+			return false
+		}
+		if value, ok := call["value"].(string); ok && value != "" {
+			if amount, err := tempo.ParseHexBigInt(value); err != nil || amount.Sign() != 0 {
+				return false
+			}
+		}
+		data, ok := call["data"].(string)
+		if !ok {
+			data, _ = call["input"].(string)
+		}
+		raw, err := hexutil.Decode(data)
+		if err != nil {
+			return false
+		}
+		decoded, ok := decodeCallTransfer(raw)
+		if !ok {
+			return false
+		}
+		actual = append(actual, decoded)
+	}
+	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
 }
 
 func validateChallengeExpiry(credential *mpp.Credential) error {

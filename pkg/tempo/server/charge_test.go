@@ -87,6 +87,7 @@ type mockRPC struct {
 	onSend           func(raw string) (string, map[string]any, error)
 	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 	onGetReceipt     func(hash string) (*temporpc.JSONRPCResponse, error)
+	onGetTransaction func(hash string) (*temporpc.JSONRPCResponse, error)
 	// balances answers TIP-20 balanceOf eth_calls by token address; those
 	// calls are recorded in balanceCalls, not callRequests or onCall.
 	balances     map[common.Address]*big.Int
@@ -193,6 +194,11 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 			return m.onGetReceipt(hash)
 		}
 		return &temporpc.JSONRPCResponse{Result: m.receipts[hash]}, nil
+	case "eth_getTransactionByHash":
+		if m.onGetTransaction != nil {
+			return m.onGetTransaction(params[0].(string))
+		}
+		return nil, fmt.Errorf("unexpected rpc method %q", method)
 	default:
 		return nil, fmt.Errorf("unexpected rpc method %q", method)
 	}
@@ -1981,4 +1987,86 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, successes)
+}
+
+func TestChargeFlow_HashReceiptReportsFundingCurrency(t *testing.T) {
+	for _, scenario := range []string{"direct", "single", "unrelated", "missing", "sender"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, buildChallenge(t, request))
+			if !assert.NoError(t, err) || !assert.Len(t, rpc.sentRawTxs, 1) {
+				return
+			}
+			tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+			if !assert.NoError(t, err) {
+				return
+			}
+			sender, err := tempotx.VerifySignature(tx)
+			if !assert.NoError(t, err) {
+				return
+			}
+			calls := make([]any, 0, len(tx.Calls)+1)
+			for _, call := range tx.Calls {
+				calls = append(calls, map[string]any{"to": call.To.Hex(), "data": hexutil.Encode(call.Data), "value": "0x0"})
+			}
+			transaction := map[string]any{"hash": testReceiptHash, "from": sender.Hex(), "type": "0x76", "calls": calls}
+			switch scenario {
+			case "single":
+				if !assert.Len(t, calls, 1) {
+					return
+				}
+				call := calls[0].(map[string]any)
+				transaction = map[string]any{"hash": testReceiptHash, "from": sender.Hex(), "type": "0x2", "to": call["to"], "input": call["data"]}
+			case "unrelated":
+				transaction["calls"] = append(calls, map[string]any{
+					"to":   tempo.PathUSDAddress,
+					"data": hexutil.Encode(common.FromHex(tempo.TransferSelector + strings.Repeat("0", 64) + fmt.Sprintf("%064x", 1))),
+				})
+			case "sender":
+				transaction["from"] = common.HexToAddress("0x3333333333333333333333333333333333333333").Hex()
+			}
+			rpc.onGetTransaction = func(hash string) (*temporpc.JSONRPCResponse, error) {
+				if scenario == "missing" {
+					return &temporpc.JSONRPCResponse{}, nil
+				}
+				return &temporpc.JSONRPCResponse{Result: transaction}, nil
+			}
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			if !assert.NoError(t, err) {
+				return
+			}
+			want := ""
+			if scenario == "direct" || scenario == "single" {
+				want = request.Currency
+			}
+			assert.Equal(t, want, receipt.FundingCurrency)
+		})
+	}
+}
+
+func TestChargeFlow_TransactionReceiptReportsFundingCurrency(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	if !assert.NoError(t, err) {
+		return
+	}
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, request.Currency, receipt.FundingCurrency)
 }

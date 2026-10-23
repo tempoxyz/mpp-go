@@ -246,6 +246,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		"ref-123",
 		WithExternalID("ext-123"),
 		WithSubscriptionID("sub-123"),
+		WithFundingCurrency("0x20c0000000000000000000000000000000000001"),
 		WithExtra(map[string]any{"settled": true}),
 	)
 	if !assert.Equalf(t, "success", receipt.Status,
@@ -281,6 +282,10 @@ func TestReceiptRoundTrip(t *testing.T) {
 	}
 	if !assert.Equalf(t, receipt.SubscriptionID, parsed.SubscriptionID,
 		"parsed.SubscriptionID = %q, want %q", parsed.SubscriptionID, receipt.SubscriptionID) {
+		return
+	}
+	if !assert.Equal(t, receipt.FundingCurrency, parsed.FundingCurrency) ||
+		!assert.NotContains(t, parsed.Extensions, "fundingCurrency") {
 		return
 	}
 	if !assert.Equalf(t, true, parsed.Extra["settled"],
