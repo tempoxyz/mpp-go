@@ -89,6 +89,13 @@ func TestPaymentErrorConstructors(t *testing.T) {
 			status: http.StatusBadRequest,
 			detail: `payment method "stripe" is not supported`,
 		},
+		{
+			name:   "internal payment error",
+			err:    ErrInternalPayment(),
+			want:   ErrorTypeInternalPayment,
+			status: http.StatusInternalServerError,
+			detail: "An internal payment error occurred.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +135,7 @@ func TestProblemTypeURIsUseCanonicalBase(t *testing.T) {
 		{got: ErrorTypeBadRequest, want: "https://paymentauth.org/problems/bad-request"},
 		{got: ErrorTypePaymentInsufficient, want: "https://paymentauth.org/problems/payment-insufficient"},
 		{got: ErrorTypeMethodUnsupported, want: "https://paymentauth.org/problems/method-unsupported"},
+		{got: ErrorTypeInternalPayment, want: "https://paymentauth.org/problems/internal-payment-error"},
 	}
 
 	for _, tt := range tests {

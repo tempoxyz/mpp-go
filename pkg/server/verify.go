@@ -239,7 +239,10 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			}
 			return challengeResultError(echoedChallenge, pe)
 		}
-		return challengeResultError(echoedChallenge, mpp.ErrVerificationFailed(err.Error()))
+		// Errors that are not payment errors are unexpected processing failures:
+		// report them without their internal details instead of as a rejected
+		// credential.
+		return nil, mpp.ErrInternalPayment()
 	}
 
 	// 9. Return result.

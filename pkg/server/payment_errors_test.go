@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,12 +38,17 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 					problem *mpp.PaymentError
 					status  int
 					uri     string
+					cause   error
 				}{
-					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload"},
-					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request"},
+					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload", nil},
+					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request", nil},
+					{"internal error", mpp.ErrInternalPayment(), 500, "https://paymentauth.org/problems/internal-payment-error", errors.New("rpc 10.0.0.7: connection refused")},
 				} {
 					t.Run(fmt.Sprintf("%s/split=%t/wrapped=%t/%s", framework, split, wrapped, tc.name), func(t *testing.T) {
 						var intentErr error = tc.problem
+						if tc.cause != nil {
+							intentErr = tc.cause
+						}
 						if wrapped {
 							intentErr = fmt.Errorf("method context: %w", intentErr)
 						}
@@ -126,7 +132,8 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						assert.Equal(t, tc.status, problem.Status)
 						assert.Equal(t, tc.problem.Detail, problem.Detail)
 						assert.Equal(t, tc.problem.Title, problem.Title)
-						if tc.status == http.StatusBadRequest {
+						assert.NotContains(t, problem.Detail, "10.0.0.7")
+						if tc.status != http.StatusPaymentRequired {
 							assert.Empty(t, rejected.Header.Get(mpp.HeaderWWWAuthenticate))
 							return
 						}

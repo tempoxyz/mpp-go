@@ -29,6 +29,7 @@ const (
 	ErrorTypeBadRequest          ErrorType = "https://paymentauth.org/problems/bad-request"
 	ErrorTypePaymentInsufficient ErrorType = "https://paymentauth.org/problems/payment-insufficient"
 	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
+	ErrorTypeInternalPayment     ErrorType = "https://paymentauth.org/problems/internal-payment-error"
 )
 
 // Title returns the default RFC 9457 title for the error type.
@@ -52,6 +53,8 @@ func (t ErrorType) Title() string {
 		return "Payment Insufficient"
 	case ErrorTypeMethodUnsupported:
 		return "Method Unsupported"
+	case ErrorTypeInternalPayment:
+		return "Internal Payment Error"
 	default:
 		return "MPP Error"
 	}
@@ -62,6 +65,8 @@ func (t ErrorType) Status() int {
 	switch t {
 	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient:
 		return http.StatusPaymentRequired
+	case ErrorTypeInternalPayment:
+		return http.StatusInternalServerError
 	default:
 		return http.StatusBadRequest
 	}
@@ -173,4 +178,10 @@ func ErrMethodUnsupported(method string) *PaymentError {
 	pe := newPaymentError(ErrorTypeMethodUnsupported, fmt.Sprintf("payment method %q is not supported", method))
 	pe.Hint = HintMethodUnsupported
 	return pe
+}
+
+// ErrInternalPayment returns a 500 error for unexpected payment processing
+// failures. Its detail is fixed so internal error messages are never exposed.
+func ErrInternalPayment() *PaymentError {
+	return newPaymentError(ErrorTypeInternalPayment, "An internal payment error occurred.")
 }
