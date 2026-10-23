@@ -1136,6 +1136,15 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 				}
 				continue
 			}
+			// A split without a configured memo accepts any memo except an
+			// attribution memo bound to another challenge or realm. Otherwise
+			// one split payment could carry memos for two challenges and pay
+			// both once the first replay marker expires. Memos the server
+			// configured are matched exactly above and are exempt.
+			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
+				(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
+				continue
+			}
 			if want.allowAnyMemo || !got.hasMemo {
 				used[index] = true
 				matched = true
