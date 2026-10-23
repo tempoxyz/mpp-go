@@ -5,13 +5,16 @@ import "time"
 // Receipt represents a server-issued payment receipt sent via the
 // Payment-Receipt header.
 type Receipt struct {
-	Status         string         `json:"status"`
-	Timestamp      time.Time      `json:"timestamp"`
-	Reference      string         `json:"reference"`
-	Method         string         `json:"method,omitempty"`
-	ExternalID     string         `json:"externalId,omitempty"`
-	SubscriptionID string         `json:"subscriptionId,omitempty"`
-	Extra          map[string]any `json:"extra,omitempty"`
+	Status         string    `json:"status"`
+	Timestamp      time.Time `json:"timestamp"`
+	Reference      string    `json:"reference"`
+	Method         string    `json:"method,omitempty"`
+	ExternalID     string    `json:"externalId,omitempty"`
+	SubscriptionID string    `json:"subscriptionId,omitempty"`
+	// FundingCurrency is the currency actually debited to fund the payment,
+	// when the payment method knows it.
+	FundingCurrency string         `json:"fundingCurrency,omitempty"`
+	Extra           map[string]any `json:"extra,omitempty"`
 
 	// Extensions holds method-defined top-level receipt fields beyond the
 	// base set. draft-ietf-httpauth-payment §5.3 states "Payment method
@@ -35,6 +38,11 @@ func WithExternalID(id string) ReceiptOption {
 // WithSubscriptionID sets the server-issued subscription ID on a Receipt.
 func WithSubscriptionID(id string) ReceiptOption {
 	return func(r *Receipt) { r.SubscriptionID = id }
+}
+
+// WithFundingCurrency sets the currency actually debited to fund the payment.
+func WithFundingCurrency(currency string) ReceiptOption {
+	return func(r *Receipt) { r.FundingCurrency = currency }
 }
 
 // WithExtra sets extra metadata on a Receipt.
