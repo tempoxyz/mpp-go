@@ -664,12 +664,15 @@ func (i *Intent) broadcastTransaction(
 	}
 	var receiptMap map[string]any
 	txHash, err := rpc.SendRawTransaction(ctx, serialized)
+	// Store writes after the send must not depend on the request context: the
+	// receipt lookup below may outlive it.
+	storeCtx := context.WithoutCancel(ctx)
 	if err != nil {
 		// The node may have included the transaction before its RPC reply failed.
 		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized, err)
 		if !ok {
 			if reservedHash != "" {
-				_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
+				_ = i.store.Delete(storeCtx, tempo.ChargeStoreKey(reservedHash))
 			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
@@ -684,7 +687,7 @@ func (i *Intent) broadcastTransaction(
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	if request.MethodDetails.FeePayer {
-		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(txHash), txHash)
+		accepted, err := i.store.PutIfAbsent(storeCtx, tempo.ChargeStoreKey(txHash), txHash)
 		if err != nil {
 			return nil, err
 		}

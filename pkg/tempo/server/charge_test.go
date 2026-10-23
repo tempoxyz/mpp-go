@@ -2109,3 +2109,74 @@ func TestChargeFlow_TransactionCredentialChecksOnceAfterRejectedSubmission(t *te
 	require.ErrorContains(t, err, "transaction submission failed")
 	assert.Equal(t, 1, lookups)
 }
+
+// ctxStore fails store calls whose context has ended, like a network store.
+type ctxStore struct{ *tempo.MemoryStore }
+
+func (s ctxStore) PutIfAbsent(ctx context.Context, key, value string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return s.MemoryStore.PutIfAbsent(ctx, key, value)
+}
+
+func (s ctxStore) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.MemoryStore.Delete(ctx, key)
+}
+
+func TestChargeFlow_StoreWritesAfterSubmissionErrorOutliveRequestContext(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovered=%t", recovered), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			// Fee-payer charges record the hash after recovery; others release
+			// their reservation when nothing is recovered.
+			feePayer := recovered
+			request := buildRequest(t, feePayer, nil)
+			rpc := newMockRPC(request)
+			var broadcastHash string
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				hash, err := tempotx.ComputeHash(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				broadcastHash = hash.Hex()
+				if recovered {
+					tx, err := tempotx.Deserialize(raw)
+					if err != nil {
+						return "", nil, err
+					}
+					sender, err := tempotx.VerifySignature(tx)
+					if err != nil {
+						return "", nil, err
+					}
+					rpc.receipts[broadcastHash] = buildReceipt(raw, request, sender)
+				}
+				// The request ends while the RPC reply is lost.
+				cancel()
+				return "", nil, fmt.Errorf("connection reset")
+			}
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(context.Background(), buildChallenge(t, request))
+			require.NoError(t, err)
+			store := ctxStore{tempo.NewMemoryStore()}
+			intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			require.NoError(t, err)
+
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			_, stored, getErr := store.Get(context.Background(), tempo.ChargeStoreKey(broadcastHash))
+			require.NoError(t, getErr)
+			if recovered {
+				require.NoError(t, err)
+				assert.Equal(t, broadcastHash, receipt.Reference)
+				assert.True(t, stored, "recovered fee-payer charge must be recorded")
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "transaction submission failed")
+				assert.False(t, stored, "failed charge must release its reservation")
+			}
+		})
+	}
+}
