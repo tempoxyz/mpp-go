@@ -66,6 +66,9 @@ type FeePayerPolicy struct {
 	MaxFeePerGas         *big.Int
 	MaxPriorityFeePerGas *big.Int
 	MaxTotalFee          *big.Int
+	// RejectKeyAuthorization rejects sponsored transactions that install a new
+	// access key (carry a keyAuthorization). The default allows them.
+	RejectKeyAuthorization bool
 }
 
 // IntentConfig configures Tempo charge verification.
@@ -1400,9 +1403,10 @@ func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string
 			return nil, fmt.Errorf("tempo server: invalid max total fee for %s", currency)
 		}
 		policies[common.HexToAddress(currency).Hex()] = FeePayerPolicy{
-			MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
-			MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
-			MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
+			MaxFeePerGas:           new(big.Int).Set(policy.MaxFeePerGas),
+			MaxPriorityFeePerGas:   new(big.Int).Set(policy.MaxPriorityFeePerGas),
+			MaxTotalFee:            new(big.Int).Set(policy.MaxTotalFee),
+			RejectKeyAuthorization: policy.RejectKeyAuthorization,
 		}
 	}
 	return policies, nil
@@ -1524,6 +1528,9 @@ func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {
 }
 
 func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string, policy FeePayerPolicy) error {
+	if tx.KeyAuthorization != nil && policy.RejectKeyAuthorization {
+		return mpp.ErrInvalidPayload("fee payer transaction keyAuthorization is not allowed")
+	}
 	if tx.Gas == 0 {
 		return mpp.ErrInvalidPayload("fee payer transaction must declare gas")
 	}
