@@ -660,17 +660,23 @@ func (i *Intent) broadcastTransaction(
 	if request.MethodDetails.FeePayer {
 		releaseSponsoredClaim = false
 	}
+	var receiptMap map[string]any
 	txHash, err := rpc.SendRawTransaction(ctx, serialized)
 	if err != nil {
-		if reservedHash != "" {
-			_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
+		// The node may have included the transaction before its RPC reply failed.
+		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized)
+		if !ok {
+			if reservedHash != "" {
+				_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
+			}
+			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
-		return nil, mpp.ErrVerificationFailed("transaction submission failed")
-	}
-
-	receiptMap, err := fetchReceipt(ctx, rpc, txHash)
-	if err != nil {
-		return nil, err
+		txHash, receiptMap = recoveredHash, recoveredReceipt
+	} else {
+		receiptMap, err = fetchReceipt(ctx, rpc, txHash)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !receiptMatches(receiptMap, credential, request, sender.Hex()) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
@@ -886,6 +892,24 @@ func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, chal
 		actual = append(actual, decoded)
 	}
 	return matchTransfers(actual, expected, realm, challengeID)
+}
+
+// lookupConfirmedReceipt checks once, without rebroadcasting, whether a
+// transaction whose submission returned an error was confirmed anyway.
+func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized string) (string, map[string]any, bool) {
+	hash, err := tempotx.ComputeHash(serialized)
+	if err != nil {
+		return "", nil, false
+	}
+	response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash.Hex())
+	if err != nil || response.CheckError() != nil {
+		return "", nil, false
+	}
+	receipt, ok := response.Result.(map[string]any)
+	if !ok || len(receipt) == 0 || asString(receipt["status"]) != "0x1" {
+		return "", nil, false
+	}
+	return hash.Hex(), receipt, true
 }
 
 // fetchReceipt polls until a Tempo receipt appears because tempo-go does not
