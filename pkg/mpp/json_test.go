@@ -323,10 +323,10 @@ func TestChallengeJSONRoundTripRejectsLossyLargeIntegerRequest(t *testing.T) {
 
 func TestAuthorizationExtractionBoundsRawHeader(t *testing.T) {
 	for _, header := range []string{
-		"Bearer " + strings.Repeat("a", maxHeaderPayload) + ", Payment abc",
-		strings.Repeat(" ", maxHeaderPayload) + "Payment abc",
-		"Payment " + strings.Repeat("a", maxHeaderPayload),
-		strings.Repeat("Basic a,", maxHeaderPayload),
+		"Bearer " + strings.Repeat("a", maxAuthorizationPayload) + ", Payment abc",
+		strings.Repeat(" ", maxAuthorizationPayload) + "Payment abc",
+		"Payment " + strings.Repeat("a", maxAuthorizationPayload),
+		strings.Repeat("Basic a,", maxAuthorizationPayload),
 	} {
 		_, err := FindPaymentAuthorizationStrict(header)
 		require.ErrorContains(t, err, "exceeds maximum size")
@@ -334,8 +334,32 @@ func TestAuthorizationExtractionBoundsRawHeader(t *testing.T) {
 		_, err = ParseCredential(header)
 		require.ErrorContains(t, err, "exceeds maximum size")
 	}
-	header := "Payment " + strings.Repeat("a", maxHeaderPayload-len("Payment "))
+	header := "Payment " + strings.Repeat("a", maxAuthorizationPayload-len("Payment "))
 	got, err := FindPaymentAuthorizationStrict(header)
 	require.NoError(t, err)
 	require.Equal(t, header, got)
+}
+
+func TestCredentialAcceptsExpandedChallengeEcho(t *testing.T) {
+	challenge := NewChallenge(
+		"secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"data": strings.Repeat("a", 11*1024)},
+	)
+	credential := &Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": "0x1"},
+	}
+
+	header, err := FormatAuthorizationStrict(credential)
+	require.NoError(t, err)
+	require.Greater(t, len(header), maxHeaderPayload)
+	require.Equal(t, header, FindPaymentAuthorization(header))
+
+	parsed, err := ParseCredential(header)
+	require.NoError(t, err)
+	require.Equal(t, credential.Challenge.ID, parsed.Challenge.ID)
+	require.Equal(t, credential.Challenge.Request, parsed.Challenge.Request)
 }

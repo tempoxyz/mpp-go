@@ -276,7 +276,9 @@ func buildChallenge(t *testing.T, params tempo.ChargeRequestParams) *mpp.Challen
 }
 
 func TestHashCredentialSizePreflight(t *testing.T) {
-	for _, size := range []int{10, 9000} {
+	// 9000 produces a credential above 16 KiB from a challenge that fits its own
+	// limit; mppx accepts it. 60000 exceeds the 64 KiB credential limit.
+	for _, size := range []int{10, 9000, 60000} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			rpc := &mockRPC{chainID: 42431}
 			method, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil }, ChainID: 42431, CredentialType: tempo.CredentialTypeHash, PrivateKey: testPrivateKey, RPC: rpc})
@@ -286,17 +288,26 @@ func TestHashCredentialSizePreflight(t *testing.T) {
 			challenge := buildChallenge(t, tempo.ChargeRequestParams{Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431})
 			challenge.Request["_mppx_scope"] = map[string]any{"query": strings.Repeat("a", size)}
 			challenge.RequestB64 = ""
-			_, err = mpp.FormatAuthenticateStrict(challenge, challenge.Realm)
+			if size < 60000 {
+				_, err = mpp.FormatAuthenticateStrict(challenge, challenge.Realm)
+				if !assert.NoError(t, err) {
+					return
+				}
+			}
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			if size == 60000 {
+				assert.Error(t, err)
+				assert.Empty(t, rpc.sentRawTxs)
+				return
+			}
 			if !assert.NoError(t, err) {
 				return
 			}
-			_, err = method.CreateCredential(context.Background(), challenge)
+			assert.Len(t, rpc.sentRawTxs, 1)
 			if size == 9000 {
-				assert.Error(t, err)
-				assert.Empty(t, rpc.sentRawTxs)
-			} else {
+				authorization, err := mpp.FormatAuthorizationStrict(credential)
 				assert.NoError(t, err)
-				assert.Len(t, rpc.sentRawTxs, 1)
+				assert.Greater(t, len(authorization), 16*1024)
 			}
 		})
 	}

@@ -647,7 +647,7 @@ func TestParseCredential(t *testing.T) {
 		},
 		{
 			name:    "authorization header too large",
-			header:  "Payment " + strings.Repeat("a", maxHeaderPayload),
+			header:  "Payment " + strings.Repeat("a", maxAuthorizationPayload),
 			wantErr: `Authorization header exceeds maximum size`,
 		},
 	}

@@ -16,6 +16,12 @@ import (
 // maxHeaderPayload is the maximum accepted header payload size (16 KB).
 const maxHeaderPayload = 16 * 1024
 
+// maxAuthorizationPayload is the maximum accepted Authorization value size
+// (64 KB). A credential echoes its challenge, whose request alone may reach
+// maxHeaderPayload, so it needs room to expand during JSON and base64url
+// encoding. This matches mppx.
+const maxAuthorizationPayload = 64 * 1024
+
 // parseAuthParams parses a comma-separated list of key=value or key="value"
 // pairs from an auth-param list (RFC 9110 §11.2).
 func parseAuthParams(s string) (map[string]string, error) {
@@ -426,7 +432,7 @@ func escapeQuoted(value string) string {
 // Expected format: Payment <base64url-json>
 // The JSON payload contains: challenge (echo), payload, and optional source.
 func ParseCredential(header string) (*Credential, error) {
-	if len(header) > maxHeaderPayload {
+	if len(header) > maxAuthorizationPayload {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 
@@ -586,7 +592,7 @@ func FormatAuthorizationStrict(c *Credential) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(header) > maxHeaderPayload {
+	if len(header) > maxAuthorizationPayload {
 		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 	return header, nil
