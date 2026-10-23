@@ -1982,3 +1982,61 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	}
 	assert.Equal(t, 1, successes)
 }
+
+func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
+	t.Parallel()
+
+	const (
+		challengeID    = "challenge-1"
+		splitRecipient = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+	)
+	bound := tempo.EncodeAttribution(testRealm, "", challengeID)
+	memos := map[string]string{
+		"bound":           bound,
+		"other challenge": tempo.EncodeAttribution(testRealm, "", "other-challenge"),
+		"other realm":     tempo.EncodeAttribution("other.example.com", "", challengeID),
+		"other client":    tempo.EncodeAttribution(testRealm, "another-client", challengeID),
+		"uppercase":       "0x" + strings.ToUpper(strings.TrimPrefix(bound, "0x")),
+		"custom":          "0x" + strings.Repeat("ab", 32),
+		"plain":           "",
+	}
+	expected := expectedTransfers(tempo.ChargeRequest{
+		Amount:    "1000000",
+		Recipient: testRecipient,
+		MethodDetails: tempo.MethodDetails{
+			Splits: []tempo.Split{{Amount: "200000", Recipient: splitRecipient}},
+		},
+	})
+
+	tests := []struct {
+		primary, split string
+		accepted       bool
+	}{
+		{"bound", "plain", true},
+		{"bound", "bound", true},
+		{"bound", "other client", true},
+		{"bound", "uppercase", true},
+		{"bound", "custom", true},
+		{"bound", "other challenge", false},
+		{"other challenge", "bound", false},
+		{"bound", "other realm", false},
+		{"other realm", "bound", false},
+		{"other challenge", "plain", false},
+		{"other realm", "plain", false},
+		{"plain", "plain", false},
+		{"custom", "plain", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.primary+"/"+tt.split, func(t *testing.T) {
+			t.Parallel()
+			transfer := func(amount, recipient, memo string) decodedTransfer {
+				return decodedTransfer{amount: amount, recipient: recipient, hasMemo: memo != "", memo: memo}
+			}
+			actual := []decodedTransfer{
+				transfer("800000", testRecipient, memos[tt.primary]),
+				transfer("200000", splitRecipient, memos[tt.split]),
+			}
+			assert.Equal(t, tt.accepted, matchTransfers(actual, expected, testRealm, challengeID))
+		})
+	}
+}
