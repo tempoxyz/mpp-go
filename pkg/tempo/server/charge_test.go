@@ -2040,3 +2040,30 @@ func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchTransfers_AcceptsConfiguredAttributionShapedSplitMemo(t *testing.T) {
+	t.Parallel()
+
+	const (
+		challengeID    = "challenge-1"
+		splitRecipient = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+	)
+	// A server-configured split memo is static, so it can never carry this
+	// challenge's nonce even when it has the attribution layout.
+	configured := tempo.EncodeAttribution("partner.example.com", "", "partner-challenge")
+	expected := expectedTransfers(tempo.ChargeRequest{
+		Amount:    "1000000",
+		Recipient: testRecipient,
+		MethodDetails: tempo.MethodDetails{
+			Splits: []tempo.Split{{Amount: "200000", Recipient: splitRecipient, Memo: configured}},
+		},
+	})
+	actual := []decodedTransfer{
+		{amount: "800000", recipient: testRecipient, hasMemo: true, memo: tempo.EncodeAttribution(testRealm, "", challengeID)},
+		{amount: "200000", recipient: splitRecipient, hasMemo: true, memo: configured},
+	}
+	assert.True(t, matchTransfers(actual, expected, testRealm, challengeID))
+
+	actual[1].memo = tempo.EncodeAttribution("partner.example.com", "", "other-challenge")
+	assert.False(t, matchTransfers(actual, expected, testRealm, challengeID))
+}

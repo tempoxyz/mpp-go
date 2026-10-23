@@ -1108,16 +1108,6 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 	if len(actual) != len(expected) {
 		return false
 	}
-	// Every transfer is matched, so any attribution memo among them must be
-	// bound to this challenge and realm. Otherwise one split payment could
-	// carry memos for two challenges and pay both once the first replay
-	// marker expires. Plain transfers and non-attribution memos stay allowed.
-	for _, got := range actual {
-		if got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
-			(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
-			return false
-		}
-	}
 	used := make([]bool, len(actual))
 	ordered := append([]expectedTransfer(nil), expected...)
 	sortExpectedTransfers(ordered)
@@ -1144,6 +1134,15 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 					matched = true
 					break
 				}
+				continue
+			}
+			// A split without a configured memo accepts any memo except an
+			// attribution memo bound to another challenge or realm. Otherwise
+			// one split payment could carry memos for two challenges and pay
+			// both once the first replay marker expires. Memos the server
+			// configured are matched exactly above and are exempt.
+			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
+				(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
 				continue
 			}
 			if want.allowAnyMemo || !got.hasMemo {
