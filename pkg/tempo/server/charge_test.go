@@ -1982,3 +1982,201 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	}
 	assert.Equal(t, 1, successes)
 }
+
+func TestChargeFlow_TransactionCredentialRecoversConfirmedChargeAfterSubmissionError(t *testing.T) {
+	for _, feePayer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("feePayer=%t", feePayer), func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, feePayer, nil)
+			rpc := newMockRPC(request)
+			var broadcastHash string
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				tx, err := tempotx.Deserialize(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				sender, err := tempotx.VerifySignature(tx)
+				if err != nil {
+					return "", nil, err
+				}
+				hash, err := tempotx.ComputeHash(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				// The node included the transaction, but its RPC reply failed.
+				broadcastHash = hash.Hex()
+				rpc.receipts[broadcastHash] = buildReceipt(raw, request, sender)
+				return "", nil, fmt.Errorf("connection reset")
+			}
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			require.NoError(t, err)
+
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+			assert.Equal(t, broadcastHash, receipt.Reference)
+			require.Len(t, rpc.sentRawTxs, 1)
+
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.Error(t, err)
+			assert.Len(t, rpc.sentRawTxs, 1, "replay must not rebroadcast")
+		})
+	}
+}
+
+func TestChargeFlow_TransactionCredentialDoesNotRecoverRevertedChargeAfterSubmissionError(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		hash, err := tempotx.ComputeHash(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		rpc.receipts[hash.Hex()] = map[string]any{"status": "0x0", "logs": []any{}}
+		return "", nil, fmt.Errorf("connection reset")
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transaction submission failed")
+}
+
+func TestChargeFlow_TransactionCredentialRecoversPendingChargeAfterSubmissionError(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	var mined map[string]any
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := tempotx.Deserialize(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		mined = buildReceipt(raw, request, sender)
+		// The send timed out with the caller's context while the transaction
+		// was still pending in the mempool.
+		cancel()
+		return "", nil, context.Canceled
+	}
+	lookups := 0
+	rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+		lookups++
+		if lookups < 2 {
+			return &temporpc.JSONRPCResponse{}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: mined}, nil
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	assert.Equal(t, 2, lookups)
+}
+
+func TestChargeFlow_TransactionCredentialChecksOnceAfterRejectedSubmission(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	rpc.onSend = func(string) (string, map[string]any, error) {
+		return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"})
+	}
+	lookups := 0
+	rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+		lookups++
+		return &temporpc.JSONRPCResponse{}, nil
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "transaction submission failed")
+	assert.Equal(t, 1, lookups)
+}
+
+// ctxStore fails store calls whose context has ended, like a network store.
+type ctxStore struct{ *tempo.MemoryStore }
+
+func (s ctxStore) PutIfAbsent(ctx context.Context, key, value string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return s.MemoryStore.PutIfAbsent(ctx, key, value)
+}
+
+func (s ctxStore) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.MemoryStore.Delete(ctx, key)
+}
+
+func TestChargeFlow_StoreWritesAfterSubmissionErrorOutliveRequestContext(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovered=%t", recovered), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			// Fee-payer charges record the hash after recovery; others release
+			// their reservation when nothing is recovered.
+			feePayer := recovered
+			request := buildRequest(t, feePayer, nil)
+			rpc := newMockRPC(request)
+			var broadcastHash string
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				hash, err := tempotx.ComputeHash(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				broadcastHash = hash.Hex()
+				if recovered {
+					tx, err := tempotx.Deserialize(raw)
+					if err != nil {
+						return "", nil, err
+					}
+					sender, err := tempotx.VerifySignature(tx)
+					if err != nil {
+						return "", nil, err
+					}
+					rpc.receipts[broadcastHash] = buildReceipt(raw, request, sender)
+				}
+				// The request ends while the RPC reply is lost.
+				cancel()
+				return "", nil, fmt.Errorf("connection reset")
+			}
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(context.Background(), buildChallenge(t, request))
+			require.NoError(t, err)
+			store := ctxStore{tempo.NewMemoryStore()}
+			intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc, FeePayerPrivateKey: feePayerKey})
+			require.NoError(t, err)
+
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			_, stored, getErr := store.Get(context.Background(), tempo.ChargeStoreKey(broadcastHash))
+			require.NoError(t, getErr)
+			if recovered {
+				require.NoError(t, err)
+				assert.Equal(t, broadcastHash, receipt.Reference)
+				assert.True(t, stored, "recovered fee-payer charge must be recorded")
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "transaction submission failed")
+				assert.False(t, stored, "failed charge must release its reservation")
+			}
+		})
+	}
+}
