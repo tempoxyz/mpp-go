@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"mime"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ type Transport struct {
 	paymentPreferences []paymentPreference
 	acceptPayment      string
 	configErr          error
+	trustedProofRealms map[string]string
 }
 
 const defaultMaxPaymentRetries = 3
@@ -39,6 +41,18 @@ type TransportOption func(*transportConfig)
 
 type transportConfig struct {
 	paymentPreferences PaymentPreferences
+	trustedProofRealms map[string]string
+}
+
+// WithTransportTrustedProofRealm pins the Tempo proof realm for a known HTTP origin.
+// The origin must include scheme and host (and port, when non-default).
+func WithTransportTrustedProofRealm(origin, realm string) TransportOption {
+	return func(config *transportConfig) {
+		if config.trustedProofRealms == nil {
+			config.trustedProofRealms = make(map[string]string)
+		}
+		config.trustedProofRealms[origin] = realm
+	}
 }
 
 // WithTransportPaymentPreferences sets payment preferences on a standalone
@@ -71,6 +85,7 @@ func NewTransport(methods []Method, inner http.RoundTripper, opts ...TransportOp
 		paymentPreferences: preferences,
 		acceptPayment:      header,
 		configErr:          err,
+		trustedProofRealms: config.trustedProofRealms,
 	}
 }
 
@@ -100,10 +115,19 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if len(candidates) == 0 {
 			return resp, nil
 		}
-		selected := candidates[0]
-		if err := validatePaymentOrigin(request, selected.challenge); err != nil {
+		var selected challengeCandidate
+		var rejected error
+		for _, candidate := range candidates {
+			if err := t.validatePaymentOrigin(request, candidate.challenge); err != nil {
+				rejected = err
+				continue
+			}
+			selected = candidate
+			break
+		}
+		if selected.challenge == nil {
 			drainAndClose(resp.Body)
-			return nil, err
+			return nil, rejected
 		}
 
 		if isInvalidPayloadResponse(resp) {
@@ -316,7 +340,7 @@ func sameOriginURL(requestURL *url.URL, origin string) bool {
 	return requestOrigin(requestURL) == origin
 }
 
-func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
+func (t *Transport) validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
 	origin := paymentOrigin(req.Context())
 	if origin == "" {
 		// Standalone Transport: no trusted origin was pinned into the context
@@ -337,8 +361,24 @@ func validatePaymentOrigin(req *http.Request, challenge *mpp.Challenge) error {
 	// A zero-amount Tempo proof can authenticate the payer at the realm named
 	// in the challenge. The HTTP server that sent it must own that realm.
 	if challenge.Method == "tempo" && challenge.Intent == "charge" &&
-		challenge.Request["amount"] == "0" && !strings.EqualFold(challenge.Realm, req.URL.Hostname()) {
+		isZeroTempoAmount(challenge.Request["amount"]) &&
+		!strings.EqualFold(challenge.Realm, req.URL.Hostname()) &&
+		!strings.EqualFold(challenge.Realm, t.trustedProofRealms[requestOrigin(req.URL)]) {
 		return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q", challenge.Realm, requestOrigin(req.URL))
 	}
 	return nil
+}
+
+func isZeroTempoAmount(value any) bool {
+	amount := strings.TrimSpace(fmt.Sprint(value))
+	if amount == "" {
+		return false
+	}
+	for _, digit := range amount {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	parsed, ok := new(big.Int).SetString(amount, 10)
+	return ok && parsed.Sign() == 0
 }

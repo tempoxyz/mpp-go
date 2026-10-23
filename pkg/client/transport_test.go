@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -593,6 +594,71 @@ func TestTransport_RoundTrip_RejectsRelayedTempoProof(t *testing.T) {
 	_, err := tr.RoundTrip(req)
 	require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
 	assert.Equal(t, 0, method.calls)
+}
+
+func TestTransport_RoundTrip_RejectsAlternateZeroAmounts(t *testing.T) {
+	for _, amount := range []any{"00", " 0 ", "\t00\n", 0} {
+		t.Run(fmt.Sprint(amount), func(t *testing.T) {
+			var challenge *mpp.Challenge
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+				w.WriteHeader(http.StatusPaymentRequired)
+			}))
+			defer srv.Close()
+			challenge = mpp.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{"amount": amount})
+			method := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
+			req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+			_, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+			require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
+			assert.Zero(t, method.calls)
+		})
+	}
+}
+
+func TestTransport_RoundTrip_SkipsRelayedProofWhenAnotherChallengeIsValid(t *testing.T) {
+	var relayed, valid *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Add("WWW-Authenticate", relayed.ToAuthenticate(relayed.Realm))
+		w.Header().Add("WWW-Authenticate", valid.ToAuthenticate(valid.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	relayed = mpp.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{"amount": "0"})
+	valid = mpp.NewChallenge("secret", "other.example", "stripe", "payment", map[string]any{"amount": "100"})
+	proof := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
+	stripe := &mockMethod{name: "stripe", cred: newTestCredential("stripe")}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := NewTransport([]Method{proof, stripe}, nil).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Zero(t, proof.calls)
+	assert.Equal(t, 1, stripe.calls)
+}
+
+func TestTransport_RoundTrip_AllowsPinnedNonHostnameProofRealm(t *testing.T) {
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	challenge = mpp.NewChallenge("secret", "MPP Payment", "tempo", "charge", map[string]any{"amount": "0"})
+	method := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := NewTransport([]Method{method}, nil, WithTransportTrustedProofRealm(srv.URL, "MPP Payment")).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
 }
 
 func TestTransport_RoundTrip_StandaloneRefusesRedirectedPayment(t *testing.T) {

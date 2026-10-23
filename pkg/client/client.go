@@ -45,6 +45,7 @@ type Client struct {
 	methods            []Method
 	httpClient         *http.Client
 	paymentPreferences PaymentPreferences
+	trustedProofRealms map[string]string
 }
 
 // Option configures the Client.
@@ -63,6 +64,17 @@ func WithHTTPClient(c *http.Client) Option {
 func WithPaymentPreferences(preferences PaymentPreferences) Option {
 	return func(c *Client) {
 		c.paymentPreferences = clonePaymentPreferences(preferences)
+	}
+}
+
+// WithTrustedTempoProofRealm pins the proof realm of a server at a known origin.
+// Use this when the server's configured realm differs from its public hostname.
+func WithTrustedTempoProofRealm(origin, realm string) Option {
+	return func(c *Client) {
+		if c.trustedProofRealms == nil {
+			c.trustedProofRealms = make(map[string]string)
+		}
+		c.trustedProofRealms[origin] = realm
 	}
 }
 
@@ -89,7 +101,11 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	origin := requestOrigin(req.URL)
 	req = req.WithContext(withPaymentOrigin(req.Context(), origin))
 
-	transport := NewTransport(c.methods, inner, WithTransportPaymentPreferences(c.paymentPreferences))
+	options := []TransportOption{WithTransportPaymentPreferences(c.paymentPreferences)}
+	for trustedOrigin, realm := range c.trustedProofRealms {
+		options = append(options, WithTransportTrustedProofRealm(trustedOrigin, realm))
+	}
+	transport := NewTransport(c.methods, inner, options...)
 
 	// Use a copy of the http.Client with our payment-aware transport.
 	hc := *c.httpClient
