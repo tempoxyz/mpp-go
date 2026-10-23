@@ -1982,3 +1982,53 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	}
 	assert.Equal(t, 1, successes)
 }
+
+func TestChargeFlow_TransactionCredentialBroadcastsCanonicalRecoveryID(t *testing.T) {
+	for _, electrumFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("electrumFirst=%v", electrumFirst), func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				tx, err := tempotx.Deserialize(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				sender, err := tempotx.VerifySignature(tx)
+				if err != nil {
+					return "", nil, err
+				}
+				hash, err := tempotx.ComputeHash(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				return hash.Hex(), buildReceipt(raw, request, sender), nil
+			}
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+
+			rawForm := credential.Payload["signature"].(string)
+			recoveryID := rawForm[len(rawForm)-2:]
+			require.Contains(t, []string{"00", "01"}, recoveryID)
+			canonical := rawForm[:len(rawForm)-2] + map[string]string{"00": "1b", "01": "1c"}[recoveryID]
+			forms := []string{rawForm, canonical}
+			if electrumFirst {
+				forms[0], forms[1] = forms[1], forms[0]
+			}
+
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			require.NoError(t, err)
+
+			credential.Payload["signature"] = forms[0]
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+			require.Equal(t, []string{canonical}, rpc.sentRawTxs)
+			require.Equal(t, crypto.Keccak256Hash(common.FromHex(canonical)).Hex(), receipt.Reference)
+
+			credential.Payload["signature"] = forms[1]
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.ErrorContains(t, err, "transaction hash already used")
+			require.Len(t, rpc.sentRawTxs, 1)
+		})
+	}
+}
