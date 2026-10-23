@@ -239,10 +239,15 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			}
 			return challengeResultError(echoedChallenge, pe)
 		}
+		// An intent may reject a credential with the bare ErrVerification
+		// sentinel: keep that a 402 verification failure with a fixed detail.
+		if errors.Is(err, mpp.ErrVerification) {
+			return challengeResultError(echoedChallenge, mpp.ErrVerificationFailed(mpp.ErrVerification.Error()).WithCause(err))
+		}
 		// Errors that are not payment errors are unexpected processing failures:
 		// report them without their internal details instead of as a rejected
-		// credential.
-		return nil, mpp.ErrInternalPayment()
+		// credential. The cause stays reachable through errors.Unwrap.
+		return nil, mpp.ErrInternalPayment().WithCause(err)
 	}
 
 	// 9. Return result.
