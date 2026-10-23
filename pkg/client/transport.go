@@ -362,7 +362,8 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, challenge *mpp.Chal
 	// in the challenge. The HTTP server that sent it must own that realm.
 	if challenge.Method == "tempo" && challenge.Intent == "charge" &&
 		isZeroTempoAmount(challenge.Request["amount"]) &&
-		!strings.EqualFold(challenge.Realm, req.URL.Hostname()) &&
+		!(req.URL.Scheme == "https" && (req.URL.Port() == "" || req.URL.Port() == "443") &&
+			strings.EqualFold(challenge.Realm, req.URL.Hostname())) &&
 		challenge.Realm != t.trustedProofRealms[requestOrigin(req.URL)] {
 		return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q", challenge.Realm, requestOrigin(req.URL))
 	}

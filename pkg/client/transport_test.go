@@ -596,6 +596,38 @@ func TestTransport_RoundTrip_RejectsRelayedTempoProof(t *testing.T) {
 	assert.Equal(t, 0, method.calls)
 }
 
+func TestTransport_ZeroProofRequiresHTTPSDefaultPortOrOriginPin(t *testing.T) {
+	for _, tc := range []struct {
+		name, url, trustedOrigin string
+		allowed                  bool
+	}{
+		{"HTTPS default", "https://api.example/paid", "", true},
+		{"HTTPS port 443", "https://api.example:443/paid", "", true},
+		{"HTTP", "http://api.example/paid", "", false},
+		{"other HTTPS port", "https://api.example:8443/paid", "", false},
+		{"HTTP pinned", "http://api.example/paid", "http://api.example", true},
+		{"other HTTPS port pinned", "https://api.example:8443/paid", "https://api.example:8443", true},
+		{"different port pinned", "https://api.example:8443/paid", "https://api.example:9443", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := []TransportOption{}
+			if tc.trustedOrigin != "" {
+				options = append(options, WithTransportTrustedProofRealm(tc.trustedOrigin, "api.example"))
+			}
+			transport := NewTransport(nil, nil, options...)
+			request, err := http.NewRequest(http.MethodGet, tc.url, nil)
+			require.NoError(t, err)
+			challenge := mpp.NewChallenge("secret", "api.example", "tempo", "charge", map[string]any{"amount": "0"})
+			err = transport.validatePaymentOrigin(request, challenge)
+			if tc.allowed {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "refusing to sign Tempo proof")
+			}
+		})
+	}
+}
+
 func TestTransport_RoundTrip_RejectsAlternateZeroAmounts(t *testing.T) {
 	for _, amount := range []any{"00", " 0 ", "\t00\n", 0} {
 		t.Run(fmt.Sprint(amount), func(t *testing.T) {
