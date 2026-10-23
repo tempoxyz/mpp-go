@@ -1521,9 +1521,10 @@ func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {
 		return FeePayerPolicy{}, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
 	}
 	return FeePayerPolicy{
-		MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
-		MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
-		MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
+		MaxFeePerGas:           new(big.Int).Set(policy.MaxFeePerGas),
+		MaxPriorityFeePerGas:   new(big.Int).Set(policy.MaxPriorityFeePerGas),
+		MaxTotalFee:            new(big.Int).Set(policy.MaxTotalFee),
+		RejectKeyAuthorization: policy.RejectKeyAuthorization,
 	}, nil
 }
 

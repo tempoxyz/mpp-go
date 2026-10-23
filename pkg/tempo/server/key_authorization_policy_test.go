@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
@@ -19,15 +20,21 @@ func TestFeePayerPolicyKeyAuthorization(t *testing.T) {
 
 	require.NoError(t, validateFeePayerTransaction(tx, "", defaultFeePayerPolicy()), "allowed by default")
 
-	policies, err := normalizeFeePayerPolicies(map[string]FeePayerPolicy{
-		tempotx.AlphaUSDAddress.Hex(): func() FeePayerPolicy {
-			policy := defaultFeePayerPolicy()
-			policy.RejectKeyAuthorization = true
-			return policy
-		}(),
+	// Resolve the policy the way the sponsored Verify paths do, so the flag
+	// must survive IntentConfig normalization and per-currency lookup.
+	intent, err := NewIntent(IntentConfig{
+		Store: tempo.NewMemoryStore(),
+		FeePayerPolicies: map[string]FeePayerPolicy{
+			tempotx.AlphaUSDAddress.Hex(): func() FeePayerPolicy {
+				policy := defaultFeePayerPolicy()
+				policy.RejectKeyAuthorization = true
+				return policy
+			}(),
+		},
 	})
 	require.NoError(t, err)
-	rejecting := policies[tempotx.AlphaUSDAddress.Hex()]
+	rejecting, err := intent.feePayerPolicyFor(tempotx.AlphaUSDAddress.Hex())
+	require.NoError(t, err)
 	require.True(t, rejecting.RejectKeyAuthorization)
 	require.ErrorContains(t, validateFeePayerTransaction(tx, "", rejecting), "keyAuthorization is not allowed")
 
