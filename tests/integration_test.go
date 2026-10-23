@@ -983,7 +983,7 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		Recipient: integrationRecipient,
 		ChainID:   int64(chainID),
 	})
-	proof := newTestServer(t, proofMethod, integrationRealm, integrationSecretKey)
+	proof := newTestServer(t, proofMethod, "127.0.0.1", integrationSecretKey)
 	splits := newTestServer(t, splitsMethod, integrationRealm, integrationSecretKey)
 
 	mux := http.NewServeMux()
@@ -1040,7 +1040,7 @@ func paidHandlerWithAmount(t *testing.T, payment *mppserver.Mpp, amount string) 
 		}
 
 		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(result.Challenge.Realm))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
