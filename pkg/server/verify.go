@@ -207,7 +207,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 				mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
 			)
 		}
-		if time.Now().UTC().After(expiresTime) {
+		if challengeExpired(expiresTime, time.Now()) {
 			return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 		}
 	}
@@ -239,7 +239,15 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			}
 			return challengeResultError(echoedChallenge, pe)
 		}
-		return challengeResultError(echoedChallenge, mpp.ErrVerificationFailed(err.Error()))
+		// An intent may reject a credential with the bare ErrVerification
+		// sentinel: keep that a 402 verification failure with a fixed detail.
+		if errors.Is(err, mpp.ErrVerification) {
+			return challengeResultError(echoedChallenge, mpp.ErrVerificationFailed(mpp.ErrVerification.Error()).WithCause(err))
+		}
+		// Errors that are not payment errors are unexpected processing failures:
+		// report them without their internal details instead of as a rejected
+		// credential. The cause stays reachable through errors.Unwrap.
+		return nil, mpp.ErrInternalPayment().WithCause(err)
 	}
 
 	// 9. Return result.

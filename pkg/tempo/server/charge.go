@@ -3,6 +3,7 @@ package chargeserver
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
@@ -66,6 +68,9 @@ type FeePayerPolicy struct {
 	MaxFeePerGas         *big.Int
 	MaxPriorityFeePerGas *big.Int
 	MaxTotalFee          *big.Int
+	// RejectKeyAuthorization rejects sponsored transactions that install a new
+	// access key (carry a keyAuthorization). The default allows them.
+	RejectKeyAuthorization bool
 }
 
 // IntentConfig configures Tempo charge verification.
@@ -430,8 +435,18 @@ func (i *Intent) validateTransaction(
 	if err != nil {
 		return mpp.ErrInvalidPayload("transaction signature is invalid")
 	}
-	if validated.source != nil && !strings.EqualFold(validated.source.address, sender.Hex()) {
-		return mpp.ErrInvalidPayload("credential source does not match transaction signer")
+	if validated.source != nil {
+		// A challenge without a chainId is bound to the chain the RPC serves.
+		chainID, err := resolveChallengeChainID(ctx, validated.rpc, request)
+		if err != nil {
+			return err
+		}
+		if validated.source.chainID != chainID {
+			return mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
+		}
+		if !strings.EqualFold(validated.source.address, sender.Hex()) {
+			return mpp.ErrInvalidPayload("credential source does not match transaction signer")
+		}
 	}
 	tx.From = sender
 
@@ -475,11 +490,41 @@ func (i *Intent) validateTransaction(
 		if !feePayerForm && tx.FeeToken != (common.Address{}) {
 			return mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
 		}
-	} else if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
-		return err
+	} else {
+		// Answer replays before the state-dependent simulation: once the first
+		// payment has moved funds, a replayed simulation can fail and would
+		// otherwise send a fresh 402 challenge. Broadcast still claims the hash
+		// atomically.
+		serialized, err := tempotx.Serialize(tx, nil)
+		if err != nil {
+			return mpp.ErrVerificationFailed("failed to serialize transaction")
+		}
+		hash, err := tempotx.ComputeHash(serialized)
+		if err != nil {
+			return mpp.ErrVerificationFailed("failed to compute transaction hash")
+		}
+		if err := i.rejectUsedCredential(ctx, tempo.ChargeStoreKey(hash.Hex()), "transaction hash already used"); err != nil {
+			return err
+		}
+		if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
+			return err
+		}
 	}
 	validated.sender = sender
 	validated.tx = tx
+	return nil
+}
+
+// rejectUsedCredential reads replay state without claiming it, so replays get
+// the terminal 403 before any check that depends on chain state.
+func (i *Intent) rejectUsedCredential(ctx context.Context, key, reason string) error {
+	_, exists, err := i.store.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return mpp.ErrCredentialReplayed(reason)
+	}
 	return nil
 }
 
@@ -491,14 +536,20 @@ func (i *Intent) broadcastCredential(
 	switch validated.payload.Type {
 	case tempo.CredentialTypeHash:
 		hash := validated.payload.Hash
+		// Look up the funding currency before consuming the hash, so a slow or
+		// failed lookup never leaves the hash used without a delivered receipt.
+		options := []mpp.ReceiptOption{mpp.WithExternalID(validated.request.ExternalID)}
+		if hashPaymentFundedByCurrency(ctx, credential, validated) {
+			options = append(options, mpp.WithFundingCurrency(validated.request.Currency))
+		}
 		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
-		return mpp.Success(tempo.MethodName, hash, mpp.WithExternalID(validated.request.ExternalID)), nil
+		return mpp.Success(tempo.MethodName, hash, options...), nil
 	case tempo.CredentialTypeProof:
 		challengeID := credential.Challenge.ID
 		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(challengeID), challengeID)
@@ -506,7 +557,7 @@ func (i *Intent) broadcastCredential(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("proof credential already used")
+			return nil, mpp.ErrCredentialReplayed("proof credential already used")
 		}
 		return mpp.Success(tempo.MethodName, challengeID, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeTransaction:
@@ -537,26 +588,30 @@ func (i *Intent) broadcastTransaction(
 	}()
 
 	if request.MethodDetails.FeePayer {
-		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
-			return nil, err
-		}
 		// Preserve reservations from earlier versions while their credentials remain valid.
-		if _, exists, err := i.store.Get(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)); err != nil {
+		if err := i.rejectUsedCredential(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID), "fee payer challenge already used"); err != nil {
 			return nil, err
-		} else if exists {
-			return nil, mpp.ErrVerificationFailed("fee payer challenge already used")
 		}
 		clientTxHash, err := sponsoredTransactionHash(tx, sender)
 		if err != nil {
 			return nil, mpp.ErrMalformedCredential("failed to hash fee payer transaction")
 		}
 		sponsoredClaimKey = tempo.ChargeSponsoredTransactionStoreKey(clientTxHash)
+		// Answer replays before state-dependent simulations: once the first
+		// payment has moved funds, a replayed simulation can fail and would
+		// otherwise send a fresh 402 challenge. The claim below stays atomic.
+		if err := i.rejectUsedCredential(ctx, sponsoredClaimKey, "sponsored transaction already used"); err != nil {
+			return nil, err
+		}
+		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
+			return nil, err
+		}
 		accepted, err := i.store.PutIfAbsent(ctx, sponsoredClaimKey, clientTxHash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("sponsored transaction already used")
+			return nil, mpp.ErrCredentialReplayed("sponsored transaction already used")
 		}
 		releaseSponsoredClaim = true
 		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
@@ -660,42 +715,125 @@ func (i *Intent) broadcastTransaction(
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
 	}
 
 	if request.MethodDetails.FeePayer {
 		releaseSponsoredClaim = false
 	}
+	var receiptMap map[string]any
 	txHash, err := rpc.SendRawTransaction(ctx, serialized)
+	// Store writes after the send must not depend on the request context: the
+	// receipt lookup below may outlive it.
+	storeCtx := context.WithoutCancel(ctx)
 	if err != nil {
-		if reservedHash != "" {
-			_ = i.store.Delete(ctx, tempo.ChargeStoreKey(reservedHash))
+		// The node may have included the transaction before its RPC reply failed.
+		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized, err)
+		if !ok {
+			if reservedHash != "" {
+				_ = i.store.Delete(storeCtx, tempo.ChargeStoreKey(reservedHash))
+			}
+			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
-		return nil, mpp.ErrVerificationFailed("transaction submission failed")
-	}
-
-	receiptMap, err := fetchReceipt(ctx, rpc, txHash)
-	if err != nil {
-		return nil, err
+		txHash, receiptMap = recoveredHash, recoveredReceipt
+	} else {
+		receiptMap, err = fetchReceipt(ctx, rpc, txHash)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !receiptMatches(receiptMap, credential, request, sender.Hex()) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	if request.MethodDetails.FeePayer {
-		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(txHash), txHash)
+		accepted, err := i.store.PutIfAbsent(storeCtx, tempo.ChargeStoreKey(txHash), txHash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
-			return nil, mpp.ErrVerificationFailed("transaction hash already used")
+			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
 	}
+	// transactionMatches accepted only the expected transfers of the charge
+	// currency, so that currency funded the payment.
 	return mpp.Success(
 		tempo.MethodName,
 		txHash,
 		mpp.WithExternalID(request.ExternalID),
+		mpp.WithFundingCurrency(request.Currency),
 	), nil
+}
+
+// hashPaymentFundedByCurrency reports whether a verified push payment was sent
+// by the credential's payer and consists only of the expected transfers of the
+// charge currency. Only then does the receipt report the funding currency; a
+// lookup failure or any other call pattern leaves it unset without failing the
+// already verified payment.
+func hashPaymentFundedByCurrency(ctx context.Context, credential *mpp.Credential, validated *validatedChargeCredential) bool {
+	response, err := validated.rpc.SendRequest(ctx, "eth_getTransactionByHash", validated.payload.Hash)
+	if err != nil || response.CheckError() != nil {
+		return false
+	}
+	transaction, ok := response.Result.(map[string]any)
+	if !ok || !strings.EqualFold(asString(transaction["from"]), validated.sender.Hex()) {
+		return false
+	}
+	var calls []any
+	if rawCalls, ok := transaction["calls"].([]any); ok {
+		calls = rawCalls
+	} else if to := asString(transaction["to"]); transaction["to"] != nil && to != "" {
+		calls = []any{map[string]any{"to": to, "input": transaction["input"], "value": transaction["value"]}}
+	}
+	request := validated.request
+	expected := expectedTransfers(request)
+	if len(calls) != len(expected) {
+		return false
+	}
+	actual := make([]decodedTransfer, 0, len(calls))
+	for _, rawCall := range calls {
+		call, ok := rawCall.(map[string]any)
+		if !ok || !strings.EqualFold(asString(call["to"]), request.Currency) {
+			return false
+		}
+		if value, ok := call["value"].(string); ok && value != "" {
+			if amount, err := tempo.ParseHexBigInt(value); err != nil || amount.Sign() != 0 {
+				return false
+			}
+		}
+		data, ok := call["data"].(string)
+		if !ok {
+			data, _ = call["input"].(string)
+		}
+		raw, err := hexutil.Decode(data)
+		if err != nil {
+			return false
+		}
+		decoded, ok := decodeCallTransfer(raw)
+		if !ok {
+			return false
+		}
+		actual = append(actual, decoded)
+	}
+	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
+}
+
+func validateChallengeExpiry(credential *mpp.Credential) error {
+	if credential == nil {
+		return mpp.ErrMalformedCredential("credential is required")
+	}
+	expiresValue := credential.Challenge.Expires
+	if expiresValue == "" {
+		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "missing required expires")
+	}
+	expires, err := parseExpires(expiresValue)
+	if err != nil {
+		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "invalid expires format")
+	}
+	if !time.Now().UTC().Before(expires) {
+		return mpp.ErrPaymentExpired(expiresValue)
+	}
+	return nil
 }
 
 // keychainV1SignatureType is the legacy Keychain V1 signature type byte.
@@ -751,24 +889,6 @@ func canonicalBroadcastTransaction(serialized string) (string, error) {
 		signature[len(signature)-1] = recoveryID + 27
 	}
 	return hexutil.Encode(raw), nil
-}
-
-func validateChallengeExpiry(credential *mpp.Credential) error {
-	if credential == nil {
-		return mpp.ErrMalformedCredential("credential is required")
-	}
-	expiresValue := credential.Challenge.Expires
-	if expiresValue == "" {
-		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "missing required expires")
-	}
-	expires, err := parseExpires(expiresValue)
-	if err != nil {
-		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "invalid expires format")
-	}
-	if !time.Now().UTC().Before(expires) {
-		return mpp.ErrPaymentExpired(expiresValue)
-	}
-	return nil
 }
 
 func withReplayReleaseError(settlementErr, releaseErr error) error {
@@ -948,6 +1068,47 @@ func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, chal
 		actual = append(actual, decoded)
 	}
 	return matchTransfers(actual, expected, realm, challengeID)
+}
+
+// lookupConfirmedReceipt checks once, without rebroadcasting, whether a
+// transaction whose submission returned an error was confirmed anyway.
+func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized string, sendErr error) (string, map[string]any, bool) {
+	hash, err := tempotx.ComputeHash(serialized)
+	if err != nil {
+		return "", nil, false
+	}
+	// eth_sendRawTransaction is async, so a transaction the node accepted is
+	// usually still pending when the reply fails: poll like fetchReceipt. A
+	// JSON-RPC error means the node answered and rejected it, so check once.
+	attempts := receiptRetryAttempts
+	var rpcErr *temporpc.JSONRPCError
+	if errors.As(sendErr, &rpcErr) {
+		attempts = 1
+	}
+	// The send may have failed because ctx ended; the lookup still needs to run.
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(attempts)*receiptRetryDelay)
+	defer cancel()
+	for attempt := 0; attempt < attempts; attempt++ {
+		response, err := rpc.SendRequest(lookupCtx, "eth_getTransactionReceipt", hash.Hex())
+		if err == nil && response.CheckError() == nil {
+			if receipt, ok := response.Result.(map[string]any); ok && len(receipt) > 0 {
+				if asString(receipt["status"]) != "0x1" {
+					return "", nil, false
+				}
+				return hash.Hex(), receipt, true
+			}
+		}
+		if attempt < attempts-1 {
+			timer := time.NewTimer(receiptRetryDelay)
+			select {
+			case <-lookupCtx.Done():
+				timer.Stop()
+				return "", nil, false
+			case <-timer.C:
+			}
+		}
+	}
+	return "", nil, false
 }
 
 // fetchReceipt polls until a Tempo receipt appears because tempo-go does not
@@ -1196,6 +1357,15 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 					matched = true
 					break
 				}
+				continue
+			}
+			// A split without a configured memo accepts any memo except an
+			// attribution memo bound to another challenge or realm. Otherwise
+			// one split payment could carry memos for two challenges and pay
+			// both once the first replay marker expires. Memos the server
+			// configured are matched exactly above and are exempt.
+			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
+				(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
 				continue
 			}
 			if want.allowAnyMemo || !got.hasMemo {
@@ -1462,9 +1632,10 @@ func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string
 			return nil, fmt.Errorf("tempo server: invalid max total fee for %s", currency)
 		}
 		policies[common.HexToAddress(currency).Hex()] = FeePayerPolicy{
-			MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
-			MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
-			MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
+			MaxFeePerGas:           new(big.Int).Set(policy.MaxFeePerGas),
+			MaxPriorityFeePerGas:   new(big.Int).Set(policy.MaxPriorityFeePerGas),
+			MaxTotalFee:            new(big.Int).Set(policy.MaxTotalFee),
+			RejectKeyAuthorization: policy.RejectKeyAuthorization,
 		}
 	}
 	return policies, nil
@@ -1579,13 +1750,17 @@ func (i *Intent) feePayerPolicyFor(currency string) (FeePayerPolicy, error) {
 		return FeePayerPolicy{}, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
 	}
 	return FeePayerPolicy{
-		MaxFeePerGas:         new(big.Int).Set(policy.MaxFeePerGas),
-		MaxPriorityFeePerGas: new(big.Int).Set(policy.MaxPriorityFeePerGas),
-		MaxTotalFee:          new(big.Int).Set(policy.MaxTotalFee),
+		MaxFeePerGas:           new(big.Int).Set(policy.MaxFeePerGas),
+		MaxPriorityFeePerGas:   new(big.Int).Set(policy.MaxPriorityFeePerGas),
+		MaxTotalFee:            new(big.Int).Set(policy.MaxTotalFee),
+		RejectKeyAuthorization: policy.RejectKeyAuthorization,
 	}, nil
 }
 
 func validateFeePayerTransaction(tx *tempotx.Tx, challengeExpires string, policy FeePayerPolicy) error {
+	if tx.KeyAuthorization != nil && policy.RejectKeyAuthorization {
+		return mpp.ErrInvalidPayload("fee payer transaction keyAuthorization is not allowed")
+	}
 	if tx.Gas == 0 {
 		return mpp.ErrInvalidPayload("fee payer transaction must declare gas")
 	}
