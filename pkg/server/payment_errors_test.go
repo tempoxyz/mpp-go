@@ -44,6 +44,7 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request", nil},
 					{"internal error", mpp.ErrInternalPayment(), 500, "https://paymentauth.org/problems/internal-payment-error", errors.New("rpc 10.0.0.7: connection refused")},
 					{"verification sentinel", mpp.ErrVerificationFailed("payment verification failed"), 402, "https://paymentauth.org/problems/verification-failed", mpp.ErrVerification},
+					{"credential replayed", mpp.ErrCredentialReplayed("transaction hash already used"), 403, "https://paymentauth.org/problems/verification-failed", nil},
 				} {
 					t.Run(fmt.Sprintf("%s/split=%t/wrapped=%t/%s", framework, split, wrapped, tc.name), func(t *testing.T) {
 						var intentErr error = tc.problem
