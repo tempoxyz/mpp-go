@@ -101,6 +101,11 @@ func (w *paymentReceiptWriter) WriteString(body string) (int, error) {
 	return w.ResponseWriter.WriteString(body)
 }
 
+func (w *paymentReceiptWriter) Flush() {
+	w.WriteHeaderNow()
+	w.ResponseWriter.Flush()
+}
+
 func (w *paymentReceiptWriter) prepare(status int) {
 	if status >= http.StatusBadRequest {
 		w.Header().Del(mpp.HeaderPaymentReceipt)

@@ -112,6 +112,43 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	assert.Empty(t, failedResponse.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
+func TestChargeMiddlewareFlushKeepsPaymentReceipt(t *testing.T) {
+	t.Parallel()
+
+	ginfw.SetMode(ginfw.TestMode)
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	router := ginfw.New()
+	router.GET("/stream", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *ginfw.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Writer.Flush()
+		_, _ = c.Writer.WriteString("data: ok\n\n")
+	})
+
+	challengeResponse := httptest.NewRecorder()
+	router.ServeHTTP(challengeResponse, httptest.NewRequest(http.MethodGet, "/stream", nil))
+	require.Equal(t, http.StatusPaymentRequired, challengeResponse.Code)
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+
+	credential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	}
+	paidRequest := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidResponse := httptest.NewRecorder()
+	router.ServeHTTP(paidResponse, paidRequest)
+
+	result := paidResponse.Result()
+	defer result.Body.Close()
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	receipt, err := mpp.ParsePaymentReceipt(result.Header.Get(mpp.HeaderPaymentReceipt))
+	require.NoError(t, err)
+	assert.Equal(t, "0xreceipt", receipt.Reference)
+	assert.Equal(t, "private", result.Header.Get("Cache-Control"))
+}
+
 func TestChargeMiddleware_RequiresAuthUsesPaymentAuthorization(t *testing.T) {
 	t.Parallel()
 
