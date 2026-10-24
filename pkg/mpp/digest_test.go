@@ -1,8 +1,10 @@
 package mpp
 
 import (
+	"bytes"
 	"encoding/json"
 	"github.com/stretchr/testify/assert"
+	"net/http"
 	"testing"
 )
 
@@ -129,4 +131,17 @@ func shaB64(t *testing.T, s string) string {
 	t.Helper()
 	digest := BodyDigest.Compute(s)
 	return digest[len("sha-256="):]
+}
+
+func TestBodyDigest_Compute_NamedRawTypes(t *testing.T) {
+	type rawString string
+	type rawBytes []byte
+	assert.Equal(t, BodyDigest.Compute("hello"), BodyDigest.Compute(rawString("hello")))
+	assert.Equal(t, BodyDigest.Compute("hello"), BodyDigest.Compute(rawBytes("hello")))
+}
+
+func TestBodyDigest_Compute_ReaderPanics(t *testing.T) {
+	// A reader marshals to {}, which would bind every body to one digest.
+	assert.Panics(t, func() { BodyDigest.Compute(bytes.NewBufferString("a")) })
+	assert.Panics(t, func() { BodyDigest.Compute(http.NoBody) })
 }
