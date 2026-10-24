@@ -499,6 +499,12 @@ func (i *Intent) validateTransaction(
 		if err != nil {
 			return mpp.ErrVerificationFailed("failed to serialize transaction")
 		}
+		// Hash the canonical envelope that broadcast claims, so the replay
+		// key matches.
+		serialized, err = canonicalBroadcastTransaction(serialized)
+		if err != nil {
+			return mpp.ErrVerificationFailed("failed to serialize transaction")
+		}
 		hash, err := tempotx.ComputeHash(serialized)
 		if err != nil {
 			return mpp.ErrVerificationFailed("failed to compute transaction hash")
