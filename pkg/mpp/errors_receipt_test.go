@@ -89,6 +89,13 @@ func TestPaymentErrorConstructors(t *testing.T) {
 			status: http.StatusBadRequest,
 			detail: `payment method "stripe" is not supported`,
 		},
+		{
+			name:   "internal payment error",
+			err:    ErrInternalPayment(),
+			want:   ErrorTypeInternalPayment,
+			status: http.StatusInternalServerError,
+			detail: "An internal payment error occurred.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +135,7 @@ func TestProblemTypeURIsUseCanonicalBase(t *testing.T) {
 		{got: ErrorTypeBadRequest, want: "https://paymentauth.org/problems/bad-request"},
 		{got: ErrorTypePaymentInsufficient, want: "https://paymentauth.org/problems/payment-insufficient"},
 		{got: ErrorTypeMethodUnsupported, want: "https://paymentauth.org/problems/method-unsupported"},
+		{got: ErrorTypeInternalPayment, want: "https://paymentauth.org/problems/internal-payment-error"},
 	}
 
 	for _, tt := range tests {
@@ -246,6 +254,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		"ref-123",
 		WithExternalID("ext-123"),
 		WithSubscriptionID("sub-123"),
+		WithFundingCurrency("0x20c0000000000000000000000000000000000001"),
 		WithExtra(map[string]any{"settled": true}),
 	)
 	if !assert.Equalf(t, "success", receipt.Status,
@@ -281,6 +290,10 @@ func TestReceiptRoundTrip(t *testing.T) {
 	}
 	if !assert.Equalf(t, receipt.SubscriptionID, parsed.SubscriptionID,
 		"parsed.SubscriptionID = %q, want %q", parsed.SubscriptionID, receipt.SubscriptionID) {
+		return
+	}
+	if !assert.Equal(t, receipt.FundingCurrency, parsed.FundingCurrency) ||
+		!assert.NotContains(t, parsed.Extensions, "fundingCurrency") {
 		return
 	}
 	if !assert.Equalf(t, true, parsed.Extra["settled"],

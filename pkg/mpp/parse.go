@@ -657,6 +657,11 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 		subscriptionID = anyStr(v)
 	}
 
+	var fundingCurrency string
+	if v, ok := data["fundingCurrency"]; ok {
+		fundingCurrency = anyStr(v)
+	}
+
 	var extra map[string]any
 	if v, ok := data["extra"]; ok {
 		if m, ok := v.(map[string]any); ok {
@@ -680,14 +685,15 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 	}
 
 	return &Receipt{
-		Status:         status,
-		Timestamp:      ts,
-		Reference:      reference,
-		Method:         method,
-		ExternalID:     externalID,
-		SubscriptionID: subscriptionID,
-		Extra:          extra,
-		Extensions:     extensions,
+		Status:          status,
+		Timestamp:       ts,
+		Reference:       reference,
+		Method:          method,
+		ExternalID:      externalID,
+		SubscriptionID:  subscriptionID,
+		FundingCurrency: fundingCurrency,
+		Extra:           extra,
+		Extensions:      extensions,
 	}, nil
 }
 
@@ -695,13 +701,14 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 // maps onto named Receipt fields. Any other top-level key is a method-defined
 // extension and is preserved via Receipt.Extensions.
 var receiptBaseFields = map[string]struct{}{
-	"status":         {},
-	"timestamp":      {},
-	"reference":      {},
-	"method":         {},
-	"externalId":     {},
-	"subscriptionId": {},
-	"extra":          {},
+	"status":          {},
+	"timestamp":       {},
+	"reference":       {},
+	"method":          {},
+	"externalId":      {},
+	"subscriptionId":  {},
+	"fundingCurrency": {},
+	"extra":           {},
 }
 
 // FormatPaymentReceipt formats a Receipt as a Payment-Receipt header value.
@@ -721,6 +728,9 @@ func FormatPaymentReceipt(r *Receipt) string {
 	}
 	if r.SubscriptionID != "" {
 		data["subscriptionId"] = r.SubscriptionID
+	}
+	if r.FundingCurrency != "" {
+		data["fundingCurrency"] = r.FundingCurrency
 	}
 	if len(r.Extra) > 0 {
 		data["extra"] = r.Extra
