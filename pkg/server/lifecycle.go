@@ -86,10 +86,17 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 	if err != nil {
 		return nil, nil, mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format")
 	}
-	if time.Now().UTC().After(expires) {
+	if challengeExpired(expires, time.Now()) {
 		return nil, nil, mpp.ErrPaymentExpired(echoed.Expires)
 	}
 	return intent, echoedRequest, nil
+}
+
+// challengeExpired reports whether a challenge has expired at now. A challenge
+// is no longer valid at its exact expiry instant, matching the Tempo charge
+// verifier and mppx.
+func challengeExpired(expires, now time.Time) bool {
+	return !now.Before(expires)
 }
 
 // parseChallengeExpiry accepts the protocol's RFC 3339 timestamp format,
