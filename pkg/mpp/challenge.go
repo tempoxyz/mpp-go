@@ -163,7 +163,7 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 		Digest:      c.Digest,
 		Expires:     c.Expires,
 		Description: c.Description,
-		Opaque:      opaqueForJSON(c.Opaque),
+		Opaque:      c.opaqueJSON(),
 		Header:      AdvertisedCredentialHeader(c.Header),
 	})
 }
@@ -192,7 +192,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	opaque, err := decodeJSONOpaque(decoded.Opaque)
+	opaque, preservedOpaque, err := decodeJSONOpaque(decoded.Opaque)
 	if err != nil {
 		return err
 	}
@@ -213,6 +213,8 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		Description: decoded.Description,
 		Opaque:      opaque,
 		Header:      header,
+
+		opaqueB64: preservedOpaque,
 	}
 	return nil
 }
@@ -234,9 +236,11 @@ func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
 }
 
 // Verify checks whether the challenge ID matches the expected HMAC for the
-// given secretKey and realm. Uses constant-time comparison.
+// given secretKey and realm. Uses constant-time comparison. A parsed challenge
+// whose issuer encoded opaque non-canonically is verified against that
+// encoding, as it is echoed.
 func (c *Challenge) Verify(secretKey, realm string) bool {
-	expected, err := GenerateChallengeIDWithError(GenerateChallengeIDInput{
+	expected, err := generateChallengeID(GenerateChallengeIDInput{
 		SecretKey: secretKey,
 		Realm:     realm,
 		Method:    c.Method,
@@ -246,7 +250,7 @@ func (c *Challenge) Verify(secretKey, realm string) bool {
 		Digest:    c.Digest,
 		Opaque:    c.Opaque,
 		Header:    c.Header,
-	})
+	}, c.preservedOpaque())
 	if err != nil {
 		return false
 	}
@@ -374,45 +378,47 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 	return request, requestB64, nil
 }
 
-func decodeJSONOpaque(raw json.RawMessage) (map[string]string, error) {
+// decodeJSONOpaque decodes a JSON opaque value. For a base64url string it also
+// returns the encoding to preserve, as preservedOpaqueB64 does.
+func decodeJSONOpaque(raw json.RawMessage) (map[string]string, string, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	if trimmed[0] == '"' {
 		var encoded string
 		if err := json.Unmarshal(trimmed, &encoded); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if encoded == "" {
-			return map[string]string{}, nil
+			return map[string]string{}, "", nil
 		}
 		decoded, err := B64Decode(encoded)
 		if err != nil {
-			return map[string]string{"_raw": encoded}, nil
+			return map[string]string{"_raw": encoded}, "", nil
 		}
 		opaque := make(map[string]string, len(decoded))
 		for key, value := range decoded {
 			opaque[key] = anyStr(value)
 		}
-		return opaque, nil
+		return opaque, preservedOpaqueB64(opaque, encoded), nil
 	}
 
 	var opaque map[string]string
 	if err := json.Unmarshal(trimmed, &opaque); err == nil {
-		return opaque, nil
+		return opaque, "", nil
 	}
 
 	var opaqueAny map[string]any
 	if err := json.Unmarshal(trimmed, &opaqueAny); err != nil {
-		return nil, fmt.Errorf("mpp: opaque must be an object or base64url string: %w", err)
+		return nil, "", fmt.Errorf("mpp: opaque must be an object or base64url string: %w", err)
 	}
 	opaque = make(map[string]string, len(opaqueAny))
 	for key, value := range opaqueAny {
 		opaque[key] = anyStr(value)
 	}
-	return opaque, nil
+	return opaque, "", nil
 }
 
 func opaqueForJSON(opaque map[string]string) any {
@@ -434,12 +440,35 @@ func opaqueForJSON(opaque map[string]string) any {
 }
 
 // preservedOpaqueB64 returns encoded when the canonical encoding of opaque
-// does not reproduce it. The canonical encoding is used in all other cases.
+// does not reproduce it, or when opaque has a "_raw" key, which would
+// otherwise be taken for the sentinel of an undecodable opaque. The canonical
+// encoding is used in all other cases.
 func preservedOpaqueB64(opaque map[string]string, encoded string) string {
-	if encoded == "" || b64EncodeSortedStringMap(opaque) == encoded {
+	if encoded == "" {
+		return ""
+	}
+	if _, hasRaw := opaque["_raw"]; !hasRaw && b64EncodeSortedStringMap(opaque) == encoded {
 		return ""
 	}
 	return encoded
+}
+
+// preservedOpaque returns the issuer's opaque encoding while it still decodes
+// to c.Opaque, and empty otherwise.
+func (c *Challenge) preservedOpaque() string {
+	if c.Opaque != nil && c.opaqueB64 != "" && opaqueEncodes(c.Opaque, c.opaqueB64) {
+		return c.opaqueB64
+	}
+	return ""
+}
+
+// opaqueJSON returns the JSON opaque value: the preserved issuer encoding as a
+// base64url string, so that it survives a JSON round trip, or the decoded map.
+func (c *Challenge) opaqueJSON() any {
+	if encoded := c.preservedOpaque(); encoded != "" {
+		return encoded
+	}
+	return opaqueForJSON(c.Opaque)
 }
 
 // wireOpaque returns the opaque parameter to put on the wire. It returns the

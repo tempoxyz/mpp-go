@@ -43,6 +43,12 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 // GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID and
 // rejects ambiguous fields and request values that JCS cannot represent exactly.
 func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error) {
+	return generateChallengeID(opts, "")
+}
+
+// generateChallengeID binds encodedOpaque as the opaque slot when it is set,
+// and the canonical encoding of opts.Opaque otherwise.
+func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (string, error) {
 	fields := []struct {
 		name  string
 		value string
@@ -65,8 +71,8 @@ func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error)
 		return "", err
 	}
 
-	opaqueB64 := ""
-	if opts.Opaque != nil {
+	opaqueB64 := encodedOpaque
+	if opaqueB64 == "" && opts.Opaque != nil {
 		opaqueB64, err = b64EncodeSortedStringMapWithError(opts.Opaque)
 		if err != nil {
 			return "", err

@@ -1,6 +1,8 @@
 package mpp
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -98,4 +100,65 @@ func TestIssuedChallengeWithMetaVerifiesAfterWireRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, formatted, parsed.ToAuthenticate(realm))
 	assert.True(t, parsed.Verify(secret, realm))
+}
+
+func TestJSONRoundTripPreservesOpaqueEncoding(t *testing.T) {
+	header, raw := challengeHeaderWithOpaque(t, nonCanonicalOpaque)
+	parsed, err := ParseChallenge(header)
+	require.NoError(t, err)
+
+	data, err := json.Marshal(parsed)
+	require.NoError(t, err)
+	var challenge Challenge
+	require.NoError(t, json.Unmarshal(data, &challenge))
+	assert.Equal(t, map[string]string{"a": "first", "z": "last"}, challenge.Opaque)
+	assert.Contains(t, FormatAuthenticate(&challenge, challenge.Realm), `opaque="`+raw+`"`)
+
+	credential := challenge.NewCredential(map[string]any{"type": "test"})
+	data, err = json.Marshal(credential)
+	require.NoError(t, err)
+	var decoded Credential
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, raw, credentialChallengeOpaque(t, FormatAuthorization(&decoded)),
+		"a credential must echo the issuer's opaque after a JSON round trip")
+}
+
+func TestJSONKeepsCanonicalOpaqueAsObject(t *testing.T) {
+	header, _ := challengeHeaderWithOpaque(t, `{"a":"first","z":"last"}`)
+	parsed, err := ParseChallenge(header)
+	require.NoError(t, err)
+	data, err := json.Marshal(parsed)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"opaque":{"a":"first","z":"last"}`)
+}
+
+func TestVerifyUsesPreservedOpaqueEncoding(t *testing.T) {
+	const (
+		secret = "0123456789abcdef0123456789abcdef"
+		realm  = "merchant.example"
+	)
+	raw := base64.RawURLEncoding.EncodeToString([]byte(nonCanonicalOpaque))
+	// An mppx issuer binds the challenge ID to the opaque string it sends.
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(realm + "|tempo|charge|e30|||" + raw))
+	id := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	header := `Payment id="` + id + `", realm="` + realm + `", method="tempo", intent="charge", request="e30", opaque="` + raw + `"`
+
+	challenge, err := ParseChallenge(header)
+	require.NoError(t, err)
+	assert.True(t, challenge.Verify(secret, realm))
+
+	challenge.Opaque["a"] = "changed"
+	assert.False(t, challenge.Verify(secret, realm), "a modified opaque must not verify")
+}
+
+func TestOpaqueWithRawKeyIsEchoed(t *testing.T) {
+	header, raw := challengeHeaderWithOpaque(t, `{"_raw":"abc"}`)
+	challenge, err := ParseChallenge(header)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"_raw": "abc"}, challenge.Opaque)
+
+	authorization := FormatAuthorization(challenge.NewCredential(map[string]any{"type": "test"}))
+	assert.Equal(t, raw, credentialChallengeOpaque(t, authorization),
+		"an issuer's _raw key must not be taken for the undecodable-opaque sentinel")
 }

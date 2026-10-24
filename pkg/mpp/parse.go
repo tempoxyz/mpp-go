@@ -565,10 +565,10 @@ func formatAuthorization(c *Credential) (string, error) {
 		challengeDict["header"] = header
 	}
 	if c.Challenge.Opaque != nil {
-		if raw, ok := c.Challenge.Opaque["_raw"]; ok {
-			challengeDict["opaque"] = raw
-		} else if c.Challenge.opaqueB64 != "" && opaqueEncodes(c.Challenge.Opaque, c.Challenge.opaqueB64) {
+		if c.Challenge.opaqueB64 != "" && opaqueEncodes(c.Challenge.Opaque, c.Challenge.opaqueB64) {
 			challengeDict["opaque"] = c.Challenge.opaqueB64
+		} else if raw, ok := c.Challenge.Opaque["_raw"]; ok {
+			challengeDict["opaque"] = raw
 		} else {
 			encoded, err := b64EncodeSortedStringMapWithError(c.Challenge.Opaque)
 			if err != nil {
