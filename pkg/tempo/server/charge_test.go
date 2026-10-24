@@ -87,6 +87,7 @@ type mockRPC struct {
 	onSend           func(raw string) (string, map[string]any, error)
 	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 	onGetReceipt     func(hash string) (*temporpc.JSONRPCResponse, error)
+	onGetTransaction func(hash string) (*temporpc.JSONRPCResponse, error)
 	// balances answers TIP-20 balanceOf eth_calls by token address; those
 	// calls are recorded in balanceCalls, not callRequests or onCall.
 	balances     map[common.Address]*big.Int
@@ -193,6 +194,11 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 			return m.onGetReceipt(hash)
 		}
 		return &temporpc.JSONRPCResponse{Result: m.receipts[hash]}, nil
+	case "eth_getTransactionByHash":
+		if m.onGetTransaction != nil {
+			return m.onGetTransaction(params[0].(string))
+		}
+		return nil, fmt.Errorf("unexpected rpc method %q", method)
 	default:
 		return nil, fmt.Errorf("unexpected rpc method %q", method)
 	}
@@ -392,6 +398,10 @@ func TestIntentValidatePushAndProofCredentialsDoesNotConsumeReplayState(t *testi
 			require.NoError(t, err)
 			_, err = intent.Broadcast(ctx, credential, request.Map())
 			require.ErrorContains(t, err, "already used")
+			var replayed *mpp.PaymentError
+			require.ErrorAs(t, err, &replayed)
+			assert.Equal(t, http.StatusForbidden, replayed.Status)
+			assert.Equal(t, mpp.ErrorTypeVerificationFailed, replayed.Type)
 			assert.Equal(t, 2, store.putIfAbsentCalls)
 		})
 	}
@@ -1117,6 +1127,91 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 	}
 }
 
+func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
+	t.Parallel()
+
+	const (
+		challengeID    = "challenge-1"
+		splitRecipient = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+	)
+	bound := tempo.EncodeAttribution(testRealm, "", challengeID)
+	memos := map[string]string{
+		"bound":           bound,
+		"other challenge": tempo.EncodeAttribution(testRealm, "", "other-challenge"),
+		"other realm":     tempo.EncodeAttribution("other.example.com", "", challengeID),
+		"other client":    tempo.EncodeAttribution(testRealm, "another-client", challengeID),
+		"uppercase":       "0x" + strings.ToUpper(strings.TrimPrefix(bound, "0x")),
+		"custom":          "0x" + strings.Repeat("ab", 32),
+		"plain":           "",
+	}
+	expected := expectedTransfers(tempo.ChargeRequest{
+		Amount:    "1000000",
+		Recipient: testRecipient,
+		MethodDetails: tempo.MethodDetails{
+			Splits: []tempo.Split{{Amount: "200000", Recipient: splitRecipient}},
+		},
+	})
+
+	tests := []struct {
+		primary, split string
+		accepted       bool
+	}{
+		{"bound", "plain", true},
+		{"bound", "bound", true},
+		{"bound", "other client", true},
+		{"bound", "uppercase", true},
+		{"bound", "custom", true},
+		{"bound", "other challenge", false},
+		{"other challenge", "bound", false},
+		{"bound", "other realm", false},
+		{"other realm", "bound", false},
+		{"other challenge", "plain", false},
+		{"other realm", "plain", false},
+		{"plain", "plain", false},
+		{"custom", "plain", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.primary+"/"+tt.split, func(t *testing.T) {
+			t.Parallel()
+			transfer := func(amount, recipient, memo string) decodedTransfer {
+				return decodedTransfer{amount: amount, recipient: recipient, hasMemo: memo != "", memo: memo}
+			}
+			actual := []decodedTransfer{
+				transfer("800000", testRecipient, memos[tt.primary]),
+				transfer("200000", splitRecipient, memos[tt.split]),
+			}
+			assert.Equal(t, tt.accepted, matchTransfers(actual, expected, testRealm, challengeID))
+		})
+	}
+}
+
+func TestMatchTransfers_AcceptsConfiguredAttributionShapedSplitMemo(t *testing.T) {
+	t.Parallel()
+
+	const (
+		challengeID    = "challenge-1"
+		splitRecipient = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+	)
+	// A server-configured split memo is static, so it can never carry this
+	// challenge's nonce even when it has the attribution layout.
+	configured := tempo.EncodeAttribution("partner.example.com", "", "partner-challenge")
+	expected := expectedTransfers(tempo.ChargeRequest{
+		Amount:    "1000000",
+		Recipient: testRecipient,
+		MethodDetails: tempo.MethodDetails{
+			Splits: []tempo.Split{{Amount: "200000", Recipient: splitRecipient, Memo: configured}},
+		},
+	})
+	actual := []decodedTransfer{
+		{amount: "800000", recipient: testRecipient, hasMemo: true, memo: tempo.EncodeAttribution(testRealm, "", challengeID)},
+		{amount: "200000", recipient: splitRecipient, hasMemo: true, memo: configured},
+	}
+	assert.True(t, matchTransfers(actual, expected, testRealm, challengeID))
+
+	actual[1].memo = tempo.EncodeAttribution("partner.example.com", "", "other-challenge")
+	assert.False(t, matchTransfers(actual, expected, testRealm, challengeID))
+}
+
 func TestChargeFlow_HashCredentialAcceptsAttributionMemo(t *testing.T) {
 	ctx := context.Background()
 	method := NewMethod(MethodConfig{Intent: testStoredIntent(),
@@ -1597,6 +1692,47 @@ func TestChargeFlow_FeePayerHonorsLegacyReservation(t *testing.T) {
 	require.Empty(t, rpc.sentRawTxs)
 }
 
+func TestChargeFlow_TransactionReplayAfterStateChangeIsTerminal(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		feePayer bool
+		reason   string
+	}{
+		{name: "unsponsored", reason: "transaction hash already used"},
+		{name: "sponsored", feePayer: true, reason: "sponsored transaction already used"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, tt.feePayer, []tempo.ChargeMode{tempo.ChargeModePull})
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			config := IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore()}
+			if tt.feePayer {
+				config.FeePayerPrivateKey = feePayerKey
+			}
+			intent, err := NewIntent(config)
+			require.NoError(t, err)
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+
+			// The first payment spent the payer's balance, so a replayed
+			// simulation would now revert.
+			rpc.callRequests = nil
+			rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+				return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
+			}
+			_, err = intent.Verify(ctx, credential, request.Map())
+			var replayed *mpp.PaymentError
+			require.ErrorAs(t, err, &replayed)
+			assert.Equal(t, http.StatusForbidden, replayed.Status)
+			assert.Equal(t, tt.reason, replayed.Detail)
+			assert.Empty(t, rpc.callRequests)
+			assert.Len(t, rpc.sentRawTxs, 1)
+		})
+	}
+}
+
 func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
@@ -1945,6 +2081,63 @@ func init() {
 	_, _ = temposigner.NewSigner(testPrivateKey)
 }
 
+func TestChargeFlow_TransactionCredentialSourceMustMatchSenderAndChain(t *testing.T) {
+	ctx := context.Background()
+	// No chainId in the challenge: the source must match the RPC's chain.
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		Decimals:  6,
+	})
+	require.NoError(t, err)
+	require.Nil(t, request.MethodDetails.ChainID)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	sender, err := parseSourceDID(credential.Source)
+	require.NoError(t, err)
+	require.NotNil(t, sender)
+
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "different sender",
+			source: tempo.ProofSource(int64(rpc.chainID), common.HexToAddress("0x00000000000000000000000000000000000000a2")),
+			want:   "credential source does not match transaction signer",
+		},
+		{
+			name:   "different chain",
+			source: tempo.ProofSource(int64(rpc.chainID)+1, common.HexToAddress(sender.address)),
+			want:   "credential source chain id does not match the challenge",
+		},
+		{
+			name:   "malformed",
+			source: "invalid-source",
+			want:   "credential source is invalid",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tampered := *credential
+			tampered.Source = tc.source
+			_, err := intent.Validate(ctx, &tampered, request.Map())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+	assert.Empty(t, rpc.sentRawTxs)
+
+	_, err = intent.Validate(ctx, credential, request.Map())
+	require.NoError(t, err)
+}
+
 func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
@@ -1983,87 +2176,111 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	assert.Equal(t, 1, successes)
 }
 
-func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
-	t.Parallel()
-
-	const (
-		challengeID    = "challenge-1"
-		splitRecipient = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
-	)
-	bound := tempo.EncodeAttribution(testRealm, "", challengeID)
-	memos := map[string]string{
-		"bound":           bound,
-		"other challenge": tempo.EncodeAttribution(testRealm, "", "other-challenge"),
-		"other realm":     tempo.EncodeAttribution("other.example.com", "", challengeID),
-		"other client":    tempo.EncodeAttribution(testRealm, "another-client", challengeID),
-		"uppercase":       "0x" + strings.ToUpper(strings.TrimPrefix(bound, "0x")),
-		"custom":          "0x" + strings.Repeat("ab", 32),
-		"plain":           "",
-	}
-	expected := expectedTransfers(tempo.ChargeRequest{
-		Amount:    "1000000",
-		Recipient: testRecipient,
-		MethodDetails: tempo.MethodDetails{
-			Splits: []tempo.Split{{Amount: "200000", Recipient: splitRecipient}},
-		},
-	})
-
-	tests := []struct {
-		primary, split string
-		accepted       bool
-	}{
-		{"bound", "plain", true},
-		{"bound", "bound", true},
-		{"bound", "other client", true},
-		{"bound", "uppercase", true},
-		{"bound", "custom", true},
-		{"bound", "other challenge", false},
-		{"other challenge", "bound", false},
-		{"bound", "other realm", false},
-		{"other realm", "bound", false},
-		{"other challenge", "plain", false},
-		{"other realm", "plain", false},
-		{"plain", "plain", false},
-		{"custom", "plain", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.primary+"/"+tt.split, func(t *testing.T) {
-			t.Parallel()
-			transfer := func(amount, recipient, memo string) decodedTransfer {
-				return decodedTransfer{amount: amount, recipient: recipient, hasMemo: memo != "", memo: memo}
+func TestChargeFlow_HashReceiptReportsFundingCurrency(t *testing.T) {
+	for _, scenario := range []string{"direct", "single", "unrelated", "missing", "sender"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, buildChallenge(t, request))
+			if !assert.NoError(t, err) || !assert.Len(t, rpc.sentRawTxs, 1) {
+				return
 			}
-			actual := []decodedTransfer{
-				transfer("800000", testRecipient, memos[tt.primary]),
-				transfer("200000", splitRecipient, memos[tt.split]),
+			tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+			if !assert.NoError(t, err) {
+				return
 			}
-			assert.Equal(t, tt.accepted, matchTransfers(actual, expected, testRealm, challengeID))
+			sender, err := tempotx.VerifySignature(tx)
+			if !assert.NoError(t, err) {
+				return
+			}
+			calls := make([]any, 0, len(tx.Calls)+1)
+			for _, call := range tx.Calls {
+				calls = append(calls, map[string]any{"to": call.To.Hex(), "data": hexutil.Encode(call.Data), "value": "0x0"})
+			}
+			transaction := map[string]any{"hash": testReceiptHash, "from": sender.Hex(), "type": "0x76", "calls": calls}
+			switch scenario {
+			case "single":
+				if !assert.Len(t, calls, 1) {
+					return
+				}
+				call := calls[0].(map[string]any)
+				transaction = map[string]any{"hash": testReceiptHash, "from": sender.Hex(), "type": "0x2", "to": call["to"], "input": call["data"]}
+			case "unrelated":
+				transaction["calls"] = append(calls, map[string]any{
+					"to":   tempo.PathUSDAddress,
+					"data": hexutil.Encode(common.FromHex(tempo.TransferSelector + strings.Repeat("0", 64) + fmt.Sprintf("%064x", 1))),
+				})
+			case "sender":
+				transaction["from"] = common.HexToAddress("0x3333333333333333333333333333333333333333").Hex()
+			}
+			rpc.onGetTransaction = func(hash string) (*temporpc.JSONRPCResponse, error) {
+				if scenario == "missing" {
+					return &temporpc.JSONRPCResponse{}, nil
+				}
+				return &temporpc.JSONRPCResponse{Result: transaction}, nil
+			}
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			if !assert.NoError(t, err) {
+				return
+			}
+			want := ""
+			if scenario == "direct" || scenario == "single" {
+				want = request.Currency
+			}
+			assert.Equal(t, want, receipt.FundingCurrency)
 		})
 	}
 }
 
-func TestMatchTransfers_AcceptsConfiguredAttributionShapedSplitMemo(t *testing.T) {
-	t.Parallel()
-
-	const (
-		challengeID    = "challenge-1"
-		splitRecipient = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
-	)
-	// A server-configured split memo is static, so it can never carry this
-	// challenge's nonce even when it has the attribution layout.
-	configured := tempo.EncodeAttribution("partner.example.com", "", "partner-challenge")
-	expected := expectedTransfers(tempo.ChargeRequest{
-		Amount:    "1000000",
-		Recipient: testRecipient,
-		MethodDetails: tempo.MethodDetails{
-			Splits: []tempo.Split{{Amount: "200000", Recipient: splitRecipient, Memo: configured}},
-		},
-	})
-	actual := []decodedTransfer{
-		{amount: "800000", recipient: testRecipient, hasMemo: true, memo: tempo.EncodeAttribution(testRealm, "", challengeID)},
-		{amount: "200000", recipient: splitRecipient, hasMemo: true, memo: configured},
+func TestChargeFlow_TransactionReceiptReportsFundingCurrency(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	if !assert.NoError(t, err) {
+		return
 	}
-	assert.True(t, matchTransfers(actual, expected, testRealm, challengeID))
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	if !assert.NoError(t, err) {
+		return
+	}
 
-	actual[1].memo = tempo.EncodeAttribution("partner.example.com", "", "other-challenge")
-	assert.False(t, matchTransfers(actual, expected, testRealm, challengeID))
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, request.Currency, receipt.FundingCurrency)
+}
+
+func TestChargeFlow_HashFundingLookupRunsBeforeReplayCommit(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, buildChallenge(t, request))
+	if !assert.NoError(t, err) {
+		return
+	}
+	store := tempo.NewMemoryStore()
+	lookups := 0
+	rpc.onGetTransaction = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		lookups++
+		_, used, err := store.Get(ctx, tempo.ChargeStoreKey(hash))
+		assert.NoError(t, err)
+		assert.False(t, used, "transaction hash was consumed before the funding-currency lookup")
+		return &temporpc.JSONRPCResponse{}, nil
+	}
+	intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	assert.NoError(t, err)
+	assert.Equal(t, 1, lookups)
 }
