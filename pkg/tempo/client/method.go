@@ -3,10 +3,13 @@ package chargeclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -47,6 +50,9 @@ type Config struct {
 
 // Method implements Tempo charge credential creation for the generic MPP client.
 type Method struct {
+	// now is the clock used for sponsored validity; nil means time.Now.
+	now func() time.Time
+
 	signer         *temposigner.Signer
 	rpc            tempo.RPCClient
 	rpcURL         string
@@ -54,8 +60,17 @@ type Method struct {
 	clientID       string
 	credentialType tempo.CredentialType
 	paymentPolicy  func(context.Context, tempo.ChargeRequest) error
-	// now is the clock used for sponsored validity; nil means time.Now.
-	now func() time.Time
+
+	signingMu sync.Mutex
+	signing   map[string]*signingCall
+}
+
+// signingCall is one in-flight CreateCredential shared by concurrent callers.
+type signingCall struct {
+	done       chan struct{}
+	waiters    int
+	credential *mpp.Credential
+	err        error
 }
 
 var _ mppclient.Method = (*Method)(nil)
@@ -102,7 +117,86 @@ func (m *Method) Intent() string {
 }
 
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
+//
+// Concurrent calls for the same challenge share one in-flight signing, so they
+// cannot produce two independently settleable transactions. Once that signing
+// finishes, successfully or not, a later call signs afresh. Calls share a
+// signing only when every challenge field matches, and each caller gets its own
+// copy of the credential.
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
+	if challenge == nil {
+		return nil, fmt.Errorf("tempo client: challenge is required")
+	}
+	encoded, err := json.Marshal(challenge)
+	if err != nil {
+		return nil, fmt.Errorf("tempo client: encoding challenge: %w", err)
+	}
+	key := string(encoded)
+	for {
+		m.signingMu.Lock()
+		call, ok := m.signing[key]
+		if !ok {
+			break
+		}
+		call.waiters++
+		m.signingMu.Unlock()
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if call.err != nil {
+			// The leading call's own context ended. Ours is still live, so
+			// sign again (or join a newer signing) instead of failing with it.
+			if (errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded)) && ctx.Err() == nil {
+				continue
+			}
+			return nil, call.err
+		}
+		return cloneCredential(call.credential), nil
+	}
+	call := &signingCall{done: make(chan struct{})}
+	if m.signing == nil {
+		m.signing = map[string]*signingCall{}
+	}
+	m.signing[key] = call
+	m.signingMu.Unlock()
+	completed := false
+	defer func() {
+		if !completed {
+			// createCredential panicked: the panic continues in this goroutine,
+			// and joining calls fail instead of reading a nil credential.
+			call.credential, call.err = nil, errSigningPanicked
+		}
+		m.signingMu.Lock()
+		delete(m.signing, key)
+		m.signingMu.Unlock()
+		close(call.done)
+	}()
+	credential, err := m.createCredential(ctx, challenge)
+	if err == nil && credential == nil {
+		err = fmt.Errorf("tempo client: no credential created")
+	}
+	call.credential, call.err = credential, err
+	completed = true
+	if err != nil {
+		return nil, err
+	}
+	return cloneCredential(credential), nil
+}
+
+var errSigningPanicked = errors.New("tempo client: shared credential signing panicked")
+
+// cloneCredential copies the credential's maps so callers sharing a signing
+// never share mutable state.
+func cloneCredential(credential *mpp.Credential) *mpp.Credential {
+	clone := *credential
+	clone.Payload = maps.Clone(credential.Payload)
+	clone.Challenge.Opaque = maps.Clone(credential.Challenge.Opaque)
+	return &clone
+}
+
+func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge.Method != tempo.MethodName {
 		return nil, fmt.Errorf("tempo client: unsupported challenge method %q", challenge.Method)
 	}
