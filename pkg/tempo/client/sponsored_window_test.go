@@ -3,6 +3,7 @@ package chargeclient
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,14 +29,25 @@ func TestSponsoredValidBefore(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, uint64(now.Unix()+60), got)
 	})
-	t.Run("caps at the second after the challenge expiry", func(t *testing.T) {
+	t.Run("caps at 15 seconds past the second after the challenge expiry", func(t *testing.T) {
 		expires := format(30 * time.Second)
 		got, err := sponsoredValidBefore(expires, now)
 		require.NoError(t, err)
 		expiry, err := time.Parse(time.RFC3339, expires)
 		require.NoError(t, err)
-		require.Equal(t, uint64(expiry.Unix()+1), got)
+		require.Equal(t, uint64(expiry.Unix()+1+15), got)
 		require.Less(t, got, uint64(now.Unix()+60))
+		// Servers accept valid_before up to a minute past the challenge expiry.
+		require.LessOrEqual(t, got, uint64(expiry.Add(time.Minute).Unix()))
+	})
+	t.Run("short challenge keeps 15 seconds of validity until it expires", func(t *testing.T) {
+		expires := format(16 * time.Second)
+		got, err := sponsoredValidBefore(expires, now)
+		require.NoError(t, err)
+		// A credential arriving just before the challenge expires still has
+		// the server's 15 second minimum left (validateFeePayerDeadline).
+		arrival := now.Add(16*time.Second - time.Millisecond)
+		require.GreaterOrEqual(t, got, uint64(arrival.Add(15*time.Second+time.Second-1).Unix()))
 	})
 	t.Run("accepts exactly 15 seconds of validity", func(t *testing.T) {
 		_, err := sponsoredValidBefore(format(15*time.Second), now)
@@ -71,7 +83,7 @@ func TestCreateCredentialSponsoredValidityWindow(t *testing.T) {
 		window  time.Duration
 	}{
 		{name: "five minute challenge gets the 60 second window", expires: mpp.Expires.Minutes(5), window: tempo.SponsoredValidBeforeWindow},
-		{name: "short challenge is capped at its expiry", expires: mpp.Expires.Seconds(30), window: 30 * time.Second},
+		{name: "short challenge is capped 15s past its expiry", expires: mpp.Expires.Seconds(30), window: 30*time.Second + time.Second + tempo.FeePayerMinRemainingValidity},
 	} {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,4 +156,86 @@ func TestCreateCredentialUnsponsoredShortChallengeStillSigns(t *testing.T) {
 	tx, err := tempotx.Deserialize(signature)
 	require.NoError(t, err)
 	require.Zero(t, tx.ValidBefore)
+}
+
+// fakeClock is a manually advanced clock for sponsored validity tests.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func TestCreateCredentialComputesSponsoredValidBeforeAfterPaymentPolicy(t *testing.T) {
+	t.Parallel()
+
+	clock := &fakeClock{now: time.Now()}
+	rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
+	method, err := New(Config{
+		PrivateKey: testPrivateKey, RPC: rpc, ChainID: 42431,
+		PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+			// A slow policy, such as one prompting the user.
+			clock.Advance(50 * time.Second)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	method.now = clock.Now
+
+	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.Expires.Minutes(5)))
+	require.NoError(t, err)
+	signature, _ := credential.Payload["signature"].(string)
+	tx, err := tempotx.Deserialize(signature)
+	require.NoError(t, err)
+	require.Equal(t, uint64(clock.Now().Add(tempo.SponsoredValidBeforeWindow).Unix()), tx.ValidBefore)
+}
+
+func TestCreateCredentialRechecksSponsoredFloorBeforeSigning(t *testing.T) {
+	t.Parallel()
+
+	clock := &fakeClock{now: time.Now()}
+	rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
+	method, err := New(Config{
+		PrivateKey: testPrivateKey, RPC: rpc, ChainID: 42431,
+		PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+			clock.Advance(20 * time.Second)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	method.now = clock.Now
+
+	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.Expires.Seconds(30)))
+	require.ErrorIs(t, err, ErrSponsoredChallengeExpiresTooSoon)
+	require.Nil(t, credential)
+	require.Empty(t, rpc.sentRawTxs)
+}
+
+func TestCanHandleChallengeSkipsSponsoredChallengeExpiringTooSoon(t *testing.T) {
+	t.Parallel()
+
+	method, err := New(Config{PrivateKey: testPrivateKey, ChainID: 42431})
+	require.NoError(t, err)
+	challenge := func(amount string, feePayer bool, expires string) *mpp.Challenge {
+		request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+			Amount: amount, Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: feePayer,
+		})
+		require.NoError(t, err)
+		return mpp.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(expires))
+	}
+
+	require.False(t, method.CanHandleChallenge(challenge("0.50", true, mpp.Expires.Seconds(10))))
+	require.True(t, method.CanHandleChallenge(challenge("0.50", true, mpp.Expires.Minutes(5))))
+	require.True(t, method.CanHandleChallenge(challenge("0.50", false, mpp.Expires.Seconds(10))))
+	require.True(t, method.CanHandleChallenge(challenge("0", true, mpp.Expires.Seconds(10))))
 }

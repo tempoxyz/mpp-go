@@ -63,3 +63,39 @@ func TestSponsoredChargeRefusesShortExpiryAtIssuance(t *testing.T) {
 		require.True(t, result.IsChallenge())
 	}
 }
+
+func TestSponsoredIssuanceFloorSkipsZeroAmountProofCharges(t *testing.T) {
+	t.Parallel()
+
+	for _, sponsoredByDefault := range []bool{false, true} {
+		method := NewMethod(MethodConfig{Intent: testStoredIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: sponsoredByDefault})
+		_, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0", FeePayer: !sponsoredByDefault, Expires: mpp.Expires.Seconds(10)})
+		require.NoError(t, err)
+
+		payment, err := mppserver.New(method, "api.example.com", "0123456789abcdef0123456789abcdef")
+		require.NoError(t, err)
+		result, err := payment.Charge(context.Background(), mppserver.ChargeParams{
+			Amount: "0", FeePayer: !sponsoredByDefault, Expires: mpp.Expires.Seconds(10),
+		})
+		require.NoError(t, err)
+		require.True(t, result.IsChallenge())
+	}
+}
+
+func TestSponsoredIssuanceFloorSkipsCredentialVerification(t *testing.T) {
+	t.Parallel()
+
+	method := NewMethod(MethodConfig{Intent: testStoredIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: true})
+	expires := mpp.Expires.Seconds(10)
+
+	// A request carrying a Payment credential is verified against its echoed
+	// expiry, so a fixed Expires near its end must not be refused here.
+	_, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50", Expires: expires, Authorization: "Payment eyJ9"})
+	require.NoError(t, err)
+	_, err = method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50", Expires: expires, PaymentAuthorization: "Payment eyJ9"})
+	require.NoError(t, err)
+
+	// Application authentication alone still issues a challenge, so the floor applies.
+	_, err = method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50", Expires: expires, Authorization: "Bearer app-token"})
+	require.ErrorContains(t, err, "sponsored charge challenges must expire at least 15s after issuance")
+}

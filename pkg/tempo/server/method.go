@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
@@ -172,11 +173,6 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		feePayerURL = m.feePayerURL
 	}
 	feePayer := params.FeePayer || m.feePayer
-	if feePayer {
-		if err := validateSponsoredChallengeExpiry(params.Expires, time.Now()); err != nil {
-			return nil, err
-		}
-	}
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
 		Amount:         params.Amount,
 		Currency:       currency,
@@ -193,7 +189,20 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	// The floor applies only when issuing a challenge that needs a sponsored
+	// transaction: zero-amount charges are paid with a proof, and a request
+	// carrying a credential is verified against its echoed expiry instead.
+	if feePayer && request.Amount != "0" && !carriesPaymentCredential(params) {
+		if err := validateSponsoredChallengeExpiry(params.Expires, time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	return request.Map(), nil
+}
+
+func carriesPaymentCredential(params mppserver.ChargeParams) bool {
+	return mpp.FindPaymentAuthorization(params.Authorization) != "" ||
+		mpp.FindPaymentAuthorization(params.PaymentAuthorization) != ""
 }
 
 // validateSponsoredChallengeExpiry rejects a sponsored charge whose challenge

@@ -16,11 +16,12 @@ const (
 	DefaultGasLimit = uint64(1_000_000)
 	// SponsoredValidBeforeWindow is how far ahead of now a client sets the
 	// expiring-nonce valid_before of a sponsored (fee-payer) charge
-	// transaction, capped at the second after the challenge expiry. Servers
-	// require FeePayerMinRemainingValidity of validity left when they verify,
-	// co-sign and broadcast, so a 60 second window leaves about 45 seconds for
-	// clock skew between client and server, signing and round trips. This is
-	// deliberately wider than mppx's 25 seconds, which leaves only about 10.
+	// transaction, capped at FeePayerMinRemainingValidity past the second
+	// after the challenge expiry. Servers require FeePayerMinRemainingValidity
+	// of validity left when they verify, co-sign and broadcast, so a 60 second
+	// window leaves about 45 seconds for clock skew between client and server,
+	// signing and round trips. This is deliberately wider than mppx's 25
+	// seconds, which leaves only about 10.
 	SponsoredValidBeforeWindow = 60 * time.Second
 	// FeePayerWindow is the client-side validity window used for sponsored charges.
 	//

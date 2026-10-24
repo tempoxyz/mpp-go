@@ -54,6 +54,8 @@ type Method struct {
 	clientID       string
 	credentialType tempo.CredentialType
 	paymentPolicy  func(context.Context, tempo.ChargeRequest) error
+	// now is the clock used for sponsored validity; nil means time.Now.
+	now func() time.Time
 }
 
 var _ mppclient.Method = (*Method)(nil)
@@ -161,10 +163,11 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
 	}
 
-	var validBefore uint64
 	if request.MethodDetails.FeePayer {
-		validBefore, err = sponsoredValidBefore(challenge.Expires, time.Now())
-		if err != nil {
+		// Refuse a too-short sponsored challenge before authorizing payment.
+		// valid_before itself is computed just before signing, after the
+		// payment policy and gas RPCs, so their latency does not eat into it.
+		if _, err := sponsoredValidBefore(challenge.Expires, m.clock()); err != nil {
 			return nil, err
 		}
 	}
@@ -180,7 +183,7 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	}
 	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 
-	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, int64(chainID), validBefore)
+	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, int64(chainID), challenge.Expires)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +230,7 @@ func (m *Method) buildTransfer(
 	request tempo.ChargeRequest,
 	memo string,
 	chainID int64,
-	validBefore uint64,
+	challengeExpires string,
 ) (string, error) {
 	transfers, err := buildTransfers(request, memo)
 	if err != nil {
@@ -257,6 +260,10 @@ func (m *Method) buildTransfer(
 	}
 
 	if request.MethodDetails.FeePayer {
+		validBefore, err := sponsoredValidBefore(challengeExpires, m.clock())
+		if err != nil {
+			return "", err
+		}
 		builder.
 			SetSponsored(true).
 			SetNonceKey(new(big.Int).Set(tempo.ExpiringNonceKey)).
@@ -294,11 +301,33 @@ func (m *Method) buildTransfer(
 // server would reject the sponsored transaction for too little validity.
 var ErrSponsoredChallengeExpiresTooSoon = errors.New("tempo client: sponsored challenge expires too soon")
 
+// CanHandleChallenge skips a sponsored charge challenge that expires too soon
+// to sign, so a transport offered other challenges can pay with one of those
+// instead of failing on this one.
+func (m *Method) CanHandleChallenge(challenge *mpp.Challenge) bool {
+	request, err := tempo.ParseChargeRequest(challenge.Request)
+	if err != nil || !request.MethodDetails.FeePayer || request.Amount == "0" {
+		return true
+	}
+	_, err = sponsoredValidBefore(challenge.Expires, m.clock())
+	return !errors.Is(err, ErrSponsoredChallengeExpiresTooSoon)
+}
+
+func (m *Method) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
 // sponsoredValidBefore returns the expiring-nonce valid_before for a sponsored
-// charge: now + tempo.SponsoredValidBeforeWindow, capped at the second after
-// the challenge expiry (valid_before is an exclusive whole-second bound). It
-// refuses challenges that expire less than tempo.FeePayerMinRemainingValidity
-// from now.
+// charge: now + tempo.SponsoredValidBeforeWindow, capped at
+// tempo.FeePayerMinRemainingValidity past the second after the challenge
+// expiry. Servers require that much validity left on arrival and accept a
+// valid_before up to a minute past the challenge expiry, so with this cap any
+// credential that arrives before the challenge expires keeps enough validity.
+// It refuses challenges that expire less than
+// tempo.FeePayerMinRemainingValidity from now.
 func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 	validBefore := now.Add(tempo.SponsoredValidBeforeWindow).Unix()
 	if expires == "" {
@@ -312,7 +341,8 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 		return 0, fmt.Errorf("%w: %s left before %s, need at least %s",
 			ErrSponsoredChallengeExpiresTooSoon, remaining.Truncate(time.Millisecond), expires, tempo.FeePayerMinRemainingValidity)
 	}
-	if challengeMax := expiry.Unix() + 1; challengeMax < validBefore {
+	challengeMax := expiry.Unix() + 1 + int64(tempo.FeePayerMinRemainingValidity/time.Second)
+	if challengeMax < validBefore {
 		validBefore = challengeMax
 	}
 	return uint64(validBefore), nil
