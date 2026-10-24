@@ -2070,3 +2070,30 @@ func TestChargeFlow_TransactionReceiptReportsFundingCurrency(t *testing.T) {
 	}
 	assert.Equal(t, request.Currency, receipt.FundingCurrency)
 }
+
+func TestChargeFlow_HashFundingLookupRunsBeforeReplayCommit(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, buildChallenge(t, request))
+	if !assert.NoError(t, err) {
+		return
+	}
+	store := tempo.NewMemoryStore()
+	lookups := 0
+	rpc.onGetTransaction = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		lookups++
+		_, used, err := store.Get(ctx, tempo.ChargeStoreKey(hash))
+		assert.NoError(t, err)
+		assert.False(t, used, "transaction hash was consumed before the funding-currency lookup")
+		return &temporpc.JSONRPCResponse{}, nil
+	}
+	intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	assert.NoError(t, err)
+	assert.Equal(t, 1, lookups)
+}

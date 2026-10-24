@@ -494,16 +494,18 @@ func (i *Intent) broadcastCredential(
 	switch validated.payload.Type {
 	case tempo.CredentialTypeHash:
 		hash := validated.payload.Hash
+		// Look up the funding currency before consuming the hash, so a slow or
+		// failed lookup never leaves the hash used without a delivered receipt.
+		options := []mpp.ReceiptOption{mpp.WithExternalID(validated.request.ExternalID)}
+		if hashPaymentFundedByCurrency(ctx, credential, validated) {
+			options = append(options, mpp.WithFundingCurrency(validated.request.Currency))
+		}
 		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
 			return nil, mpp.ErrVerificationFailed("transaction hash already used")
-		}
-		options := []mpp.ReceiptOption{mpp.WithExternalID(validated.request.ExternalID)}
-		if hashPaymentFundedByCurrency(ctx, credential, validated) {
-			options = append(options, mpp.WithFundingCurrency(validated.request.Currency))
 		}
 		return mpp.Success(tempo.MethodName, hash, options...), nil
 	case tempo.CredentialTypeProof:
