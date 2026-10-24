@@ -293,7 +293,8 @@ type ChargeParams struct {
 	Recipient string
 	// ExternalID is copied into the request and echoed back in the Receipt.
 	ExternalID string
-	// Body is the actual request body to bind via the challenge digest.
+	// Body is the actual request body to bind via the challenge digest. See
+	// mpp.BodyDigest for how non-byte, non-string values are digested.
 	Body any
 	// Expires overrides the default Challenge expiry.
 	Expires string

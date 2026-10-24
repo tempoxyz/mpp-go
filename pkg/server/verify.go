@@ -26,7 +26,8 @@ type VerifyParams struct {
 	Request map[string]any
 	// Body is the actual request body bytes/string/object the digest binds to.
 	// When set, issued challenges include a body digest and submitted
-	// credentials must echo a digest matching this value.
+	// credentials must echo a digest matching this value. See mpp.BodyDigest
+	// for how non-byte, non-string values are digested.
 	Body any
 	// Realm is the expected server realm.
 	Realm string

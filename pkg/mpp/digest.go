@@ -11,6 +11,11 @@ import (
 // BodyDigest provides helpers for computing and verifying SHA-256 digests.
 // Compute returns a digest string in the form "sha-256=<base64>".
 // Verify recomputes the digest and compares using constant-time comparison.
+//
+// A []byte, string or json.RawMessage body is digested as is. Any other value
+// is digested as its json.Marshal output, not the raw request bytes, so pass
+// the raw bytes to bind exactly what the client sent. Compute and Verify panic
+// for a value json.Marshal cannot encode, such as a channel or function.
 var BodyDigest = struct {
 	Compute func(body any) string
 	Verify  func(digest string, body any) bool
@@ -36,13 +41,23 @@ func toBytes(body any) []byte {
 		return v
 	case string:
 		return []byte(v)
-	case map[string]any:
+	case json.RawMessage:
+		return v
+	default:
+		// Any other value that came out of ordinary JSON decoding — a
+		// map, a slice, a typed struct, a scalar — is JSON-marshallable.
+		// Route it through the same canonical JSON path used for
+		// map[string]any rather than rejecting it outright; this is
+		// what BodyDigest's `body any` signature already promises.
 		b, err := json.Marshal(v)
 		if err != nil {
-			panic(fmt.Sprintf("mpp: failed to marshal body: %v", err))
+			// Only genuinely non-JSON-serializable Go values reach
+			// here (chan, func, unsupported cyclic structures) —
+			// values no ordinary decoded HTTP body can produce. This
+			// remains a programmer error, not an operational input a
+			// server should ever receive from request handling.
+			panic(fmt.Sprintf("mpp: unsupported body type %T: %v", body, err))
 		}
 		return b
-	default:
-		panic(fmt.Sprintf("mpp: unsupported body type %T", body))
 	}
 }
