@@ -40,7 +40,6 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 				}{
 					{"invalid payload", mpp.ErrInvalidPayload("payload rejected"), 402, "https://paymentauth.org/problems/invalid-payload"},
 					{"bad request", mpp.ErrBadRequest("invalid parameters"), 400, "https://paymentauth.org/problems/bad-request"},
-					{"credential replayed", mpp.ErrCredentialReplayed("transaction hash already used"), 403, "https://paymentauth.org/problems/verification-failed"},
 				} {
 					t.Run(fmt.Sprintf("%s/split=%t/wrapped=%t/%s", framework, split, wrapped, tc.name), func(t *testing.T) {
 						var intentErr error = tc.problem
@@ -127,7 +126,7 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						assert.Equal(t, tc.status, problem.Status)
 						assert.Equal(t, tc.problem.Detail, problem.Detail)
 						assert.Equal(t, tc.problem.Title, problem.Title)
-						if tc.status != http.StatusPaymentRequired {
+						if tc.status == http.StatusBadRequest {
 							assert.Empty(t, rejected.Header.Get(mpp.HeaderWWWAuthenticate))
 							return
 						}

@@ -1601,6 +1601,47 @@ func TestChargeFlow_FeePayerHonorsLegacyReservation(t *testing.T) {
 	require.Empty(t, rpc.sentRawTxs)
 }
 
+func TestChargeFlow_TransactionReplayAfterStateChangeIsTerminal(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		feePayer bool
+		reason   string
+	}{
+		{name: "unsponsored", reason: "transaction hash already used"},
+		{name: "sponsored", feePayer: true, reason: "sponsored transaction already used"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, tt.feePayer, []tempo.ChargeMode{tempo.ChargeModePull})
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			config := IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore()}
+			if tt.feePayer {
+				config.FeePayerPrivateKey = feePayerKey
+			}
+			intent, err := NewIntent(config)
+			require.NoError(t, err)
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+
+			// The first payment spent the payer's balance, so a replayed
+			// simulation would now revert.
+			rpc.callRequests = nil
+			rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+				return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, "execution reverted", nil), nil
+			}
+			_, err = intent.Verify(ctx, credential, request.Map())
+			var replayed *mpp.PaymentError
+			require.ErrorAs(t, err, &replayed)
+			assert.Equal(t, http.StatusForbidden, replayed.Status)
+			assert.Equal(t, tt.reason, replayed.Detail)
+			assert.Empty(t, rpc.callRequests)
+			assert.Len(t, rpc.sentRawTxs, 1)
+		})
+	}
+}
+
 func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)

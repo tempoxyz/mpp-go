@@ -475,11 +475,41 @@ func (i *Intent) validateTransaction(
 		if !feePayerForm && tx.FeeToken != (common.Address{}) {
 			return mpp.ErrInvalidPayload("fee payer transaction must omit fee token before co-signing")
 		}
-	} else if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
-		return err
+	} else {
+		// Answer replays before the state-dependent simulation: once the first
+		// payment has moved funds, a replayed simulation can fail and would
+		// otherwise send a fresh 402 challenge. Broadcast still claims the hash
+		// atomically.
+		serialized, err := tempotx.Serialize(tx, nil)
+		if err != nil {
+			return mpp.ErrVerificationFailed("failed to serialize transaction")
+		}
+		hash, err := tempotx.ComputeHash(serialized)
+		if err != nil {
+			return mpp.ErrVerificationFailed("failed to compute transaction hash")
+		}
+		if err := i.rejectUsedCredential(ctx, tempo.ChargeStoreKey(hash.Hex()), "transaction hash already used"); err != nil {
+			return err
+		}
+		if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
+			return err
+		}
 	}
 	validated.sender = sender
 	validated.tx = tx
+	return nil
+}
+
+// rejectUsedCredential reads replay state without claiming it, so replays get
+// the terminal 403 before any check that depends on chain state.
+func (i *Intent) rejectUsedCredential(ctx context.Context, key, reason string) error {
+	_, exists, err := i.store.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return mpp.ErrCredentialReplayed(reason)
+	}
 	return nil
 }
 
@@ -537,20 +567,24 @@ func (i *Intent) broadcastTransaction(
 	}()
 
 	if request.MethodDetails.FeePayer {
-		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
-			return nil, err
-		}
 		// Preserve reservations from earlier versions while their credentials remain valid.
-		if _, exists, err := i.store.Get(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID)); err != nil {
+		if err := i.rejectUsedCredential(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID), "fee payer challenge already used"); err != nil {
 			return nil, err
-		} else if exists {
-			return nil, mpp.ErrCredentialReplayed("fee payer challenge already used")
 		}
 		clientTxHash, err := sponsoredTransactionHash(tx, sender)
 		if err != nil {
 			return nil, mpp.ErrMalformedCredential("failed to hash fee payer transaction")
 		}
 		sponsoredClaimKey = tempo.ChargeSponsoredTransactionStoreKey(clientTxHash)
+		// Answer replays before state-dependent simulations: once the first
+		// payment has moved funds, a replayed simulation can fail and would
+		// otherwise send a fresh 402 challenge. The claim below stays atomic.
+		if err := i.rejectUsedCredential(ctx, sponsoredClaimKey, "sponsored transaction already used"); err != nil {
+			return nil, err
+		}
+		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
+			return nil, err
+		}
 		accepted, err := i.store.PutIfAbsent(ctx, sponsoredClaimKey, clientTxHash)
 		if err != nil {
 			return nil, err
