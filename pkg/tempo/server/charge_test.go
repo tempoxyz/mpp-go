@@ -669,12 +669,11 @@ func TestChargeHTTPFlow_KeychainFeePayerSigningForm(t *testing.T) {
 				if broadcast.FeeToken != common.HexToAddress(tempo.PathUSDAddress) {
 					return "", nil, fmt.Errorf("broadcast fee token = %s, want %s", broadcast.FeeToken.Hex(), tempo.PathUSDAddress)
 				}
-				gotParity := broadcast.Signature.Raw[keychain.KeychainSignatureLength-1]
-				if tc.legacyYParity && gotParity != 27 && gotParity != 28 {
-					return "", nil, fmt.Errorf("broadcast y parity = %d, want unmodified legacy parity", gotParity)
-				}
-				if !tc.legacyYParity && gotParity != 0 && gotParity != 1 {
-					return "", nil, fmt.Errorf("broadcast y parity = %d, want canonical parity", gotParity)
+				// Nodes hash keychain inner signatures with a 27/28 recovery ID,
+				// so the broadcast uses that encoding for either input form.
+				gotParity := raw[len(raw)-2:]
+				if gotParity != "1b" && gotParity != "1c" {
+					return "", nil, fmt.Errorf("broadcast y parity = 0x%s, want 27/28", gotParity)
 				}
 				feePayer, err := tempotx.VerifyFeePayerSignature(broadcast, rootSigner.Address())
 				if err != nil {
@@ -2013,6 +2012,62 @@ func TestChargeFlow_TransactionCredentialBroadcastsCanonicalRecoveryID(t *testin
 			canonical := rawForm[:len(rawForm)-2] + map[string]string{"00": "1b", "01": "1c"}[recoveryID]
 			forms := []string{rawForm, canonical}
 			if electrumFirst {
+				forms[0], forms[1] = forms[1], forms[0]
+			}
+
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			require.NoError(t, err)
+
+			credential.Payload["signature"] = forms[0]
+			receipt, err := intent.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+			require.Equal(t, []string{canonical}, rpc.sentRawTxs)
+			require.Equal(t, crypto.Keccak256Hash(common.FromHex(canonical)).Hex(), receipt.Reference)
+
+			credential.Payload["signature"] = forms[1]
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.ErrorContains(t, err, "transaction hash already used")
+			require.Len(t, rpc.sentRawTxs, 1)
+		})
+	}
+}
+
+func TestChargeFlow_KeychainTransactionCredentialBroadcastsCanonicalRecoveryID(t *testing.T) {
+	for _, legacyFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacyFirst=%v", legacyFirst), func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			rootSigner, err := temposigner.NewSigner(testPrivateKey)
+			require.NoError(t, err)
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				hash, err := tempotx.ComputeHash(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				return hash.Hex(), buildReceipt(raw, request, rootSigner.Address()), nil
+			}
+
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+			require.NoError(t, err)
+			accessSigner, err := temposigner.NewSigner(accessKey)
+			require.NoError(t, err)
+			tx.Signature = nil
+			tx.From = common.Address{}
+			authorization := keychain.NewKeyAuthorization(42431, keychain.SignatureTypeSecp256k1, accessSigner.Address()).
+				WithExpiry(uint64(time.Now().Add(5 * time.Minute).Unix()))
+			require.NoError(t, authorization.SignAndAttach(tx, rootSigner))
+			require.NoError(t, keychain.SignWithAccessKey(tx, accessSigner, rootSigner.Address()))
+			rawForm, err := tempotx.Serialize(tx, nil)
+			require.NoError(t, err)
+
+			recoveryID := rawForm[len(rawForm)-2:]
+			require.Contains(t, []string{"00", "01"}, recoveryID)
+			canonical := rawForm[:len(rawForm)-2] + map[string]string{"00": "1b", "01": "1c"}[recoveryID]
+			forms := []string{rawForm, canonical}
+			if legacyFirst {
 				forms[0], forms[1] = forms[1], forms[0]
 			}
 

@@ -698,11 +698,15 @@ func (i *Intent) broadcastTransaction(
 	), nil
 }
 
+// keychainV1SignatureType is the legacy Keychain V1 signature type byte.
+const keychainV1SignatureType = 0x03
+
 // canonicalBroadcastTransaction rewrites a secp256k1 sender signature's
-// recovery ID from 0/1 to 27/28. Tempo nodes encode
-// secp256k1 signatures that way when deriving the transaction hash, and so
-// does mppx, while tempo-go serializes 0/1. Hashing and broadcasting the
-// node's encoding keeps the replay key equal to the receipt reference.
+// recovery ID from 0/1 to 27/28, including the inner secp256k1 signature of
+// a keychain envelope. Tempo nodes encode secp256k1 signatures that way when
+// deriving the transaction hash, and so does mppx, while tempo-go serializes
+// 0/1. Hashing and broadcasting the node's encoding keeps the replay key
+// equal to the receipt reference.
 func canonicalBroadcastTransaction(serialized string) (string, error) {
 	raw, err := hexutil.Decode(serialized)
 	if err != nil {
@@ -731,7 +735,14 @@ func canonicalBroadcastTransaction(serialized string) (string, error) {
 	if kind != rlp.String {
 		return serialized, nil
 	}
-	if len(signature) != 65 {
+	switch {
+	case len(signature) == 65:
+	case len(signature) == keychain.KeychainSignatureLength &&
+		(signature[0] == keychainV1SignatureType || signature[0] == keychain.KeychainSignatureType):
+		// Keychain envelopes (type || root account || inner signature) wrap a
+		// secp256k1 inner signature at this length, which the node re-encodes
+		// the same way.
+	default:
 		return serialized, nil
 	}
 	// The signature is the transaction's last field, so its recovery ID is
