@@ -3,8 +3,6 @@ package chargeserver
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -161,7 +157,7 @@ func (r *relayClient) validate(
 	if err != nil {
 		return nil, relayFailure(credential, nil)
 	}
-	validation, err := r.post(ctx, r.validateURL, input, "")
+	validation, err := r.post(ctx, r.validateURL, input)
 	if err != nil || !validation.Success {
 		return nil, relayFailure(credential, validation.Error)
 	}
@@ -181,8 +177,16 @@ func (r *relayClient) broadcast(ctx context.Context, credential *mpp.Credential)
 	if err != nil {
 		return nil, relayFailure(credential, nil)
 	}
-	broadcast, err := r.post(ctx, r.broadcastURL, input, relayIdempotencyKey(credential, input))
-	if err != nil || !broadcast.Success || broadcast.Receipt == nil {
+	// Send no idempotency key: a cached settlement receipt must not authorize
+	// another protected operation, so the relay consumes each credential once.
+	broadcast, err := r.post(ctx, r.broadcastURL, input)
+	if err != nil {
+		// The relay may have settled the payment before the exchange failed.
+		// Without an idempotency key a retry cannot recover the receipt, so tell
+		// the app the outcome is unknown and must be reconciled separately.
+		return nil, relaySettlementUnknown()
+	}
+	if !broadcast.Success || broadcast.Receipt == nil {
 		return nil, relayFailure(credential, broadcast.Error)
 	}
 	return parseRelayReceipt(broadcast.Receipt)
@@ -219,7 +223,6 @@ func (r *relayClient) post(
 	ctx context.Context,
 	endpoint string,
 	input []byte,
-	idempotencyKey string,
 ) (relayResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(input))
 	if err != nil {
@@ -228,9 +231,6 @@ func (r *relayClient) post(
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Tempo-API-Key", r.apiKey)
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
-	}
 
 	response, err := r.httpClient.Do(req)
 	if err != nil {
@@ -249,18 +249,6 @@ func (r *relayClient) post(
 		return relayResponse{}, err
 	}
 	return result, nil
-}
-
-func relayIdempotencyKey(credential *mpp.Credential, input []byte) string {
-	if credential.Payload["type"] == string(tempo.CredentialTypeTransaction) {
-		if signature, ok := credential.Payload["signature"].(string); ok {
-			if raw, err := hexutil.Decode(signature); err == nil {
-				return "mpp_" + crypto.Keccak256Hash(raw).Hex()
-			}
-		}
-	}
-	digest := sha256.Sum256(input)
-	return "mpp_0x" + hex.EncodeToString(digest[:])
 }
 
 func parseRelayReceipt(receipt *relayReceipt) (*mpp.Receipt, error) {
@@ -288,6 +276,16 @@ func relayFailure(credential *mpp.Credential, relayErr *relayError) error {
 	if relayErr != nil {
 		err.Details = safeRelayErrorDetails(relayErr.Code)
 	}
+	return err
+}
+
+// relaySettlementUnknownCode marks a broadcast whose outcome is unknown because
+// the relay exchange failed after the request may have been sent.
+const relaySettlementUnknownCode = "settlement_unknown"
+
+func relaySettlementUnknown() error {
+	err := mpp.ErrVerificationFailed("payment verification failed")
+	err.Details = map[string]any{"code": relaySettlementUnknownCode}
 	return err
 }
 
