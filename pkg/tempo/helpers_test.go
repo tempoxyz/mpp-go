@@ -116,6 +116,24 @@ func TestNormalizeChargeRequest_RejectsNegativeDecimals(t *testing.T) {
 
 }
 
+func TestNormalizeChargeRequest_RejectsBareDecimalSeparator(t *testing.T) {
+	t.Parallel()
+
+	// "." has no digits on either side of the separator. It used to normalize
+	// to "0", which downgrades the charge to a zero-amount one.
+	_, err := NormalizeChargeRequest(ChargeRequestParams{
+		Amount:    ".",
+		Currency:  "0x20c0000000000000000000000000000000000001",
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Decimals:  6,
+	})
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), `invalid amount "."`),
+		"NormalizeChargeRequest() error = %v, want invalid amount error", err) {
+		return
+	}
+
+}
+
 func TestNormalizeChargeRequest_RejectsInvalidSplits(t *testing.T) {
 	t.Parallel()
 
