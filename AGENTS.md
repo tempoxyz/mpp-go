@@ -139,6 +139,38 @@ go build ./...                                       # Build all packages
 docker compose up -d                                 # Start local Tempo devnet
 go run ./examples/charge-basic                       # Run charge-basic example
 TEMPO_RPC_URL=http://localhost:8545 make integration  # Run integration tests
+make test                                            # Unit tests with -race -shuffle=on -count=1 (as CI)
+make lint                                            # golangci-lint (.golangci.yml), new issues since origin/main only
+make lint-all                                        # golangci-lint, every issue including existing ones
+make vuln                                            # govulncheck ./...
+make mod-check                                       # go mod tidy -diff && go mod verify
+make fuzz FUZZTIME=60s                               # Run every Fuzz* target under pkg/ (CI: nightly, fuzz.yml)
+go test -run='^$' -fuzz='^FuzzParseChallenge$' -fuzztime=30s ./pkg/mpp  # Run one fuzz target
+```
+
+CI runs unit tests on the minimum Go version in go.mod (`go` line, with
+`GOTOOLCHAIN=local`) and on the latest stable release, and cross-compiles
+for darwin and windows. Install golangci-lint v2 to run `make lint`; CI
+reports only issues on lines a change touches, so don't reformat untouched code
+to fix existing findings.
+
+### API compatibility
+
+The API compatibility workflow (`.github/workflows/api-compat.yml`) runs
+`apidiff` between a pull request's merge base and head and fails on an
+incompatible change to an exported API under `pkg/` unless one of the pull
+request's `.changelog/*.md` files declares `github.com/tempoxyz/mpp-go: minor`
+(or `major`). Before v1, a breaking change is a minor bump. Prefer a compatible
+change: add rather than remove or rename, and mark old APIs `// Deprecated:`.
+To run it locally:
+
+```bash
+go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261014143641-f0251eb4aa3e
+git worktree add --detach /tmp/mpp-go-base origin/main
+(cd /tmp/mpp-go-base && apidiff -m -w /tmp/base.api github.com/tempoxyz/mpp-go)
+apidiff -m -w /tmp/head.api github.com/tempoxyz/mpp-go
+apidiff -m -incompatible /tmp/base.api /tmp/head.api   # lines under ./pkg/ are breaking
+git worktree remove /tmp/mpp-go-base
 ```
 
 ## READMEs

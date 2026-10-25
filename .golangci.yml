@@ -1,0 +1,59 @@
+# golangci-lint v2 configuration. CI reports only issues introduced since the
+# merge base with main (--new-from-rev), so existing findings don't block PRs.
+# Run `make lint` locally; `make lint-all` lists every finding.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - misspell
+    - noctx
+    - revive
+    - staticcheck
+    - unparam
+    - usestdlibvars
+  settings:
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: exported
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Tests and examples favor brevity: unchecked errors, insecure test
+      # servers and requests without a context are fine there.
+      - path: (_test\.go|^examples/|^tests/)
+        linters:
+          - bodyclose
+          - errcheck
+          - gosec
+          - noctx
+          - unparam
+      # Example programs are package main and need no exported doc comments.
+      - path: ^examples/
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/tempoxyz/mpp-go

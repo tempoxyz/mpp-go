@@ -1,0 +1,78 @@
+name: API compatibility
+
+# Fails a pull request that makes an incompatible change to the exported API
+# under pkg/ (golang.org/x/exp/cmd/apidiff), unless one of its .changelog/*.md
+# files declares a minor or major bump. Before v1, a breaking change is a
+# minor bump. See AGENTS.md (Commands) to run the same check locally.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  apidiff:
+    name: apidiff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install apidiff
+        run: go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261014143641-f0251eb4aa3e
+      - name: Compare exported API with the base branch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          module=$(go list -m)
+          base=$(git merge-base "$BASE_SHA" HEAD)
+          git worktree add --detach "$RUNNER_TEMP/base" "$base"
+          (cd "$RUNNER_TEMP/base" && apidiff -m -w "$RUNNER_TEMP/base.api" "$module")
+          apidiff -m -w "$RUNNER_TEMP/head.api" "$module"
+          apidiff -m "$RUNNER_TEMP/base.api" "$RUNNER_TEMP/head.api" | grep -v '^Ignoring internal package' | tee "$RUNNER_TEMP/apidiff.txt" || true
+          apidiff -m -incompatible "$RUNNER_TEMP/base.api" "$RUNNER_TEMP/head.api" \
+            | grep '^- \./pkg/' > "$RUNNER_TEMP/incompatible.txt" || true
+
+          if [[ ! -s "$RUNNER_TEMP/incompatible.txt" ]]; then
+            echo "No incompatible API changes under ./pkg." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### Incompatible API changes under ./pkg"
+            echo '```'
+            cat "$RUNNER_TEMP/incompatible.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          bump=""
+          while IFS= read -r file; do
+            if grep -Eq "^$module: (minor|major)[[:space:]]*$" "$file"; then
+              bump="$file"
+            fi
+          done < <(git diff --name-only --diff-filter=AM "$base" HEAD -- '.changelog/*.md')
+
+          if [[ -n "$bump" ]]; then
+            echo "::warning::Incompatible API changes are declared by $bump."
+            exit 0
+          fi
+          cat "$RUNNER_TEMP/incompatible.txt"
+          echo "::error::Incompatible API changes under ./pkg need a .changelog/*.md entry with '$module: minor' (or major), or a compatible alternative (add, don't remove; deprecate instead)."
+          exit 1

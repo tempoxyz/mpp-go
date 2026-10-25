@@ -1,0 +1,46 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Nightly at 08:00 UTC.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Time to run each fuzz target (go test -fuzztime)
+        default: 60s
+        required: false
+
+permissions: {}
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Runs every Fuzz* target under pkg/ (the same loop as `make fuzz`). A
+      # failing input is written to <package>/testdata/fuzz/<target>/.
+      - name: Fuzz every target
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '60s' }}
+        run: make fuzz FUZZTIME="$FUZZTIME"
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failures
+          path: pkg/**/testdata/fuzz/
+          if-no-files-found: ignore
