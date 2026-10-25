@@ -1,4 +1,4 @@
-.PHONY: all build_examples clean test test-coverage check fix integration docs help
+.PHONY: all build_examples clean test test-coverage check fix lint lint-all vuln mod-check fuzz integration docs help
 
 # Default target
 all: check
@@ -13,9 +13,10 @@ clean:
 	rm -rf bin/
 	rm -f cover.out cover.html coverage.out
 
-# Run unit tests only (integration tests use a build tag and are excluded)
+# Run unit tests only (integration tests use a build tag and are excluded),
+# with the race detector and in random order, as CI does
 test:
-	go test ./...
+	go test -race -shuffle=on -count=1 ./...
 
 # Run unit tests with coverage
 test-coverage:
@@ -33,6 +34,35 @@ check:
 fix:
 	gofmt -s -w .
 	go mod tidy
+
+# Report golangci-lint issues introduced since the merge base with LINT_BASE
+# (as CI does); install: https://golangci-lint.run/docs/welcome/install/
+LINT_BASE ?= origin/main
+lint:
+	golangci-lint run --new-from-merge-base=$(LINT_BASE) ./...
+
+# Report every golangci-lint issue, including pre-existing ones
+lint-all:
+	golangci-lint run ./...
+
+# Scan for known vulnerabilities reachable from this module
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+# Check go.mod and go.sum are tidy and dependencies match go.sum
+mod-check:
+	go mod tidy -diff
+	go mod verify
+
+# Run every Fuzz* target under pkg/ for FUZZTIME each
+FUZZTIME ?= 20s
+fuzz:
+	@set -e; for pkg in $$(go list ./pkg/...); do \
+		for target in $$(go test -list '^Fuzz' $$pkg | grep '^Fuzz'); do \
+			echo "==> $$pkg $$target"; \
+			go test -run='^$$' -fuzz="^$$target\$$" -fuzztime=$(FUZZTIME) $$pkg; \
+		done; \
+	done
 
 # Run integration tests against the local Tempo devnet by default
 integration:
@@ -54,5 +84,10 @@ help:
 	@echo "  test-coverage   Run unit tests with coverage report"
 	@echo "  check           Run formatting checks, vet, and tests"
 	@echo "  fix             Format code and tidy modules"
+	@echo "  lint            Run golangci-lint on changes since LINT_BASE (origin/main)"
+	@echo "  lint-all        Run golangci-lint on the whole module"
+	@echo "  vuln            Run govulncheck"
+	@echo "  mod-check       Check go.mod/go.sum are tidy and verified"
+	@echo "  fuzz            Run each fuzz target for FUZZTIME (default 20s)"
 	@echo "  integration     Run integration tests against TEMPO_RPC_URL"
 	@echo "  docs            Start a local godoc server"

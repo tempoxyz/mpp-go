@@ -24,6 +24,8 @@ jobs:
         uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # golangci-lint compares against the base branch to report only new issues.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -36,6 +38,7 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
+            ~/.cache/golangci-lint
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-lint-${{ hashFiles('**/go.sum') }}
           restore-keys: |
@@ -43,16 +46,44 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+      - run: go mod verify
+      - name: Cross-compile for darwin and windows
+        run: |
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=windows GOARCH=amd64 go build ./...
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+      # Existing findings don't fail CI: only issues on lines a pull request
+      # (or a push to main) changes are reported. `make lint-all` lists all.
+      - name: golangci-lint (new issues only)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ -n "$BASE_REF" ]]; then
+            golangci-lint run --new-from-merge-base="origin/$BASE_REF" ./...
+          elif [[ -n "$BEFORE" && "$BEFORE" != 0000000000000000000000000000000000000000 ]]; then
+            golangci-lint run --new-from-rev="$BEFORE" ./...
+          else
+            golangci-lint run --new-from-rev=HEAD~1 ./...
+          fi
 
   test:
     name: Test (Go ${{ matrix.go-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        go-version: ['1.26.10']
+        # The minimum Go version go.mod declares, and the latest release.
+        go-version: ['1.26.0', 'stable']
     permissions:
       contents: read
       id-token: write
+    env:
+      # Test with the matrix Go release, not go.mod's toolchain line.
+      GOTOOLCHAIN: local
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
@@ -60,6 +91,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup-go
         with:
           go-version: ${{ matrix.go-version }}
           cache: false
@@ -69,11 +101,11 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-
       - run: go build ./examples/...
-      - run: go test -race -count=1 ./...
+      - run: go test -race -shuffle=on -count=1 ./...
 
   integration:
     name: Integration Test
