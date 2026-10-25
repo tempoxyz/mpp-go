@@ -25,6 +25,7 @@ type Transport struct {
 	acceptPayment      string
 	configErr          error
 	trustedProofRealms map[string]string
+	onChallenge        OnChallengeFunc
 }
 
 const defaultMaxPaymentRetries = 3
@@ -42,6 +43,34 @@ type TransportOption func(*transportConfig)
 type transportConfig struct {
 	paymentPreferences PaymentPreferences
 	trustedProofRealms map[string]string
+	onChallenge        OnChallengeFunc
+}
+
+// OnChallengeFunc is called when the transport has selected a 402 challenge it
+// can pay, before any credential is created. It mirrors mppx's onChallenge.
+//
+// createCredential creates a credential with the selected method; ctx can carry
+// method-specific context for this request. The hook can:
+//
+//   - return (nil, nil) to let the transport create the credential itself,
+//   - return a credential, from createCredential or built another way, to send it,
+//   - return an error to decline the payment: RoundTrip returns that error,
+//     wrapped, and does not pay.
+//
+// It runs once per challenge: a credential the transport already created for
+// the same challenge is reused without calling it again.
+type OnChallengeFunc func(
+	ctx context.Context,
+	challenge *mpp.Challenge,
+	createCredential func(ctx context.Context) (*mpp.Credential, error),
+) (*mpp.Credential, error)
+
+// WithTransportOnChallenge sets a hook that runs before the transport creates a
+// credential for a 402 challenge. Client users should use WithOnChallenge.
+func WithTransportOnChallenge(onChallenge OnChallengeFunc) TransportOption {
+	return func(config *transportConfig) {
+		config.onChallenge = onChallenge
+	}
 }
 
 // WithTransportTrustedProofRealm pins the Tempo proof realm for a known HTTP origin.
@@ -86,6 +115,7 @@ func NewTransport(methods []Method, inner http.RoundTripper, opts ...TransportOp
 		acceptPayment:      header,
 		configErr:          err,
 		trustedProofRealms: config.trustedProofRealms,
+		onChallenge:        config.onChallenge,
 	}
 }
 
@@ -152,12 +182,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		cred := credentials[key]
 		if cred == nil {
-			cred, err = selected.method.CreateCredential(baseRequest.Context(), selected.challenge)
+			cred, err = t.createCredential(baseRequest.Context(), selected)
 			if err != nil {
 				if retry.Body != nil {
 					_ = retry.Body.Close()
 				}
-				return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
+				return nil, err
 			}
 			credentials[key] = cred
 		}
@@ -173,6 +203,29 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		request = retry
 		sentCredential = key
 	}
+}
+
+// createCredential runs the OnChallenge hook, when set, and otherwise creates
+// the credential with the selected method.
+func (t *Transport) createCredential(ctx context.Context, selected challengeCandidate) (*mpp.Credential, error) {
+	create := func(ctx context.Context) (*mpp.Credential, error) {
+		cred, err := selected.method.CreateCredential(ctx, selected.challenge)
+		if err != nil {
+			return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
+		}
+		return cred, nil
+	}
+	if t.onChallenge == nil {
+		return create(ctx)
+	}
+	cred, err := t.onChallenge(ctx, selected.challenge, create)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: onChallenge: %w", err)
+	}
+	if cred == nil {
+		return create(ctx)
+	}
+	return cred, nil
 }
 
 // isInvalidPayloadResponse inspects only responses that will be consumed for a

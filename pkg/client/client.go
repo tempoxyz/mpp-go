@@ -46,6 +46,7 @@ type Client struct {
 	httpClient         *http.Client
 	paymentPreferences PaymentPreferences
 	trustedProofRealms map[string]string
+	onChallenge        OnChallengeFunc
 }
 
 // Option configures the Client.
@@ -78,6 +79,15 @@ func WithTrustedTempoProofRealm(origin, realm string) Option {
 	}
 }
 
+// WithOnChallenge sets a hook that runs when Do receives a 402 challenge it can
+// pay, before a credential is created. Use it to approve or decline a payment
+// or to supply the credential. See OnChallengeFunc.
+func WithOnChallenge(onChallenge OnChallengeFunc) Option {
+	return func(c *Client) {
+		c.onChallenge = onChallenge
+	}
+}
+
 // New creates a Client with the given payment methods.
 func New(methods []Method, opts ...Option) *Client {
 	c := &Client{
@@ -102,6 +112,9 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	req = req.WithContext(withPaymentOrigin(req.Context(), origin))
 
 	options := []TransportOption{WithTransportPaymentPreferences(c.paymentPreferences)}
+	if c.onChallenge != nil {
+		options = append(options, WithTransportOnChallenge(c.onChallenge))
+	}
 	for trustedOrigin, realm := range c.trustedProofRealms {
 		options = append(options, WithTransportTrustedProofRealm(trustedOrigin, realm))
 	}
