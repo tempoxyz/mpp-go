@@ -15,14 +15,14 @@ var realmEnvVars = []string{
 	"RENDER_EXTERNAL_HOSTNAME",
 	"VERCEL_URL",
 	"WEBSITE_HOSTNAME",
-	"HOST",
-	"HOSTNAME",
 }
 
 // DetectRealm auto-detects the server realm from environment variables.
 // It checks MPP_REALM, FLY_APP_NAME, HEROKU_APP_NAME, RAILWAY_PUBLIC_DOMAIN,
-// RENDER_EXTERNAL_HOSTNAME, VERCEL_URL, WEBSITE_HOSTNAME, HOST, and HOSTNAME
-// in that order. Returns "MPP Payment" if none are set.
+// RENDER_EXTERNAL_HOSTNAME, VERCEL_URL, and WEBSITE_HOSTNAME in that order.
+// Returns "MPP Payment" if none are set. HOST and HOSTNAME are not read:
+// container runtimes set HOSTNAME per replica, and the realm is bound into
+// the challenge ID, so replicas would reject each other's credentials.
 func DetectRealm() string {
 	for _, envVar := range realmEnvVars {
 		if v := os.Getenv(envVar); v != "" {
