@@ -22,9 +22,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
@@ -83,8 +83,8 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 	payerSigner := newSigner(t)
 	fundAddress(t, ctx, rpc, payerSigner.Address())
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
@@ -97,11 +97,11 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid")
+	response, err := c.Get(ctx, srv.URL+"/paid")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -177,8 +177,8 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 	fundAddress(t, ctx, rpc, payerSigner.Address())
 	fundAddress(t, ctx, rpc, feePayerSigner.Address())
 
-	server := newPaidServer(t, rpcURL, chainID, feePayerSigner)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, feePayerSigner)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
@@ -191,11 +191,11 @@ func TestIntegrationChargeFlow_LocalNodeFeePayer(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-fee-payer")
+	response, err := c.Get(ctx, srv.URL+"/paid-fee-payer")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -309,8 +309,8 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	payerSigner := newSigner(t)
 	fundAddress(t, ctx, rpc, payerSigner.Address())
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:         payerSigner,
@@ -324,11 +324,11 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-hash")
+	response, err := c.Get(ctx, srv.URL+"/paid-hash")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -365,7 +365,7 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 		return
 	}
 
-	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/paid-hash", nil)
+	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/paid-hash", nil)
 	if !assert.NoErrorf(t, err,
 		"NewRequestWithContext() error = %v", err) {
 		return
@@ -405,8 +405,8 @@ func TestIntegrationChargeFlow_HashCredentialRequiresSource(t *testing.T) {
 	payerSigner := newSigner(t)
 	fundAddress(t, ctx, rpc, payerSigner.Address())
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:         payerSigner,
@@ -420,11 +420,11 @@ func TestIntegrationChargeFlow_HashCredentialRequiresSource(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-hash")
+	response, err := c.Get(ctx, srv.URL+"/paid-hash")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -444,7 +444,7 @@ func TestIntegrationChargeFlow_HashCredentialRequiresSource(t *testing.T) {
 	}
 
 	credential.Source = ""
-	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/paid-hash", nil)
+	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/paid-hash", nil)
 	if !assert.NoErrorf(t, err,
 		"NewRequestWithContext() error = %v", err) {
 		return
@@ -482,8 +482,8 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 	chainID := waitForRPC(t, ctx, rpc)
 	payerSigner := newSigner(t)
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
@@ -496,12 +496,12 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
-		mppclient.WithTrustedTempoProofRealm(server.URL, "127.0.0.1"),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
+		client.WithTrustedTempoProofRealm(srv.URL, "127.0.0.1"),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-proof")
+	response, err := c.Get(ctx, srv.URL+"/paid-proof")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -550,8 +550,8 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	chainID := waitForRPC(t, ctx, rpc)
 	payerSigner := newSigner(t)
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
@@ -564,12 +564,12 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
-		mppclient.WithTrustedTempoProofRealm(server.URL, "127.0.0.1"),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
+		client.WithTrustedTempoProofRealm(srv.URL, "127.0.0.1"),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-proof")
+	response, err := c.Get(ctx, srv.URL+"/paid-proof")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -587,7 +587,7 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 		return
 	}
 
-	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/paid-proof", nil)
+	replayRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/paid-proof", nil)
 	if !assert.NoErrorf(t, err,
 		"NewRequestWithContext() error = %v", err) {
 		return
@@ -627,8 +627,8 @@ func TestIntegrationChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
 	payerSigner := newSigner(t)
 	fundAddress(t, ctx, rpc, payerSigner.Address())
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
@@ -641,11 +641,11 @@ func TestIntegrationChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-splits")
+	response, err := c.Get(ctx, srv.URL+"/paid-splits")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -700,8 +700,8 @@ func TestIntegrationChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
 	payerSigner := newSigner(t)
 	fundAddress(t, ctx, rpc, payerSigner.Address())
 
-	server := newPaidServer(t, rpcURL, chainID, nil)
-	defer server.Close()
+	srv := newPaidServer(t, rpcURL, chainID, nil)
+	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
 		Signer:  payerSigner,
@@ -714,11 +714,11 @@ func TestIntegrationChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
 	}
 
 	transport := &captureTransport{inner: http.DefaultTransport}
-	client := mppclient.New(
-		[]mppclient.Method{clientMethod},
-		mppclient.WithHTTPClient(&http.Client{Transport: transport}),
+	c := client.New(
+		[]client.Method{clientMethod},
+		client.WithHTTPClient(&http.Client{Transport: transport}),
 	)
-	response, err := client.Get(ctx, server.URL+"/paid-external-id")
+	response, err := c.Get(ctx, srv.URL+"/paid-external-id")
 	if !assert.NoErrorf(t, err,
 		"client.Get() error = %v", err) {
 		return
@@ -998,11 +998,11 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 	return httptest.NewServer(mux)
 }
 
-func paidHandler(t *testing.T, payment *mppserver.Mpp, feePayer bool) http.HandlerFunc {
+func paidHandler(t *testing.T, payment *server.Mpp, feePayer bool) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+		result, err := payment.Charge(r.Context(), server.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
 			Amount:        "1.00",
 			FeePayer:      feePayer,
@@ -1028,11 +1028,11 @@ func paidHandler(t *testing.T, payment *mppserver.Mpp, feePayer bool) http.Handl
 	}
 }
 
-func paidHandlerWithAmount(t *testing.T, payment *mppserver.Mpp, amount string) http.HandlerFunc {
+func paidHandlerWithAmount(t *testing.T, payment *server.Mpp, amount string) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+		result, err := payment.Charge(r.Context(), server.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
 			Amount:        amount,
 		})
@@ -1057,11 +1057,11 @@ func paidHandlerWithAmount(t *testing.T, payment *mppserver.Mpp, amount string) 
 	}
 }
 
-func paidHandlerWithSplitsAndExternalID(t *testing.T, payment *mppserver.Mpp) http.HandlerFunc {
+func paidHandlerWithSplitsAndExternalID(t *testing.T, payment *server.Mpp) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+		result, err := payment.Charge(r.Context(), server.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
 			Amount:        "1.00",
 			ExternalID:    "ext-splits-123",
@@ -1091,11 +1091,11 @@ func paidHandlerWithSplitsAndExternalID(t *testing.T, payment *mppserver.Mpp) ht
 	}
 }
 
-func paidHandlerWithExternalID(t *testing.T, payment *mppserver.Mpp, amount, externalID string) http.HandlerFunc {
+func paidHandlerWithExternalID(t *testing.T, payment *server.Mpp, amount, externalID string) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, err := payment.Charge(r.Context(), mppserver.ChargeParams{
+		result, err := payment.Charge(r.Context(), server.ChargeParams{
 			Authorization: r.Header.Get("Authorization"),
 			Amount:        amount,
 			ExternalID:    externalID,
@@ -1137,9 +1137,9 @@ func writeIntegrationPaymentError(w http.ResponseWriter, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"detail": err.Error()})
 }
 
-func newTestServer(t *testing.T, method mppserver.Method, realm, secretKey string) *mppserver.Mpp {
+func newTestServer(t *testing.T, method server.Method, realm, secretKey string) *server.Mpp {
 	t.Helper()
-	payment, err := mppserver.New(method, realm, secretKey)
+	payment, err := server.New(method, realm, secretKey)
 	require.NoError(t, err)
 	return payment
 }

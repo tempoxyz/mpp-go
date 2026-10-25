@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	"github.com/testcontainers/testcontainers-go"
@@ -82,6 +85,8 @@ func startLocalnet(ctx context.Context) (string, func(), error) {
 			Image:        spec.Image,
 			Cmd:          spec.Command,
 			ExposedPorts: []string{"8545/tcp"},
+			// docker-compose.yml publishes the node on 127.0.0.1 only; so do we.
+			HostConfigModifier: bindLoopback("8545/tcp"),
 			WaitingFor: wait.ForHTTP("/").
 				WithPort("8545/tcp").
 				WithMethod(http.MethodPost).
@@ -110,6 +115,21 @@ func startLocalnet(ctx context.Context) (string, func(), error) {
 		return "", nil, err
 	}
 	return endpoint, stop, nil
+}
+
+// bindLoopback publishes each of ports on an ephemeral 127.0.0.1 port instead
+// of Docker's default, every host interface.
+func bindLoopback(ports ...string) func(*container.HostConfig) {
+	return func(hostConfig *container.HostConfig) {
+		if hostConfig.PortBindings == nil {
+			hostConfig.PortBindings = network.PortMap{}
+		}
+		for _, port := range ports {
+			hostConfig.PortBindings[network.MustParsePort(port)] = []network.PortBinding{
+				{HostIP: netip.AddrFrom4([4]byte{127, 0, 0, 1}), HostPort: "0"},
+			}
+		}
+	}
 }
 
 // waitForChainID polls eth_chainId until it answers or ctx ends.

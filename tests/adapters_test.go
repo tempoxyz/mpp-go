@@ -16,9 +16,9 @@ import (
 	fiberfw "github.com/gofiber/fiber/v2"
 	echofw "github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
-	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/server"
 	echoadapter "github.com/tempoxyz/mpp-go/pkg/server/echo"
 	fiberadapter "github.com/tempoxyz/mpp-go/pkg/server/fiber"
 	ginadapter "github.com/tempoxyz/mpp-go/pkg/server/gin"
@@ -27,31 +27,31 @@ import (
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 )
 
-var adapterChargeParams = mppserver.ChargeParams{Amount: "0.50", Description: "Adapter integration"}
+var adapterChargeParams = server.ChargeParams{Amount: "0.50", Description: "Adapter integration"}
 
 // TestIntegrationAdapters pays one request through each framework adapter
 // against the live node.
 func TestIntegrationAdapters(t *testing.T) {
-	adapters := map[string]func(t *testing.T, payment *mppserver.Mpp) string{
-		"net/http": func(t *testing.T, payment *mppserver.Mpp) string {
-			srv := httptest.NewServer(mppserver.ChargeMiddleware(payment, adapterChargeParams)(http.HandlerFunc(
+	adapters := map[string]func(t *testing.T, payment *server.Mpp) string{
+		"net/http": func(t *testing.T, payment *server.Mpp) string {
+			srv := httptest.NewServer(server.ChargeMiddleware(payment, adapterChargeParams)(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
-					writePaidBody(w, mppserver.CredentialFromContext(r.Context()), mppserver.ReceiptFromContext(r.Context()))
+					writePaidBody(w, server.CredentialFromContext(r.Context()), server.ReceiptFromContext(r.Context()))
 				})))
 			t.Cleanup(srv.Close)
 			return srv.URL
 		},
-		"chi": func(t *testing.T, payment *mppserver.Mpp) string {
+		"chi": func(t *testing.T, payment *server.Mpp) string {
 			router := chi.NewRouter()
-			router.With(mppserver.ChargeMiddleware(payment, adapterChargeParams)).Get("/paid",
+			router.With(server.ChargeMiddleware(payment, adapterChargeParams)).Get("/paid",
 				func(w http.ResponseWriter, r *http.Request) {
-					writePaidBody(w, mppserver.CredentialFromContext(r.Context()), mppserver.ReceiptFromContext(r.Context()))
+					writePaidBody(w, server.CredentialFromContext(r.Context()), server.ReceiptFromContext(r.Context()))
 				})
 			srv := httptest.NewServer(router)
 			t.Cleanup(srv.Close)
 			return srv.URL
 		},
-		"gin": func(t *testing.T, payment *mppserver.Mpp) string {
+		"gin": func(t *testing.T, payment *server.Mpp) string {
 			ginfw.SetMode(ginfw.TestMode)
 			router := ginfw.New()
 			router.GET("/paid", ginadapter.ChargeMiddleware(payment, adapterChargeParams), func(c *ginfw.Context) {
@@ -61,7 +61,7 @@ func TestIntegrationAdapters(t *testing.T) {
 			t.Cleanup(srv.Close)
 			return srv.URL
 		},
-		"echo": func(t *testing.T, payment *mppserver.Mpp) string {
+		"echo": func(t *testing.T, payment *server.Mpp) string {
 			e := echofw.New()
 			e.GET("/paid", func(c echofw.Context) error {
 				writePaidBody(c.Response(), echoadapter.Credential(c), echoadapter.Receipt(c))
@@ -71,7 +71,7 @@ func TestIntegrationAdapters(t *testing.T) {
 			t.Cleanup(srv.Close)
 			return srv.URL
 		},
-		"fiber": func(t *testing.T, payment *mppserver.Mpp) string {
+		"fiber": func(t *testing.T, payment *server.Mpp) string {
 			app := fiberfw.New(fiberfw.Config{DisableStartupMessage: true})
 			app.Get("/paid", fiberadapter.ChargeMiddleware(payment, adapterChargeParams), func(c *fiberfw.Ctx) error {
 				credential, receipt := fiberadapter.Credential(c), fiberadapter.Receipt(c)
@@ -99,7 +99,7 @@ func TestIntegrationAdapters(t *testing.T) {
 }
 
 // newLiveCharge returns an Mpp that charges devnet tokens on the live node.
-func newLiveCharge(t *testing.T, store tempo.Store) *mppserver.Mpp {
+func newLiveCharge(t *testing.T, store tempo.Store) *server.Mpp {
 	t.Helper()
 	rpcURL := integrationRPCURL(t)
 	chainID := waitForRPC(t, context.Background(), tempo.NewRPCClient(rpcURL))
@@ -143,8 +143,8 @@ func assertPaidRoute(t *testing.T, url string) {
 	_, err = mpp.ParseChallenge(unpaid.Header.Get("WWW-Authenticate"))
 	require.NoError(t, err)
 
-	client := mppclient.New([]mppclient.Method{newSharedPayerMethod(t, "")})
-	response, err := client.Get(ctx, url)
+	c := client.New([]client.Method{newSharedPayerMethod(t, "")})
+	response, err := c.Get(ctx, url)
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusOK, response.StatusCode)

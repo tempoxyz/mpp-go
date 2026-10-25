@@ -9,8 +9,10 @@ multi-ecosystem-groups:
       timezone: America/Los_Angeles
 
 updates:
+  # tests/ is a separate module that replaces mpp-go with ../ and repeats the
+  # root requirements: update both so they stay in step.
   - package-ecosystem: gomod
-    directory: /
+    directories: [/, /tests]
     patterns: ["*"]
     multi-ecosystem-group: weekly-dependencies
     cooldown:
@@ -24,3 +26,12 @@ updates:
     cooldown:
       # Buffer the scanner's seven-day minimum: Dependabot reads date-only tag metadata.
       default-days: 8
+
+  # The mppx server the cross-SDK smoke workflow runs.
+  - package-ecosystem: npm
+    directory: /.github/smoke-cross-sdk
+    patterns: ["*"]
+    multi-ecosystem-group: weekly-dependencies
+    cooldown:
+      default-days: 7
+      semver-major-days: 7

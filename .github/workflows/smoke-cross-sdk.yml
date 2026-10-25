@@ -42,9 +42,9 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-smoke-${{ hashFiles('go.sum') }}
+          key: ${{ runner.os }}-go-smoke-server-${{ hashFiles('go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-smoke-
+            ${{ runner.os }}-go-smoke-server-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -127,9 +127,9 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-smoke-${{ hashFiles('go.sum') }}
+          key: ${{ runner.os }}-go-smoke-client-${{ hashFiles('go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-smoke-
+            ${{ runner.os }}-go-smoke-client-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -156,6 +156,13 @@ jobs:
           done
           cat "$RUNNER_TEMP/server.log"
           exit 1
+
+      - name: Assert a malformed request target returns 400
+        run: |
+          status=$(printf 'GET http://[invalid/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc -q 5 127.0.0.1 3000 | head -n 1)
+          echo "$status"
+          echo "$status" | grep -q ' 400 ' || { echo "Expected 400"; exit 1; }
+          curl -sf http://localhost:3000/health > /dev/null || { echo "mppx server stopped"; exit 1; }
 
       - name: Assert /paid returns 402 without payment
         run: |

@@ -27,17 +27,22 @@ const charge = Mppx.toNodeListener(mppx.charge({ amount: '0.50', description: 'C
 
 http
   .createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://localhost')
-    if (url.pathname === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ status: 'ok' }))
-      return
-    }
-    if (url.pathname !== '/paid') {
-      res.writeHead(404).end()
-      return
-    }
     try {
+      // URL.parse returns null for a malformed request target such as `http://[invalid/`.
+      const url = URL.parse(req.url ?? '/', 'http://localhost')
+      if (!url) {
+        res.writeHead(400).end()
+        return
+      }
+      if (url.pathname === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ status: 'ok' }))
+        return
+      }
+      if (url.pathname !== '/paid') {
+        res.writeHead(404).end()
+        return
+      }
       const result = await charge(req, res)
       if (result.status === 402) return
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -48,4 +53,4 @@ http
       res.end()
     }
   })
-  .listen(port, () => console.log(`mppx smoke server listening on http://localhost:${port}`))
+  .listen(port, '127.0.0.1', () => console.log(`mppx smoke server listening on http://127.0.0.1:${port}`))
