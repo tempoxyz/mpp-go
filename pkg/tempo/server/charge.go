@@ -29,6 +29,14 @@ import (
 const receiptRetryDelay = 500 * time.Millisecond
 const receiptRetryAttempts = 20
 
+// receiptWaitBudget bounds the post-broadcast receipt wait, which runs
+// detached from the request context.
+const receiptWaitBudget = receiptRetryAttempts*receiptRetryDelay + 5*time.Second
+
+// replayClaimExpiryGrace extends replay keys past their challenge's expiry to
+// absorb clock skew between verifiers and the store.
+const replayClaimExpiryGrace = 10 * time.Minute
+
 // Sponsor policy caps for fee-payer transactions. Tempo fee tokens are TIP-20
 // assets, so the fee budget uses the chain's shared 18-decimal fee accounting.
 var feePayerMaxGas = uint64(2_000_000)
@@ -548,7 +556,7 @@ func (i *Intent) broadcastCredential(
 		if hashPaymentFundedByCurrency(ctx, credential, validated) {
 			options = append(options, mpp.WithFundingCurrency(validated.request.Currency))
 		}
-		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(hash), hash)
+		accepted, err := i.claimReplayKey(ctx, credential, tempo.ChargeStoreKey(hash), hash)
 		if err != nil {
 			return nil, err
 		}
@@ -558,7 +566,7 @@ func (i *Intent) broadcastCredential(
 		return mpp.Success(tempo.MethodName, hash, options...), nil
 	case tempo.CredentialTypeProof:
 		challengeID := credential.Challenge.ID
-		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeProofStoreKey(challengeID), challengeID)
+		accepted, err := i.claimReplayKey(ctx, credential, tempo.ChargeProofStoreKey(challengeID), challengeID)
 		if err != nil {
 			return nil, err
 		}
@@ -582,11 +590,24 @@ func (i *Intent) broadcastTransaction(
 	rpc := validated.rpc
 	sender := validated.sender
 	tx := validated.tx
-	sponsoredClaimKey := ""
-	releaseSponsoredClaim := false
+	// Only a successful settlement consumes the credential, as in mppx: a
+	// signed transaction can be included at most once, so a retry after any
+	// failure re-broadcasts it and recovers its receipt instead of being
+	// rejected as a replay. Every replay claim taken below is released when
+	// settlement fails, even after the broadcast, unless the transaction was
+	// included: a reverted transaction, or one whose receipt does not satisfy
+	// the charge, can never pay the challenge, so its credential stays used.
+	var claimedKeys []string
+	included := false
 	defer func() {
-		if releaseSponsoredClaim {
-			if releaseErr := i.store.Delete(context.WithoutCancel(ctx), sponsoredClaimKey); releaseErr != nil {
+		if err == nil || included {
+			return
+		}
+		// Release with a context the request cannot cancel, so a client
+		// disconnect does not strand the claim.
+		releaseCtx := context.WithoutCancel(ctx)
+		for _, key := range claimedKeys {
+			if releaseErr := i.store.Delete(releaseCtx, key); releaseErr != nil {
 				receipt = nil
 				err = withReplayReleaseError(err, releaseErr)
 			}
@@ -602,7 +623,7 @@ func (i *Intent) broadcastTransaction(
 		if err != nil {
 			return nil, mpp.ErrMalformedCredential("failed to hash fee payer transaction")
 		}
-		sponsoredClaimKey = tempo.ChargeSponsoredTransactionStoreKey(clientTxHash)
+		sponsoredClaimKey := tempo.ChargeSponsoredTransactionStoreKey(clientTxHash)
 		// Answer replays before state-dependent simulations: once the first
 		// payment has moved funds, a replayed simulation can fail and would
 		// otherwise send a fresh 402 challenge. The claim below stays atomic.
@@ -612,14 +633,14 @@ func (i *Intent) broadcastTransaction(
 		if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
 			return nil, err
 		}
-		accepted, err := i.store.PutIfAbsent(ctx, sponsoredClaimKey, clientTxHash)
+		accepted, err := i.claimReplayKey(ctx, credential, sponsoredClaimKey, clientTxHash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
 			return nil, mpp.ErrCredentialReplayed("sponsored transaction already used")
 		}
-		releaseSponsoredClaim = true
+		claimedKeys = append(claimedKeys, sponsoredClaimKey)
 		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
 			return nil, err
 		}
@@ -709,51 +730,57 @@ func (i *Intent) broadcastTransaction(
 		return nil, mpp.ErrVerificationFailed("failed to serialize transaction")
 	}
 
-	reservedHash := ""
+	computedHash, err := tempotx.ComputeHash(serialized)
+	if err != nil {
+		return nil, mpp.ErrVerificationFailed("failed to compute transaction hash")
+	}
+	signedHash := computedHash.Hex()
 	if !request.MethodDetails.FeePayer {
-		computedHash, err := tempotx.ComputeHash(serialized)
-		if err != nil {
-			return nil, mpp.ErrVerificationFailed("failed to compute transaction hash")
-		}
-		reservedHash = computedHash.Hex()
-		accepted, err := i.store.PutIfAbsent(ctx, tempo.ChargeStoreKey(reservedHash), reservedHash)
+		accepted, err := i.claimReplayKey(ctx, credential, tempo.ChargeStoreKey(signedHash), signedHash)
 		if err != nil {
 			return nil, err
 		}
 		if !accepted {
 			return nil, mpp.ErrCredentialReplayed("transaction hash already used")
 		}
+		claimedKeys = append(claimedKeys, tempo.ChargeStoreKey(signedHash))
 	}
 
-	if request.MethodDetails.FeePayer {
-		releaseSponsoredClaim = false
-	}
 	var receiptMap map[string]any
 	txHash, err := rpc.SendRawTransaction(ctx, serialized)
-	// Store writes after the send must not depend on the request context: the
-	// receipt lookup below may outlive it.
+	// Store writes and the receipt wait after the send must not depend on the
+	// request context: abandoning them on a client disconnect would leave the
+	// payment's outcome unrecorded.
 	storeCtx := context.WithoutCancel(ctx)
 	if err != nil {
 		// The node may have included the transaction before its RPC reply failed.
 		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized, err)
 		if !ok {
-			if reservedHash != "" {
-				_ = i.store.Delete(storeCtx, tempo.ChargeStoreKey(reservedHash))
-			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
 		txHash, receiptMap = recoveredHash, recoveredReceipt
+		included = true
 	} else {
-		receiptMap, err = fetchReceipt(ctx, rpc, txHash)
-		if err != nil {
-			return nil, err
+		if !strings.EqualFold(txHash, signedHash) {
+			return nil, mpp.ErrVerificationFailed("broadcast transaction hash does not match the signed transaction")
 		}
+		receiptCtx, cancel := context.WithTimeout(storeCtx, receiptWaitBudget)
+		receiptMap, err = fetchReceipt(receiptCtx, rpc, txHash)
+		cancel()
+		if err != nil {
+			if isTransactionReverted(err) {
+				included = true
+				return nil, err
+			}
+			return nil, broadcastOutcomeUnknown(err)
+		}
+		included = true
 	}
 	if !receiptMatches(receiptMap, credential, request, sender.Hex()) {
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	if request.MethodDetails.FeePayer {
-		accepted, err := i.store.PutIfAbsent(storeCtx, tempo.ChargeStoreKey(txHash), txHash)
+		accepted, err := i.claimReplayKey(storeCtx, credential, tempo.ChargeStoreKey(txHash), txHash)
 		if err != nil {
 			return nil, err
 		}
@@ -897,8 +924,59 @@ func canonicalBroadcastTransaction(serialized string) (string, error) {
 	return hexutil.Encode(raw), nil
 }
 
+// isTransactionReverted reports whether fetchReceipt found a reverted receipt.
+func isTransactionReverted(err error) bool {
+	paymentErr, ok := err.(*mpp.PaymentError)
+	return ok && paymentErr.Detail == "transaction reverted"
+}
+
+// broadcastOutcomeUnknown reports a receipt wait that failed after the node
+// accepted the transaction without showing whether it was included. A retry
+// with the same credential re-broadcasts the transaction, which the node
+// accepts at most once, and recovers its receipt.
+func broadcastOutcomeUnknown(err error) error {
+	detail := err.Error()
+	if paymentErr, ok := err.(*mpp.PaymentError); ok {
+		detail = paymentErr.Detail
+	}
+	return mpp.ErrVerificationFailed("transaction was broadcast but its outcome is unknown (" + detail + "); retry with the same credential to recover its receipt")
+}
+
+// claimReplayKey atomically records first use of a replay key. When the store
+// is a tempo.ExpiringStore, the key expires once the credential can no longer
+// be accepted; see replayClaimExpiry.
+func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential, key, value string) (bool, error) {
+	if store, ok := i.store.(tempo.ExpiringStore); ok {
+		if expiresAt, ok := replayClaimExpiry(credential); ok {
+			return store.PutIfAbsentUntil(ctx, key, value, expiresAt)
+		}
+	}
+	return i.store.PutIfAbsent(ctx, key, value)
+}
+
+// replayClaimExpiry returns when a replay key claimed for credential may
+// expire: its challenge's expiry plus replayClaimExpiryGrace.
+//
+// Every charge credential is bound to its challenge: a proof key is the
+// challenge ID, and the primary transfer of a hash or transaction credential
+// must carry an attribution memo naming the challenge ID. The challenge ID is
+// an HMAC over the challenge's expiry, which server.Mpp verifies before
+// settlement, and credentials are only accepted before that expiry, so after
+// it no challenge can accept the same proof, transaction or hash again. The
+// grace absorbs clock skew between verifier replicas and the store.
+func replayClaimExpiry(credential *mpp.Credential) (time.Time, bool) {
+	if credential == nil || credential.Challenge.Expires == "" {
+		return time.Time{}, false
+	}
+	expires, err := parseExpires(credential.Challenge.Expires)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return expires.Add(replayClaimExpiryGrace), true
+}
+
 func withReplayReleaseError(settlementErr, releaseErr error) error {
-	detail := fmt.Sprintf("failed to release sponsored replay claim: %v", releaseErr)
+	detail := fmt.Sprintf("failed to release replay claim: %v", releaseErr)
 	if settlementErr == nil {
 		return mpp.ErrVerificationFailed(detail)
 	}
