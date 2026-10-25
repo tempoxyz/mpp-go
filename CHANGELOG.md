@@ -1,5 +1,11 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.5.0`
+
+### Minor Changes
+
+- Add MPP over MCP for the official MCP Go SDK (`github.com/modelcontextprotocol/go-sdk`), matching mppx's `mppx/mcp` client and server. `pkg/mcp/server` charges tool calls with `Charge` and `Compose`, reading the Credential from `_meta["org.paymentauth/credential"]`, returning payment errors with codes -32042, -32043, -32602 and -32603, and attaching receipts as `_meta["org.paymentauth/receipt"]`. `pkg/mcp/client` `Wrap` pays challenges from payment errors or `_meta["org.paymentauth/payment-required"]` results and retries the call, with approval and ordering hooks, reusing a Credential per Challenge and signing zero-amount Tempo proofs only for realms in `Config.TrustedTempoProofRealms`; `Receipt` reads the receipt. `pkg/mcp/jsonrpc` does the same for servers handling raw MCP JSON-RPC messages, matching mppx's `Transport.mcp()`. Adds `server.ComposeCharge` for non-HTTP transports, `client.SelectChallengeCandidates`, and the MCP constants, `MCPPaymentRequiredData` and `MCPReceipt` in `pkg/mpp`. (by @BrendanRyan, [#244](https://github.com/tempoxyz/mpp-go/pull/244))
+
 ## `github.com/tempoxyz/mpp-go@0.4.0`
 
 ### Minor Changes
