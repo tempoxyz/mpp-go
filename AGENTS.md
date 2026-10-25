@@ -141,6 +141,12 @@ go run ./examples/charge-basic                       # Run charge-basic example
 TEMPO_RPC_URL=http://localhost:8545 make integration  # Run integration tests
 ```
 
+## READMEs
+
+Do not update README files (the root README.md or any example README) unless
+explicitly asked to. Document new APIs in Go doc comments, AGENTS.md and the
+changelog instead.
+
 ## Changelogs
 
 Every PR should add a release note as a new Markdown file under `.changelog/`
