@@ -1,8 +1,10 @@
 package mpp
 
 import (
-	"github.com/stretchr/testify/assert"
+	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestParseUnits(t *testing.T) {
@@ -76,6 +78,27 @@ func TestTransformUnits(t *testing.T) {
 		assert.Equal(t, "keep", out["extra"],
 			"extra key should be preserved")
 
+	})
+
+	t.Run("with json.Number decimals", func(t *testing.T) {
+		req := map[string]any{
+			"amount":   "1.5",
+			"decimals": json.Number("6"),
+		}
+		out, err := TransformUnits(req)
+		if !assert.NoErrorf(t, err,
+			"unexpected error: %v", err) {
+			return
+		}
+		assert.Equal(t, "1500000", out["amount"])
+	})
+
+	t.Run("with non-integer json.Number decimals", func(t *testing.T) {
+		_, err := TransformUnits(map[string]any{
+			"amount":   "1.5",
+			"decimals": json.Number("6.5"),
+		})
+		assert.ErrorContains(t, err, "invalid decimals")
 	})
 
 	t.Run("with suggestedDeposit", func(t *testing.T) {
