@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -148,7 +149,8 @@ func TestTransport_OnChallenge_CreateCredentialErrorIsWrapped(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	_, err := tr.RoundTrip(req)
 	require.ErrorIs(t, err, boom)
-	assert.Contains(t, err.Error(), "creating credential for method \"tempo\"")
+	assert.True(t, strings.HasPrefix(err.Error(), "mpp: creating credential for method \"tempo\""),
+		"a forwarded method error must not be reported as an onChallenge decline: %v", err)
 	assert.Equal(t, 1, *calls)
 }
 
@@ -193,5 +195,44 @@ func TestClient_WithOnChallenge(t *testing.T) {
 	_, err := c.Get(context.Background(), srv.URL)
 	require.ErrorIs(t, err, declined)
 	assert.Equal(t, 0, method.calls)
+	assert.Equal(t, 1, *calls)
+}
+
+func TestTransport_OnChallenge_NilAfterCreateDoesNotCreateTwice(t *testing.T) {
+	srv, calls, sources := onChallengeServer(t)
+	method := &echoMethod{}
+	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+			if _, err := create(ctx); err != nil {
+				return nil, err
+			}
+			_, _ = create(ctx) // a second call returns the first result
+			return nil, nil
+		}))
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls, "the method may broadcast a payment, so it must run once")
+	assert.Equal(t, 2, *calls)
+	assert.Equal(t, []string{"test"}, *sources)
+}
+
+func TestTransport_OnChallenge_NilAfterFailedCreateReturnsThatError(t *testing.T) {
+	srv, calls, _ := onChallengeServer(t)
+	boom := errors.New("signer offline")
+	method := &echoMethod{err: boom}
+	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+			_, _ = create(ctx) // logged and ignored
+			return nil, nil
+		}))
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := tr.RoundTrip(req)
+	require.ErrorIs(t, err, boom)
+	assert.Equal(t, 1, method.calls)
 	assert.Equal(t, 1, *calls)
 }

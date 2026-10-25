@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -50,9 +51,11 @@ type transportConfig struct {
 // can pay, before any credential is created. It mirrors mppx's onChallenge.
 //
 // createCredential creates a credential with the selected method; ctx can carry
-// method-specific context for this request. The hook can:
+// method-specific context for this request. It runs the method at most once per
+// challenge: later calls return the first result. The hook can:
 //
-//   - return (nil, nil) to let the transport create the credential itself,
+//   - return (nil, nil) to let the transport create the credential itself, or
+//     to use the one createCredential already made,
 //   - return a credential, from createCredential or built another way, to send it,
 //   - return an error to decline the payment: RoundTrip returns that error,
 //     wrapped, and does not pay.
@@ -208,18 +211,36 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // createCredential runs the OnChallenge hook, when set, and otherwise creates
 // the credential with the selected method.
 func (t *Transport) createCredential(ctx context.Context, selected challengeCandidate) (*mpp.Credential, error) {
+	// create runs the method at most once: a method may broadcast a payment on
+	// every call, so a hook that calls createCredential and then returns
+	// (nil, nil), or calls it twice, must not pay twice.
+	var (
+		created    bool
+		createdErr error
+		createdVal *mpp.Credential
+	)
 	create := func(ctx context.Context) (*mpp.Credential, error) {
-		cred, err := selected.method.CreateCredential(ctx, selected.challenge)
-		if err != nil {
-			return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, err)
+		if created {
+			return createdVal, createdErr
 		}
-		return cred, nil
+		created = true
+		createdVal, createdErr = selected.method.CreateCredential(ctx, selected.challenge)
+		if createdErr != nil {
+			createdVal = nil
+			createdErr = fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, createdErr)
+		}
+		return createdVal, createdErr
 	}
 	if t.onChallenge == nil {
 		return create(ctx)
 	}
 	cred, err := t.onChallenge(ctx, selected.challenge, create)
 	if err != nil {
+		// Pass a payment-method failure the hook forwarded through unchanged;
+		// only errors the hook made itself are reported as a decline.
+		if created && createdErr != nil && errors.Is(err, createdErr) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("mpp: onChallenge: %w", err)
 	}
 	if cred == nil {
