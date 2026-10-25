@@ -2,6 +2,7 @@ package chargeserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,7 +19,7 @@ func TestZeroAmountSponsoredCredentialsRequireProof(t *testing.T) {
 				rpc := newMockRPC(request)
 				intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
 				require.NoError(t, err)
-				credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x01"}.Map()}
+				credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x" + strings.Repeat("01", 32)}.Map()}
 				_, err = intent.Verify(context.Background(), credential, request.Map())
 				require.ErrorContains(t, err, "zero-amount fee payer challenges require a proof")
 				require.Empty(t, rpc.sentRawTxs)
