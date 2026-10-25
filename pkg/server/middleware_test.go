@@ -324,14 +324,14 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 
-	require.Equal(t, http.StatusBadRequest, resp.Code)
+	require.Equal(t, http.StatusInternalServerError, resp.Code)
 	assert.Empty(t, resp.Header().Get("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
 }
 
 func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {

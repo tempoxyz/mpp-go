@@ -276,14 +276,14 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 
 	defer challengeResponse.Body.Close()
 
-	require.Equal(t, http.StatusBadRequest, challengeResponse.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, challengeResponse.StatusCode)
 	assert.Empty(t, challengeResponse.Header.Get("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(challengeResponse.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
 }
 
 func newTestServer(t *testing.T, method server.Method, realm, secretKey string, opts ...server.Option) *server.Mpp {
@@ -374,4 +374,23 @@ func TestWritePaymentErrorHidesUnexpectedErrorText(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
 	assert.Contains(t, string(body), string(mpp.ErrorTypeInternalPayment))
 	assert.NotContains(t, string(body), "secret-key")
+}
+
+func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	app := fiberfw.New()
+	app.Get("/paid/:id", ChargeMiddleware(payment, server.ChargeParams{
+		Amount:    "0.50",
+		MppxScope: map[string]string{"route": "custom"},
+	}), func(c *fiberfw.Ctx) error { return nil })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/paid/one?view=full", nil))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	challenge, err := mpp.ParseChallenge(resp.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"route": "custom"}, challenge.Request["_mppx_scope"])
 }

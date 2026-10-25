@@ -30,6 +30,12 @@ const (
 	ErrorTypePaymentInsufficient ErrorType = "https://paymentauth.org/problems/payment-insufficient"
 	ErrorTypeMethodUnsupported   ErrorType = "https://paymentauth.org/problems/method-unsupported"
 	ErrorTypeInternalPayment     ErrorType = "https://paymentauth.org/problems/internal-payment-error"
+	// ErrorTypePaymentActionRequired reports a payment that needs further
+	// action by the payer, such as a Stripe PaymentIntent in requires_action.
+	ErrorTypePaymentActionRequired ErrorType = "https://paymentauth.org/problems/payment-action-required"
+	// ErrorTypePaymentOutcomeUnknown reports a credential that was sent but
+	// whose payment may or may not have settled. Do not blindly retry.
+	ErrorTypePaymentOutcomeUnknown ErrorType = "https://paymentauth.org/problems/payment-outcome-unknown"
 )
 
 // Title returns the default RFC 9457 title for the error type.
@@ -55,6 +61,10 @@ func (t ErrorType) Title() string {
 		return "Method Unsupported"
 	case ErrorTypeInternalPayment:
 		return "Internal Payment Error"
+	case ErrorTypePaymentActionRequired:
+		return "Payment Action Required"
+	case ErrorTypePaymentOutcomeUnknown:
+		return "Payment Outcome Unknown"
 	default:
 		return "MPP Error"
 	}
@@ -63,7 +73,8 @@ func (t ErrorType) Title() string {
 // Status returns the default HTTP status for the error type.
 func (t ErrorType) Status() int {
 	switch t {
-	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient:
+	case ErrorTypePaymentRequired, ErrorTypeMalformedCredential, ErrorTypeInvalidChallenge, ErrorTypeVerificationFailed, ErrorTypePaymentExpired, ErrorTypeInvalidPayload, ErrorTypePaymentInsufficient,
+		ErrorTypePaymentActionRequired, ErrorTypePaymentOutcomeUnknown:
 		return http.StatusPaymentRequired
 	case ErrorTypeInternalPayment:
 		return http.StatusInternalServerError
@@ -214,4 +225,25 @@ func ErrMethodUnsupported(method string) *PaymentError {
 // failures. Its detail is fixed so internal error messages are never exposed.
 func ErrInternalPayment() *PaymentError {
 	return newPaymentError(ErrorTypeInternalPayment, "An internal payment error occurred.")
+}
+
+// ErrPaymentActionRequired returns a 402 error for a payment that requires
+// further action by the payer. reason may be empty. It matches mppx's
+// PaymentActionRequiredError.
+func ErrPaymentActionRequired(reason string) *PaymentError {
+	detail := "Payment requires action."
+	if reason != "" {
+		detail = fmt.Sprintf("Payment requires action: %s.", reason)
+	}
+	return newPaymentError(ErrorTypePaymentActionRequired, detail)
+}
+
+// ErrPaymentOutcomeUnknown returns a 402 error for a credential that was sent
+// for challengeID without a definitive result, so the payment may have
+// settled. It matches mppx's PaymentOutcomeUnknownError.
+func ErrPaymentOutcomeUnknown(challengeID string) *PaymentError {
+	return newPaymentError(ErrorTypePaymentOutcomeUnknown, fmt.Sprintf(
+		"Payment outcome is unknown after sending a credential for challenge %q. Do not blindly retry.",
+		challengeID,
+	))
 }

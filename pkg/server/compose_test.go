@@ -753,14 +753,14 @@ func TestComposeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 
 	defer resp.Body.Close()
 
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	assert.Empty(t, resp.Header.Values("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
 }
 
 func TestComposeMiddleware_DoesNotWritePartialChallengesOnSerializeFailure(t *testing.T) {
@@ -787,7 +787,7 @@ func TestComposeMiddleware_DoesNotWritePartialChallengesOnSerializeFailure(t *te
 	}
 	defer resp.Body.Close()
 
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	assert.Empty(t, resp.Header.Values(mpp.HeaderWWWAuthenticate),
 		"partial WWW-Authenticate headers must not be written before serialize failure")
 
@@ -795,7 +795,7 @@ func TestComposeMiddleware_DoesNotWritePartialChallengesOnSerializeFailure(t *te
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
 }
 
 func TestComposeMiddleware_PanicsOnEmptyConfigs(t *testing.T) {

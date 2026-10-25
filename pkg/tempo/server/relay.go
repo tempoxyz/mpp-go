@@ -20,6 +20,10 @@ const defaultRelayAPIBaseURL = "https://api.tempo.xyz"
 
 const maxRelayResponseSize = 1 << 20
 
+// defaultRelayTimeout bounds relay calls when RelayConfig.HTTPClient is nil,
+// so a stalled relay cannot hold a request open indefinitely.
+const defaultRelayTimeout = 30 * time.Second
+
 // RelayErrorCode is a stable machine-readable relay failure code.
 type RelayErrorCode string
 
@@ -55,7 +59,8 @@ type RelayConfig struct {
 	// APIBaseURL is the relay base URL, including an optional path prefix.
 	// It defaults to https://api.tempo.xyz.
 	APIBaseURL string
-	// HTTPClient overrides the client used for relay calls.
+	// HTTPClient overrides the client used for relay calls. When nil, relay
+	// calls use a client with a 30 second timeout.
 	HTTPClient *http.Client
 }
 
@@ -128,7 +133,7 @@ func newRelayClient(config *RelayConfig) (*relayClient, error) {
 	if !strings.HasSuffix(parsed.Path, "/") {
 		parsed.Path += "/"
 	}
-	client := *http.DefaultClient
+	client := http.Client{Timeout: defaultRelayTimeout}
 	if config.HTTPClient != nil {
 		client = *config.HTTPClient
 	}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -78,7 +79,9 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 			chargeParams := params
 			chargeParams.Authorization = r.Header.Get(mpp.HeaderAuthorization)
 			chargeParams.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
-			chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
+			if len(chargeParams.MppxScope) == 0 {
+				chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
+			}
 			body, err := ReadRequestBody(r)
 			if err != nil {
 				WritePaymentError(w, RequestBodyError(err))
@@ -107,6 +110,10 @@ func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handl
 		})
 	}
 }
+
+// errNoChallenges reports a server configuration that issued no offers. It is
+// not a PaymentError, so WritePaymentError reports it as an internal error.
+var errNoChallenges = errors.New("server: no challenges could be generated")
 
 // MaxRequestBodyBytes bounds the body buffered for payment digest verification.
 // Configure the HTTP server's read timeout separately to bound slow uploads.
@@ -161,7 +168,7 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 func DeferPaymentReceipt(w http.ResponseWriter, receipt *mpp.Receipt) (http.ResponseWriter, func()) {
 	wrapped := &paymentReceiptWriter{ResponseWriter: w, receipt: receipt.ToPaymentReceipt()}
 	return wrapped, func() {
-		if !wrapped.wroteHeader {
+		if !wrapped.wroteHeader && !wrapped.hijacked {
 			wrapped.WriteHeader(http.StatusOK)
 		}
 	}
@@ -171,6 +178,9 @@ type paymentReceiptWriter struct {
 	http.ResponseWriter
 	receipt     string
 	wroteHeader bool
+	// hijacked is set once the handler takes over the connection, after
+	// which nothing may be written through the ResponseWriter.
+	hijacked bool
 }
 
 func (w *paymentReceiptWriter) WriteHeader(status int) {
@@ -206,7 +216,11 @@ func (w *paymentReceiptWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if !ok {
 		return nil, nil, errors.New("http.ResponseWriter does not support hijacking")
 	}
-	return hijacker.Hijack()
+	conn, rw, err := hijacker.Hijack()
+	if err == nil {
+		w.hijacked = true
+	}
+	return conn, rw, err
 }
 
 func (w *paymentReceiptWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -254,12 +268,13 @@ func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm strin
 // one WWW-Authenticate field value per challenge in presentation order.
 func WriteChallenges(w http.ResponseWriter, challenges []*mpp.Challenge, realm string) {
 	if len(challenges) == 0 {
-		WritePaymentError(w, mpp.ErrBadRequest("no challenges could be generated"))
+		WritePaymentError(w, errNoChallenges)
 		return
 	}
 	headers, _, err := authenticateHeaders(challenges, realm)
 	if err != nil {
-		WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
+		// The challenges come from server configuration, not the client.
+		WritePaymentError(w, fmt.Errorf("server: serializing challenge: %w", err))
 		return
 	}
 

@@ -3,6 +3,7 @@ package fiberadapter
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -37,7 +38,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		chargeParams := params
 		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
 		chargeParams.PaymentAuthorization = c.Get(mpp.HeaderPaymentAuthorization)
-		chargeParams.MppxScope = fiberScope(c)
+		if len(chargeParams.MppxScope) == 0 {
+			chargeParams.MppxScope = fiberScope(c)
+		}
 		if encoding := strings.TrimSpace(c.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
 			WritePaymentError(c, &mpp.PaymentError{
 				Type:   "about:blank",
@@ -159,12 +162,13 @@ func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
 // This is the Fiber equivalent of [server.WriteChallenges].
 func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) {
 	if len(challenges) == 0 {
-		WritePaymentError(c, mpp.ErrBadRequest("no challenges could be generated"))
+		WritePaymentError(c, errors.New("fiberadapter: no challenges could be generated"))
 		return
 	}
 	headers, _, err := authenticateHeaders(challenges, realm)
 	if err != nil {
-		WritePaymentError(c, mpp.ErrBadRequest(err.Error()))
+		// The challenges come from server configuration, not the client.
+		WritePaymentError(c, fmt.Errorf("fiberadapter: serializing challenge: %w", err))
 		return
 	}
 

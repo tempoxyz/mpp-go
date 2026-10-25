@@ -418,7 +418,7 @@ func TestWriteChallenges(t *testing.T) {
 
 	empty := httptest.NewRecorder()
 	WriteChallenges(empty, nil, "api.example.com")
-	assert.Equal(t, http.StatusBadRequest, empty.Code)
+	assert.Equal(t, http.StatusInternalServerError, empty.Code)
 	assert.Empty(t, empty.Header().Values(mpp.HeaderWWWAuthenticate))
 
 	withErr := httptest.NewRecorder()
@@ -440,7 +440,7 @@ func TestWriteChallengesRejectsInvalidChallengeWithoutPartialHeaders(t *testing.
 
 	recorder := httptest.NewRecorder()
 	WriteChallenges(recorder, []*mpp.Challenge{valid, invalid}, "api.example.com")
-	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 	assert.Empty(t, recorder.Header().Values(mpp.HeaderWWWAuthenticate))
 }
 

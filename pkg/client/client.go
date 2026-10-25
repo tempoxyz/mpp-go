@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -125,15 +126,44 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	hc.Transport = transport
 	priorCheckRedirect := hc.CheckRedirect
 	hc.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
-		if len(via) > 0 && !sameOriginURL(redirectReq.URL, origin) {
-			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
+		// The Transport attaches credentials to its own retry requests, so
+		// net/http never copies them into a redirect. A Payment credential the
+		// caller set on the request itself would be copied, though, and
+		// net/http does not strip Payment-Authorization: refuse to carry one
+		// to another origin. The Transport separately refuses to pay a
+		// redirected origin.
+		if !sameOriginURL(redirectReq.URL, origin) && hasPaymentCredential(redirectReq.Header) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q with a Payment credential", origin, requestOrigin(redirectReq.URL))
 		}
 		if priorCheckRedirect != nil {
 			return priorCheckRedirect(redirectReq, via)
 		}
+		// Keep net/http's default limit of 10 redirects.
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
 		return nil
 	}
 	return hc.Do(req)
+}
+
+// maxRedirects matches net/http's default redirect limit.
+const maxRedirects = 10
+
+// hasPaymentCredential reports whether header carries a Payment credential in
+// Authorization or Payment-Authorization.
+func hasPaymentCredential(header http.Header) bool {
+	for _, name := range []string{mpp.HeaderAuthorization, mpp.HeaderPaymentAuthorization} {
+		for _, value := range header.Values(name) {
+			for _, part := range strings.Split(value, ",") {
+				scheme, _, _ := strings.Cut(strings.TrimSpace(part), " ")
+				if strings.EqualFold(scheme, mpp.SchemePayment) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Get is a convenience method for GET requests.

@@ -459,3 +459,14 @@ func newTestServer(t *testing.T, method mppserver.Method, realm, secretKey strin
 	require.NoError(t, err)
 	return payment
 }
+
+func TestNewRelayClientDefaultsToTimeout(t *testing.T) {
+	relay, err := newRelayClient(&RelayConfig{APIKey: relayTestAPIKey})
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Second, relay.httpClient.Timeout)
+
+	custom := &http.Client{Timeout: time.Second}
+	relay, err = newRelayClient(&RelayConfig{APIKey: relayTestAPIKey, HTTPClient: custom})
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, relay.httpClient.Timeout)
+}

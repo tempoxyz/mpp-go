@@ -1,0 +1,5 @@
+---
+github.com/tempoxyz/mpp-go: patch
+---
+
+Fix server and client edge cases. `ChargeMiddleware`, `ComposeMiddleware` and the Gin, Echo and Fiber adapters keep a caller-set `ChargeParams.MppxScope` instead of overwriting it, and no longer write a response header after a handler hijacks the connection. Server misconfiguration (reserved `_mpp_nonce` metadata, a challenge request or description that cannot be encoded, no offers) now returns a 500 internal payment error instead of a client 400, and a credential missing the required body digest gets an `invalid-challenge` problem with its fresh challenge. `server.New` rejects a nil method. `client.Client` keeps net/http's 10-redirect limit and follows cross-origin redirects of requests that carry no Payment credential. `Transport` closes the request body on early errors and returns `PaymentOutcomeUnknownError` when a request carrying a credential fails without a response. Adds `mpp.ErrPaymentActionRequired` and `mpp.ErrPaymentOutcomeUnknown`, matching mppx. Relay calls without a configured `HTTPClient` time out after 30 seconds.

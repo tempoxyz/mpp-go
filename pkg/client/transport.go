@@ -125,6 +125,7 @@ func NewTransport(methods []Method, inner http.RoundTripper, opts ...TransportOp
 // RoundTrip implements http.RoundTripper with automatic 402 handling.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.configErr != nil {
+		closeRequestBody(req)
 		return nil, t.configErr
 	}
 
@@ -132,10 +133,20 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	credentials := make(map[credentialKey]*mpp.Credential)
 	request := baseRequest
 	var sentCredential credentialKey
+	var sentChallenge *mpp.Challenge
 
 	for retries := 0; ; retries++ {
 		resp, err := t.inner.RoundTrip(request)
 		if err != nil {
+			if sentChallenge != nil {
+				// The server may have settled the payment before the
+				// connection failed: retrying could pay twice.
+				return nil, &PaymentOutcomeUnknownError{
+					Challenge:  sentChallenge,
+					Credential: credentials[sentCredential],
+					Err:        err,
+				}
+			}
 			return nil, err
 		}
 		if resp.StatusCode != http.StatusPaymentRequired || retries >= defaultMaxPaymentRetries {
@@ -173,6 +184,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// the server.
 		retry, err := t.cloneRequest(baseRequest)
 		if err != nil {
+			closeRequestBody(req)
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 		}
 
@@ -205,6 +217,44 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		retry.Header.Set(selected.challenge.CredentialHeader(), authorization)
 		request = retry
 		sentCredential = key
+		sentChallenge = selected.challenge
+	}
+}
+
+// PaymentOutcomeUnknownError is returned by Transport.RoundTrip, and so by
+// Client.Do wrapped in a *url.Error, when the request carrying a payment
+// credential failed without a response. The server may have settled the
+// payment, so do not blindly retry: reconcile it using Challenge and
+// Credential. It matches mppx's PaymentOutcomeUnknownError.
+type PaymentOutcomeUnknownError struct {
+	// Challenge is the challenge the credential paid for.
+	Challenge *mpp.Challenge
+	// Credential is the credential sent with the failed request.
+	Credential *mpp.Credential
+	// Err is the error the paid request failed with.
+	Err error
+}
+
+func (e *PaymentOutcomeUnknownError) Error() string {
+	id := ""
+	if e.Challenge != nil {
+		id = e.Challenge.ID
+	}
+	msg := fmt.Sprintf("mpp: payment outcome is unknown after sending a credential for challenge %q; do not blindly retry", id)
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
+}
+
+// Unwrap returns the error the paid request failed with.
+func (e *PaymentOutcomeUnknownError) Unwrap() error { return e.Err }
+
+// closeRequestBody closes req.Body, as http.RoundTripper requires even when
+// RoundTrip returns an error.
+func closeRequestBody(req *http.Request) {
+	if req.Body != nil {
+		_ = req.Body.Close()
 	}
 }
 
