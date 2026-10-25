@@ -404,7 +404,7 @@ func TestChargeOffers_HashCredentialForEachOfferVerifies(t *testing.T) {
 			require.False(t, result.IsChallenge())
 			require.NotNil(t, result.Receipt)
 			assert.Equal(t, "success", result.Receipt.Status)
-			assert.Equal(t, testReceiptHash, result.Receipt.Reference)
+			assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), result.Receipt.Reference)
 			require.Len(t, rpc.sentRawTxs, 1)
 			assert.Equal(t, []common.Address{common.HexToAddress(currency)}, sentTokens(t, rpc.sentRawTxs[0]))
 		})
@@ -599,7 +599,7 @@ func newOffersRPC(chainID int64) *mockRPC {
 				logs = append(logs, transferLog(call.To.Hex(), sender.Hex(), recipient, amount, "0x"+data[136:200]))
 			}
 		}
-		return testReceiptHash, map[string]any{"status": "0x1", "logs": logs}, nil
+		return mustTxHash(raw), map[string]any{"status": "0x1", "logs": logs}, nil
 	}
 	return rpc
 }
