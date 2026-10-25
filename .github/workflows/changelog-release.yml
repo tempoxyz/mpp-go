@@ -3,6 +3,9 @@ name: Changelog Release
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '0 15 * * 1' # Monday 15:00 UTC
+  workflow_dispatch:
 
 jobs:
   release:
@@ -32,6 +35,7 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - uses: tempoxyz/changelogs@eb001118fc77cbd13336f034aedfbf065861b6b9
+      - uses: tempoxyz/changelogs@e4e806749af1be52cf0de15170acdea963d83e3d # tempoxyz/changelogs#188
         with:
           github-token: ${{ steps.app-token.outputs.token }}
+          auto-merge: ${{ github.event_name == 'schedule' }}
