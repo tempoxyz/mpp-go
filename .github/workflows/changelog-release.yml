@@ -34,7 +34,7 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - uses: tempoxyz/changelogs@b26936c80a7a2c5e79778d8d2659be178888beb6 # 2026-10-25T03-31-29Z-b26936c8 # zizmor: ignore[ref-version-mismatch] tempoxyz/changelogs#188 is not tagged yet.
+      - uses: tempoxyz/changelogs@7928d3260c48d9dbe72f9fa4d5fca968cbfa020d # v0.10.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           auto-merge: ${{ github.event_name == 'schedule' }}
