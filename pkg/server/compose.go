@@ -38,26 +38,9 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 	if len(configs) == 0 {
 		panic("server: ComposeMiddleware requires at least one ComposeConfig")
 	}
-	if configs[0].Mpp == nil {
-		panic("server: ComposeConfig[0].Mpp is nil")
-	}
-
-	realm := configs[0].Mpp.realm
-	entries := make([]composedEntry, len(configs))
-	for i, cfg := range configs {
-		if cfg.Mpp == nil {
-			panic(fmt.Sprintf("server: ComposeConfig[%d].Mpp is nil", i))
-		}
-		if cfg.Mpp.realm != realm {
-			panic(fmt.Sprintf("server: ComposeConfig[%d] realm %q differs from [0] realm %q", i, cfg.Mpp.realm, realm))
-		}
-		if _, err := cfg.Mpp.buildChargeRequests(cfg.Params); err != nil {
-			panic(fmt.Sprintf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err))
-		}
-		entries[i] = composedEntry{
-			mpp:    cfg.Mpp,
-			params: cfg.Params,
-		}
+	entries, realm, err := newComposedEntries(configs)
+	if err != nil {
+		panic(err.Error())
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -128,6 +111,107 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 			serveVerified(next, w, r, result.Credential, result.Receipt)
 		})
 	}
+}
+
+// newComposedEntries validates configs and freezes them into entries that
+// share one realm.
+func newComposedEntries(configs []ComposeConfig) ([]composedEntry, string, error) {
+	if len(configs) == 0 {
+		return nil, "", fmt.Errorf("server: compose requires at least one ComposeConfig")
+	}
+	if configs[0].Mpp == nil {
+		return nil, "", fmt.Errorf("server: ComposeConfig[0].Mpp is nil")
+	}
+
+	realm := configs[0].Mpp.realm
+	entries := make([]composedEntry, len(configs))
+	for i, cfg := range configs {
+		if cfg.Mpp == nil {
+			return nil, "", fmt.Errorf("server: ComposeConfig[%d].Mpp is nil", i)
+		}
+		if cfg.Mpp.realm != realm {
+			return nil, "", fmt.Errorf("server: ComposeConfig[%d] realm %q differs from [0] realm %q", i, cfg.Mpp.realm, realm)
+		}
+		if _, err := cfg.Mpp.buildChargeRequests(cfg.Params); err != nil {
+			return nil, "", fmt.Errorf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err)
+		}
+		entries[i] = composedEntry{
+			mpp:    cfg.Mpp,
+			params: cfg.Params,
+		}
+	}
+	return entries, realm, nil
+}
+
+// ComposeCharge runs a composed charge for transports other than HTTP, such as
+// MCP, that carry the Payment credential themselves. authorization is the
+// credential formatted as an Authorization value ("Payment <base64url>"), or
+// empty when the client sent none.
+//
+// Without a credential it returns every configured Challenge in config order.
+// With one it verifies it against the config whose method, intent and request
+// it echoes, like ComposeMiddleware. A malformed credential returns every
+// Challenge its method and intent offer (or every Challenge) with a
+// malformed-credential error. Each config's ChargeParams are used as given:
+// set Body or MppxScope there to bind them.
+func ComposeCharge(ctx context.Context, authorization string, configs ...ComposeConfig) (*ChargeResult, error) {
+	entries, _, err := newComposedEntries(configs)
+	if err != nil {
+		return nil, err
+	}
+	if authorization == "" {
+		challenges, err := collectComposeChallenges(ctx, entries, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		return &ChargeResult{Challenge: challenges[0], Challenges: challenges}, nil
+	}
+
+	cred, err := mpp.ParseCredential(authorization)
+	if err != nil {
+		return composeMalformedCredentialResult(ctx, entries, nil, mpp.ErrMalformedCredential(err.Error()))
+	}
+	entry, ok, err := findMatchingEntry(entries, cred, nil)
+	if err != nil {
+		if isMalformedCredential(err) {
+			return composeMalformedCredentialResult(ctx, entries, cred, err)
+		}
+		return nil, err
+	}
+	if !ok {
+		return nil, mpp.ErrMethodUnsupported(cred.Challenge.Method + "/" + cred.Challenge.Intent)
+	}
+
+	params := entry.params
+	params.Authorization = authorization
+	params.PaymentAuthorization = authorization
+	return entry.mpp.Charge(ctx, params)
+}
+
+func composeMalformedCredentialResult(
+	ctx context.Context,
+	entries []composedEntry,
+	cred *mpp.Credential,
+	err error,
+) (*ChargeResult, error) {
+	var challenges []*mpp.Challenge
+	if cred != nil {
+		for _, entry := range findEntriesByMethodIntent(entries, cred) {
+			offered, chErr := freshComposeChallenges(ctx, entry, nil, nil)
+			if chErr != nil {
+				continue
+			}
+			challenges = append(challenges, offered...)
+		}
+	}
+	if len(challenges) == 0 {
+		var collectErr error
+		challenges, collectErr = collectComposeChallenges(ctx, entries, nil, nil)
+		if collectErr != nil {
+			return nil, err
+		}
+	}
+	return &ChargeResult{Challenge: challenges[0], Challenges: challenges}, err
 }
 
 // composeChallenges issues a 402 with all configured challenges merged into

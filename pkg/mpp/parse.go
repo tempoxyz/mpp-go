@@ -630,7 +630,12 @@ func ParsePaymentReceipt(header string) (*Receipt, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mpp: invalid receipt encoding: %w", err)
 	}
+	return receiptFromFields(data)
+}
 
+// receiptFromFields validates decoded Payment-Receipt JSON fields and maps
+// them onto a Receipt.
+func receiptFromFields(data map[string]any) (*Receipt, error) {
 	status := anyStr(data["status"])
 	if status == "" {
 		return nil, fmt.Errorf("mpp: receipt missing status")
@@ -734,6 +739,11 @@ var receiptBaseFields = map[string]struct{}{
 //
 // Output format: <base64url-json>
 func FormatPaymentReceipt(r *Receipt) string {
+	return b64EncodeAny(receiptFields(r))
+}
+
+// receiptFields returns the canonical Payment-Receipt JSON fields of r.
+func receiptFields(r *Receipt) map[string]any {
 	data := map[string]any{
 		"status":    r.Status,
 		"timestamp": r.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -763,7 +773,7 @@ func FormatPaymentReceipt(r *Receipt) string {
 		}
 		data[k] = v
 	}
-	return b64EncodeAny(data)
+	return data
 }
 
 // b64EncodeAny encodes a value as compact JSON then base64url without padding.

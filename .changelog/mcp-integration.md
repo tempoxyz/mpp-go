@@ -1,0 +1,5 @@
+---
+github.com/tempoxyz/mpp-go: minor
+---
+
+Add MPP over MCP for the official MCP Go SDK (`github.com/modelcontextprotocol/go-sdk`), matching mppx's `mppx/mcp` client and server. `pkg/mcp/server` charges tool calls with `Charge` and `Compose`, reading the Credential from `_meta["org.paymentauth/credential"]`, returning payment errors with codes -32042, -32043, -32602 and -32603, and attaching receipts as `_meta["org.paymentauth/receipt"]`. `pkg/mcp/client` `Wrap` pays challenges from payment errors or `_meta["org.paymentauth/payment-required"]` results and retries the call, with approval and ordering hooks; `Receipt` reads the receipt. Adds `server.ComposeCharge` for non-HTTP transports, `client.SelectChallengeCandidates`, and the MCP constants, `MCPPaymentRequiredData` and `MCPReceipt` in `pkg/mpp`.

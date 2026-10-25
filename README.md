@@ -307,6 +307,55 @@ app.Get("/paid", fiberadapter.ChargeMiddleware(payment, server.ChargeParams{
 })
 ```
 
+## MCP
+
+[`pkg/mcp/server`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/mcp/server) and
+[`pkg/mcp/client`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/mcp/client) add MPP
+payments to tools served and called with the official
+[MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), on the same wire
+contract as mppx's `mppx/mcp`: Credentials travel in
+`_meta["org.paymentauth/credential"]`, challenges as JSON-RPC errors -32042
+(payment required) or -32043 (verification failed), and receipts in
+`_meta["org.paymentauth/receipt"]`.
+
+Server tool:
+
+```go
+srv.AddTool(&mcp.Tool{Name: "premium", InputSchema: schema}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	res, err := mcpserver.Charge(ctx, payment, req, server.ChargeParams{Amount: "0.01"})
+	if err != nil {
+		return nil, err
+	}
+	if res.IsChallenge() {
+		return nil, res.Challenge
+	}
+	return res.WithReceipt(&mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: "paid content"}},
+	}), nil
+})
+```
+
+`mcpserver.Compose(ctx, req, configs...)` offers several payment options on one tool.
+
+Client:
+
+```go
+method, _ := charge.New(charge.Config{
+	PrivateKey: os.Getenv("MPP_PRIVATE_KEY"),
+	RPCURL:     "https://rpc.moderato.tempo.xyz",
+})
+c := mcpclient.Wrap(mcp.NewClient(&mcp.Implementation{Name: "my-client", Version: "1.0.0"}, nil), mcpclient.Config{
+	Methods: []client.Method{method},
+})
+session, err := c.Connect(ctx, transport, nil)
+// ...
+result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "premium"})
+receipt, err := mcpclient.Receipt(result)
+```
+
+`Config.OnPaymentRequired` approves each payment (`mcpclient.WithOnPaymentRequired`
+overrides it per call), and `Config.OrderChallenges` picks among offers.
+
 ## Protocol
 
 Built on the ["Payment" HTTP Authentication Scheme](https://paymentauth.org), an open specification proposed to the IETF. See [mpp.dev/protocol](https://mpp.dev/protocol/) for the full protocol overview, or the [IETF specification](https://paymentauth.org) for the wire format.

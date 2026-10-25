@@ -58,6 +58,9 @@ Low-level data structures in `pkg/mpp` that compose into the core abstractions:
 ```
 pkg/
 ├── client/          # Generic HTTP 402 retry transport
+├── mcp/             # MPP over MCP for the official MCP Go SDK (matches mppx/mcp)
+│   ├── client/      # Payment-aware MCP client middleware
+│   └── server/      # Charge/Compose for MCP tool handlers
 ├── mpp/             # Protocol primitives (Challenge, Credential, Receipt, parsing)
 ├── server/          # Generic challenge-or-verify flow
 └── tempo/           # Tempo blockchain support
