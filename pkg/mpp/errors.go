@@ -240,7 +240,9 @@ func ErrPaymentActionRequired(reason string) *PaymentError {
 
 // ErrPaymentOutcomeUnknown returns a 402 error for a credential that was sent
 // for challengeID without a definitive result, so the payment may have
-// settled. It matches mppx's PaymentOutcomeUnknownError.
+// settled. It matches mppx's PaymentOutcomeUnknownError. The server
+// middleware writers send it without retry challenges, and client.Transport
+// returns such a response instead of paying again.
 func ErrPaymentOutcomeUnknown(challengeID string) *PaymentError {
 	return newPaymentError(ErrorTypePaymentOutcomeUnknown, fmt.Sprintf(
 		"Payment outcome is unknown after sending a credential for challenge %q. Do not blindly retry.",

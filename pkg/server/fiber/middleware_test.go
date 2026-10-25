@@ -394,3 +394,70 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{"route": "custom"}, challenge.Request["_mppx_scope"])
 }
+
+func TestChargeMiddlewareCRLFChallengeDescriptionWithMalformedCredential(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	app := fiberfw.New()
+	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{
+		Amount:      "0.50",
+		Description: "Line one\r\nLine two",
+	}), func(c *fiberfw.Ctx) error {
+		return c.SendString("paid")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	req.Header.Set(mpp.HeaderAuthorization, "Payment garbage")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get(mpp.HeaderWWWAuthenticate))
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
+}
+
+func TestChargeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	app := fiberfw.New(fiberfw.Config{ReadBufferSize: 64 << 10})
+	app.Get("/paid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}), func(c *fiberfw.Ctx) error {
+		return c.SendString("paid")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/paid?q="+strings.Repeat("a", 13*1024), nil))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusRequestURITooLong, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get(mpp.HeaderWWWAuthenticate))
+}
+
+func TestWritePaymentErrorWithChallengesOmitsChallengesForOutcomeUnknown(t *testing.T) {
+	t.Parallel()
+
+	challenge := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "1"})
+	app := fiberfw.New()
+	app.Get("/", func(c *fiberfw.Ctx) error {
+		WritePaymentErrorWithChallenges(c, mpp.ErrPaymentOutcomeUnknown(challenge.ID), []*mpp.Challenge{challenge}, "api.example.com")
+		return nil
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Empty(t, resp.Header.Values(mpp.HeaderWWWAuthenticate))
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypePaymentOutcomeUnknown), problem.Type)
+}

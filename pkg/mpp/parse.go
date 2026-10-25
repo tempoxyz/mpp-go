@@ -724,15 +724,18 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 // receiptBaseFields is the set of top-level Payment-Receipt keys the parser
 // maps onto named Receipt fields. Any other top-level key is a method-defined
 // extension and is preserved via Receipt.Extensions.
+//
+// fundingCurrency is a method-defined (Tempo) field: the parser fills
+// Receipt.FundingCurrency and also keeps it in Extensions, so code that reads
+// only Extensions round-trips it. When formatting, the named field wins.
 var receiptBaseFields = map[string]struct{}{
-	"status":          {},
-	"timestamp":       {},
-	"reference":       {},
-	"method":          {},
-	"externalId":      {},
-	"subscriptionId":  {},
-	"fundingCurrency": {},
-	"extra":           {},
+	"status":         {},
+	"timestamp":      {},
+	"reference":      {},
+	"method":         {},
+	"externalId":     {},
+	"subscriptionId": {},
+	"extra":          {},
 }
 
 // FormatPaymentReceipt formats a Receipt as a Payment-Receipt header value.
@@ -769,6 +772,10 @@ func receiptFields(r *Receipt) map[string]any {
 	// overwritten by an Extensions entry.
 	for k, v := range r.Extensions {
 		if _, reserved := receiptBaseFields[k]; reserved {
+			continue
+		}
+		if _, set := data[k]; set {
+			// A named field (fundingCurrency) wins over its Extensions copy.
 			continue
 		}
 		data[k] = v

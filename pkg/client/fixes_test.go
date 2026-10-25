@@ -346,3 +346,55 @@ func TestClient_Do_KeepsUnknownOutcomeOnClientTimeout(t *testing.T) {
 	assert.True(t, urlErr.Timeout())
 	assert.Contains(t, err.Error(), "Client.Timeout exceeded")
 }
+
+func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T) {
+	challenge := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	_, authorization := callerAuthorization(t, challenge)
+	problem := `{"type":"https://paymentauth.org/problems/payment-outcome-unknown","status":402}`
+	respond := func(req *http.Request, body string) *http.Response {
+		header := http.Header{}
+		// A server may still offer a challenge next to the problem.
+		header.Set(mpp.HeaderWWWAuthenticate, challenge.ToAuthenticate(challenge.Realm))
+		if body != "" {
+			header.Set("Content-Type", "application/problem+json")
+		}
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: req}
+	}
+
+	for _, tc := range []struct {
+		name           string
+		caller         bool
+		wantRoundTrips int
+		wantPayments   int
+	}{
+		{name: "sdk credential", wantRoundTrips: 2, wantPayments: 1},
+		{name: "caller credential", caller: true, wantRoundTrips: 1, wantPayments: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			roundTrips := 0
+			inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				roundTrips++
+				if req.Header.Get(mpp.HeaderAuthorization) == "" {
+					return respond(req, ""), nil
+				}
+				return respond(req, problem), nil
+			})
+			method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+			req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+			require.NoError(t, err)
+			if tc.caller {
+				req.Header.Set(mpp.HeaderAuthorization, authorization)
+			}
+
+			resp, err := NewTransport([]Method{method}, inner).RoundTrip(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.JSONEq(t, problem, string(body), "the caller still reads the server's problem")
+			assert.Equal(t, tc.wantRoundTrips, roundTrips)
+			assert.Equal(t, tc.wantPayments, method.calls)
+		})
+	}
+}

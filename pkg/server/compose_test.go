@@ -879,3 +879,46 @@ func TestComposeMiddleware_RequiresAuthAdvertisesAndAcceptsPaymentAuthorization(
 	body, _ := io.ReadAll(paid.Body)
 	assert.Equal(t, "beta:0xreceipt-beta", string(body))
 }
+
+func TestComposeMiddlewareCRLFChallengeDescriptionWithMalformedCredential(t *testing.T) {
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+
+	srv := composeTestServer(t,
+		ComposeConfig{
+			Mpp: methodA,
+			Params: ChargeParams{
+				Amount:      "1.00",
+				Description: "Line one\r\nLine two",
+			},
+		},
+	)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set(mpp.HeaderAuthorization, "Payment garbage")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Empty(t, resp.Header.Values(mpp.HeaderWWWAuthenticate))
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
+}
+
+func TestComposeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
+	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
+	srv := composeTestServer(t, ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}})
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/paid?q=" + strings.Repeat("a", 13*1024))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusRequestURITooLong, resp.StatusCode)
+	assert.Empty(t, resp.Header.Values(mpp.HeaderWWWAuthenticate))
+}

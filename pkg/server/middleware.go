@@ -250,13 +250,27 @@ func WritePaymentErrorWithChallenges(w http.ResponseWriter, err error, challenge
 		WritePaymentError(w, err)
 		return
 	}
-	headers, challengeID, headerErr := authenticateHeaders(challenges, realm)
+	if IsPaymentOutcomeUnknown(err) {
+		// The credential may have settled: a fresh challenge would invite an
+		// automatic client to pay again.
+		WritePaymentError(w, err)
+		return
+	}
+	headers, headerErr := authenticateHeaders(challenges, realm)
 	if headerErr != nil {
-		WritePaymentError(w, mpp.ErrInvalidChallenge(challengeID, headerErr.Error()))
+		WritePaymentError(w, headerErr)
 		return
 	}
 	setAuthenticateHeaders(w.Header(), headers)
 	WritePaymentError(w, err)
+}
+
+// IsPaymentOutcomeUnknown reports whether err is an
+// mpp.ErrPaymentOutcomeUnknown problem. Writers send it without retry
+// challenges, since the credential it answers may already have settled.
+func IsPaymentOutcomeUnknown(err error) bool {
+	var pe *mpp.PaymentError
+	return errors.As(err, &pe) && pe.Type == mpp.ErrorTypePaymentOutcomeUnknown
 }
 
 // WriteChallenge serializes an initial 402 challenge response.
@@ -271,10 +285,9 @@ func WriteChallenges(w http.ResponseWriter, challenges []*mpp.Challenge, realm s
 		WritePaymentError(w, errNoChallenges)
 		return
 	}
-	headers, _, err := authenticateHeaders(challenges, realm)
+	headers, err := authenticateHeaders(challenges, realm)
 	if err != nil {
-		// The challenges come from server configuration, not the client.
-		WritePaymentError(w, fmt.Errorf("server: serializing challenge: %w", err))
+		WritePaymentError(w, err)
 		return
 	}
 
@@ -284,18 +297,76 @@ func WriteChallenges(w http.ResponseWriter, challenges []*mpp.Challenge, realm s
 }
 
 // authenticateHeaders serializes every challenge before any header is written
-// so a later failure cannot leave a partial set of offers. On failure it also
-// returns the ID of the challenge that could not be serialized.
-func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, string, error) {
+// so a later failure cannot leave a partial set of offers. A failure is
+// classified by ChallengeSerializationError.
+func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, error) {
 	headers := make([]string, 0, len(challenges))
 	for _, challenge := range challenges {
 		header, err := challenge.ToAuthenticateStrict(realm)
 		if err != nil {
-			return nil, challenge.ID, err
+			return nil, ChallengeSerializationError(challenge, realm, err)
 		}
 		headers = append(headers, header)
 	}
-	return headers, "", nil
+	return headers, nil
+}
+
+// ChallengeSerializationError classifies err, a failure to serialize
+// challenge as a WWW-Authenticate value for realm. Challenges come from server
+// configuration, so the failure is a server error (WritePaymentError reports
+// it as a 500 internal payment error) unless the request-derived resource or
+// query bound into the challenge's _mppx_scope made the header too large:
+// then the request URI is at fault and the result is a 414 URI Too Long
+// PaymentError.
+func ChallengeSerializationError(challenge *mpp.Challenge, realm string, err error) error {
+	if challenge != nil && fitsWithoutRequestURI(challenge, realm) {
+		return &mpp.PaymentError{
+			Type:   "about:blank",
+			Status: http.StatusRequestURITooLong,
+			Title:  http.StatusText(http.StatusRequestURITooLong),
+			Detail: "request URI is too long to bind into a payment challenge",
+		}
+	}
+	return fmt.Errorf("server: serializing challenge: %w", err)
+}
+
+// fitsWithoutRequestURI reports whether challenge, which failed to serialize,
+// would serialize without the resource and query of its _mppx_scope.
+func fitsWithoutRequestURI(challenge *mpp.Challenge, realm string) bool {
+	var trimmed map[string]any
+	switch scope := challenge.Request["_mppx_scope"].(type) {
+	case map[string]string:
+		if scope["resource"] == "" && scope["query"] == "" {
+			return false
+		}
+		trimmed = make(map[string]any, len(scope))
+		for k, v := range scope {
+			trimmed[k] = v
+		}
+	case map[string]any:
+		if scope["resource"] == nil && scope["query"] == nil {
+			return false
+		}
+		trimmed = make(map[string]any, len(scope))
+		for k, v := range scope {
+			trimmed[k] = v
+		}
+	default:
+		return false
+	}
+	delete(trimmed, "resource")
+	delete(trimmed, "query")
+
+	request := make(map[string]any, len(challenge.Request))
+	for k, v := range challenge.Request {
+		request[k] = v
+	}
+	request["_mppx_scope"] = trimmed
+	probe := *challenge
+	probe.Request = request
+	probe.RequestB64 = ""
+	_, err := probe.ToAuthenticateStrict(realm)
+	return err == nil
 }
 
 func setAuthenticateHeaders(header http.Header, values []string) {

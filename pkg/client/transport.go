@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -177,6 +178,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 
+		problem := responseProblemType(resp)
+		if problem == mpp.ErrorTypePaymentOutcomeUnknown {
+			// The server cannot tell whether the credential settled. Paying
+			// again could pay twice: hand the response to the caller.
+			return resp, nil
+		}
+
 		challenges, errs := t.parseChallenges(resp.Header)
 		_ = errs // Non-Payment or malformed headers are silently skipped.
 		candidates := t.challengeCandidates(challenges, preferences, time.Now().UTC())
@@ -198,7 +206,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
-		if isInvalidPayloadResponse(resp) {
+		if problem == mpp.ErrorTypeInvalidPayload {
 			delete(credentials, sentCredential)
 		}
 		drainAndClose(resp.Body)
@@ -388,18 +396,34 @@ func (t *Transport) createCredential(ctx context.Context, selected challengeCand
 	return cred, nil
 }
 
-// isInvalidPayloadResponse inspects only responses that will be consumed for a
-// retry. Other 402 responses retain cached credentials to avoid paying twice.
-func isInvalidPayloadResponse(resp *http.Response) bool {
+// responseProblemType returns the problem type of a 402 response body, or ""
+// when it is not problem details. It restores the body it reads, so the
+// response can still be returned to the caller. An invalid-payload problem
+// drops the cached credential before a retry; other 402 responses retain it to
+// avoid paying twice.
+func responseProblemType(resp *http.Response) mpp.ErrorType {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/problem+json" || resp.Body == nil {
-		return false
+		return ""
+	}
+	prefix, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body = &peekedBody{Reader: io.MultiReader(bytes.NewReader(prefix), resp.Body), Closer: resp.Body}
+	if readErr != nil {
+		return ""
 	}
 	var problem struct {
 		Type mpp.ErrorType `json:"type"`
 	}
-	err = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&problem)
-	return err == nil && problem.Type == mpp.ErrorTypeInvalidPayload
+	if err := json.NewDecoder(bytes.NewReader(prefix)).Decode(&problem); err != nil {
+		return ""
+	}
+	return problem.Type
+}
+
+// peekedBody replays a response body prefix that was read for inspection.
+type peekedBody struct {
+	io.Reader
+	io.Closer
 }
 
 func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {

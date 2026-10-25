@@ -3,7 +3,6 @@ package fiberadapter
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -138,9 +137,15 @@ func WritePaymentErrorWithChallenges(c *fiberfw.Ctx, err error, challenges []*mp
 		WritePaymentError(c, err)
 		return
 	}
-	headers, challengeID, headerErr := authenticateHeaders(challenges, realm)
+	if server.IsPaymentOutcomeUnknown(err) {
+		// The credential may have settled: a fresh challenge would invite an
+		// automatic client to pay again.
+		WritePaymentError(c, err)
+		return
+	}
+	headers, headerErr := authenticateHeaders(challenges, realm)
 	if headerErr != nil {
-		WritePaymentError(c, mpp.ErrInvalidChallenge(challengeID, headerErr.Error()))
+		WritePaymentError(c, headerErr)
 		return
 	}
 
@@ -165,10 +170,9 @@ func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) 
 		WritePaymentError(c, errors.New("fiberadapter: no challenges could be generated"))
 		return
 	}
-	headers, _, err := authenticateHeaders(challenges, realm)
+	headers, err := authenticateHeaders(challenges, realm)
 	if err != nil {
-		// The challenges come from server configuration, not the client.
-		WritePaymentError(c, fmt.Errorf("fiberadapter: serializing challenge: %w", err))
+		WritePaymentError(c, err)
 		return
 	}
 
@@ -183,18 +187,18 @@ func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) 
 }
 
 // authenticateHeaders serializes every challenge before any header is written
-// so a later failure cannot leave a partial set of offers. On failure it also
-// returns the ID of the challenge that could not be serialized.
-func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, string, error) {
+// so a later failure cannot leave a partial set of offers. A failure is
+// classified by server.ChallengeSerializationError.
+func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, error) {
 	headers := make([]string, 0, len(challenges))
 	for _, challenge := range challenges {
 		header, err := challenge.ToAuthenticateStrict(realm)
 		if err != nil {
-			return nil, challenge.ID, err
+			return nil, server.ChallengeSerializationError(challenge, realm, err)
 		}
 		headers = append(headers, header)
 	}
-	return headers, "", nil
+	return headers, nil
 }
 
 func setAuthenticateHeaders(c *fiberfw.Ctx, values []string) {

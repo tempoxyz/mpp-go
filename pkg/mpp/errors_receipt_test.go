@@ -293,7 +293,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		return
 	}
 	if !assert.Equal(t, receipt.FundingCurrency, parsed.FundingCurrency) ||
-		!assert.NotContains(t, parsed.Extensions, "fundingCurrency") {
+		!assert.Equal(t, receipt.FundingCurrency, parsed.Extensions["fundingCurrency"]) {
 		return
 	}
 	if !assert.Equalf(t, true, parsed.Extra["settled"],
@@ -563,4 +563,59 @@ func TestErrCredentialReplayed(t *testing.T) {
 		assert.Equal(t, want, replayed.ProblemDetails("challenge-id"))
 	}
 	assert.Equal(t, "credential has already been used", ErrCredentialReplayed("").Detail)
+}
+
+// TestReceiptFundingCurrencyRoundTripsWithExtensions mirrors the mpp-tools
+// conformance vector receipt/success_receipt_extension_fields: fundingCurrency
+// survives parse and format next to method-defined extension fields, both for
+// code that reads Receipt.FundingCurrency and for code that copies only
+// Receipt.Extensions into a new Receipt.
+func TestReceiptFundingCurrencyRoundTripsWithExtensions(t *testing.T) {
+	t.Parallel()
+
+	object := map[string]any{
+		"fundingCurrency": "0x20c0000000000000000000006a37DA5C996874BE",
+		"method":          "tempo",
+		"originTxHash":    "0x9bcff372aee89b648c922b850573b22387c31d693079f5e37cd255814e2d615a",
+		"reference":       "0xabcdef",
+		"status":          "success",
+		"subscriptionId":  "sub_123",
+		"timestamp":       "2026-01-29T12:00:30Z",
+	}
+	parsed, err := ParseReceipt(b64EncodeAny(object))
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, object["fundingCurrency"], parsed.FundingCurrency)
+	assert.Equal(t, object["fundingCurrency"], parsed.Extensions["fundingCurrency"])
+
+	// Formatting the parsed receipt keeps every field.
+	decoded, err := B64Decode(FormatReceipt(parsed))
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, object["fundingCurrency"], decoded["fundingCurrency"])
+	assert.Equal(t, object["originTxHash"], decoded["originTxHash"])
+
+	// A receipt built from Extensions alone still carries fundingCurrency.
+	rebuilt := &Receipt{
+		Status:     parsed.Status,
+		Timestamp:  parsed.Timestamp,
+		Reference:  parsed.Reference,
+		Method:     parsed.Method,
+		Extensions: parsed.Extensions,
+	}
+	decoded, err = B64Decode(FormatReceipt(rebuilt))
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, object["fundingCurrency"], decoded["fundingCurrency"])
+
+	// The named field wins over a conflicting Extensions copy.
+	rebuilt.FundingCurrency = "0x20c0000000000000000000000000000000000001"
+	decoded, err = B64Decode(FormatReceipt(rebuilt))
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, rebuilt.FundingCurrency, decoded["fundingCurrency"])
 }

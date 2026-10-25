@@ -311,8 +311,7 @@ func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Chal
 	for _, challenge := range challenges {
 		header, headerErr := challenge.ToAuthenticateStrict(realm)
 		if headerErr != nil {
-			// The challenges come from server configuration, not the client.
-			WritePaymentError(w, fmt.Errorf("server: serializing challenge: %w", headerErr))
+			WritePaymentError(w, ChallengeSerializationError(challenge, realm, headerErr))
 			return
 		}
 		headers = append(headers, header)
