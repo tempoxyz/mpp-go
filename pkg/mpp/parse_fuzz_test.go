@@ -160,6 +160,7 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 		`{"status":"success","method":"tempo","timestamp":"2026-01-29T12:00:00Z","reference":"0xabc"}`,
 		`{"status":"success","method":"tempo","timestamp":"2026-01-29T12:00:00.123456789+02:00","reference":"0xabc","txHash":"0x1","extra":{"n":1e400}}`,
 		`{"status":"success","method":"stripe","timestamp":"0000-01-01T00:30:00+01:00","reference":"pi_1"}`,
+		`{"status":"success","method":"tempo","timestamp":"2026-01-29T12:00:00Z","reference":"0xabc","extra":{},"channelId":"0x2","settled":{"amount":"1"}}`,
 		`{"status":"failed","timestamp":"bad"}`,
 	} {
 		f.Add(base64.RawURLEncoding.EncodeToString([]byte(raw)))
@@ -186,6 +187,11 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 			r1.ExternalID != r2.ExternalID || r1.SubscriptionID != r2.SubscriptionID || r1.FundingCurrency != r2.FundingCurrency {
 			t.Fatalf("receipt changed across a round trip:\n%+v\n%+v", r1, r2)
 		}
+		// FormatPaymentReceipt omits an empty extra object, so an empty map and
+		// a missing one are the same receipt.
+		if !JSONEqual(nonEmpty(r1.Extra), nonEmpty(r2.Extra)) || !JSONEqual(nonEmpty(r1.Extensions), nonEmpty(r2.Extensions)) {
+			t.Fatalf("receipt extra or extensions changed across a round trip:\n%+v\n%+v", r1, r2)
+		}
 		if want := r1.Timestamp.UTC().Truncate(time.Millisecond); !want.Equal(r2.Timestamp) {
 			t.Fatalf("receipt timestamp %v, want %v", r2.Timestamp, want)
 		}
@@ -193,6 +199,14 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 			t.Fatalf("formatting is not stable: %q != %q", h1, h2)
 		}
 	})
+}
+
+// nonEmpty returns m, or nil when m has no entries.
+func nonEmpty(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
 }
 
 // FuzzB64Decode checks base64url JSON decoding and that decoded objects

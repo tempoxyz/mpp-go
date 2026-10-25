@@ -30,8 +30,9 @@ linters:
         - name: exported
   exclusions:
     generated: lax
+    # No "comments" preset: it hides revive's exported rule, the only
+    # revive rule enabled, so undocumented exported APIs would go unreported.
     presets:
-      - comments
       - common-false-positives
       - std-error-handling
     rules:

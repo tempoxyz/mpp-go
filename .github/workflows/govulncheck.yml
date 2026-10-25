@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # go.mod's toolchain line picks the Go release, so standard library
+      # go.mod's go line picks the Go release, so standard library
       # advisories fixed in a newer patch release fail here until it is bumped.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

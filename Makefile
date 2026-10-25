@@ -54,15 +54,29 @@ mod-check:
 	go mod tidy -diff
 	go mod verify
 
-# Run every Fuzz* target under pkg/ for FUZZTIME each
+# Run every Fuzz* target under pkg/ for FUZZTIME each. FUZZTIME reaches the
+# recipe unexpanded through the environment (make would expand an exported
+# FUZZTIME, as it exports command-line variables) and must be a count with a unit
+# (20s, 5m, 1h or 1000x), so a value can't run make functions or shell code.
 FUZZTIME ?= 20s
+unexport FUZZTIME
+fuzz: export MPP_FUZZTIME := $(value FUZZTIME)
 fuzz:
-	@set -e; for pkg in $$(go list ./pkg/...); do \
-		for target in $$(go test -list '^Fuzz' $$pkg | grep '^Fuzz'); do \
+	@set -e; \
+	if ! printf '%s' "$$MPP_FUZZTIME" | grep -Eqx '[0-9]+(s|m|h|x)'; then \
+		echo "FUZZTIME must be a count with a unit such as 20s, 5m, 1h or 1000x" >&2; exit 2; \
+	fi; \
+	pkgs=$$(go list ./pkg/...); \
+	found=0; \
+	for pkg in $$pkgs; do \
+		listed=$$(go test -list '^Fuzz' "$$pkg"); \
+		for target in $$(printf '%s\n' "$$listed" | grep '^Fuzz' || true); do \
+			found=$$((found + 1)); \
 			echo "==> $$pkg $$target"; \
-			go test -run='^$$' -fuzz="^$$target\$$" -fuzztime=$(FUZZTIME) $$pkg; \
+			go test -run='^$$' -fuzz="^$$target\$$" -fuzztime="$$MPP_FUZZTIME" "$$pkg"; \
 		done; \
-	done
+	done; \
+	if [ "$$found" -eq 0 ]; then echo "no Fuzz* targets found under ./pkg" >&2; exit 1; fi
 
 # Run integration tests against the local Tempo devnet by default
 integration:

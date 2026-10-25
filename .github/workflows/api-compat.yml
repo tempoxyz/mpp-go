@@ -46,9 +46,15 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/base" "$base"
           (cd "$RUNNER_TEMP/base" && apidiff -m -w "$RUNNER_TEMP/base.api" "$module")
           apidiff -m -w "$RUNNER_TEMP/head.api" "$module"
-          apidiff -m "$RUNNER_TEMP/base.api" "$RUNNER_TEMP/head.api" | grep -v '^Ignoring internal package' | tee "$RUNNER_TEMP/apidiff.txt" || true
-          apidiff -m -incompatible "$RUNNER_TEMP/base.api" "$RUNNER_TEMP/head.api" \
-            | grep '^- \./pkg/' > "$RUNNER_TEMP/incompatible.txt" || true
+          # apidiff runs on its own, so a failure fails the step; only grep's
+          # no-match status (1) is tolerated below.
+          apidiff -m "$RUNNER_TEMP/base.api" "$RUNNER_TEMP/head.api" > "$RUNNER_TEMP/apidiff-all.txt"
+          grep -v '^Ignoring internal package' "$RUNNER_TEMP/apidiff-all.txt" | tee "$RUNNER_TEMP/apidiff.txt" || [[ $? -eq 1 ]]
+          apidiff -m -incompatible "$RUNNER_TEMP/base.api" "$RUNNER_TEMP/head.api" > "$RUNNER_TEMP/incompatible-all.txt"
+          # Symbol changes print as "- ./pkg/...", and a removed (deleted,
+          # renamed or moved) package as "- package <module>/pkg/...: removed".
+          module_re=${module//./\\.}
+          grep -E "^- (\./pkg/|package $module_re/pkg/)" "$RUNNER_TEMP/incompatible-all.txt" > "$RUNNER_TEMP/incompatible.txt" || [[ $? -eq 1 ]]
 
           if [[ ! -s "$RUNNER_TEMP/incompatible.txt" ]]; then
             echo "No incompatible API changes under ./pkg." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -62,12 +68,15 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Read the bump from each entry's leading "---" frontmatter only, as
+          # the changelogs tool does; README.md documents the format.
           bump=""
           while IFS= read -r file; do
-            if grep -Eq "^$module: (minor|major)[[:space:]]*$" "$file"; then
+            if awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' "$file" \
+              | grep -Eq "^$module_re: (minor|major)[[:space:]]*$"; then
               bump="$file"
             fi
-          done < <(git diff --name-only --diff-filter=AM "$base" HEAD -- '.changelog/*.md')
+          done < <(git diff --name-only --diff-filter=AM "$base" HEAD -- '.changelog/*.md' ':(exclude).changelog/README.md')
 
           if [[ -n "$bump" ]]; then
             echo "::warning::Incompatible API changes are declared by $bump."
