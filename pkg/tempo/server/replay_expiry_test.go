@@ -32,7 +32,7 @@ func TestReplayClaimsExpireAfterChallengeWithExpiringStore(t *testing.T) {
 			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
 			require.NoError(t, err)
 			store := &expiringRecordingStore{MemoryStore: tempo.NewMemoryStore(), expiries: map[string]time.Time{}}
-			config := IntentConfig{Store: store, RPC: rpc}
+			config := IntentConfig{Store: store, RPC: rpc, ExpireReplayKeys: true}
 			if feePayer {
 				config.FeePayerPrivateKey = feePayerKey
 			}
@@ -60,6 +60,39 @@ func TestReplayClaimsExpireAfterChallengeWithExpiringStore(t *testing.T) {
 			assert.ErrorContains(t, err, "already used")
 		})
 	}
+}
+
+func TestReplayClaimsPersistByDefaultWithExpiringStore(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	store := &expiringRecordingStore{MemoryStore: tempo.NewMemoryStore(), expiries: map[string]time.Time{}}
+	method, err := MethodFromConfig(Config{Store: store, RPC: rpc})
+	require.NoError(t, err)
+
+	receipt, err := method.intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+
+	// Without ExpireReplayKeys the verifier never asks for an expiry, even
+	// though the store supports one: Verify called directly trusts the
+	// credential's echoed expiry, so its keys must outlive any expiry.
+	assert.Empty(t, store.expiries)
+	_, exists, err := store.Get(ctx, tempo.ChargeStoreKey(receipt.Reference))
+	require.NoError(t, err)
+	assert.True(t, exists)
+}
+
+func TestExpireReplayKeysRequiresExpiringStore(t *testing.T) {
+	_, err := NewIntent(IntentConfig{Store: newRecordingStore(), ExpireReplayKeys: true})
+	require.ErrorContains(t, err, "ExpireReplayKeys requires a Store that implements tempo.ExpiringStore")
+	_, err = MethodFromConfig(Config{Store: newRecordingStore(), Recipient: testRecipient, Currency: testCurrency, ExpireReplayKeys: true})
+	require.ErrorContains(t, err, "ExpireReplayKeys requires")
+
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), ExpireReplayKeys: true})
+	require.NoError(t, err)
+	assert.True(t, intent.expireReplayKeys)
 }
 
 func TestReplayClaimExpiryRequiresChallengeExpiry(t *testing.T) {

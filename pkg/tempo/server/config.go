@@ -50,6 +50,9 @@ type Config struct {
 	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
 	// An explicit tempo.NewMemoryStore() is only suitable for single-process development.
 	Store tempo.Store
+	// ExpireReplayKeys lets replay keys expire after their challenge; see
+	// IntentConfig.ExpireReplayKeys for when that is safe.
+	ExpireReplayKeys bool
 	// Relay delegates credential validation and finalization to Tempo API or a compatible MPP relay.
 	Relay *RelayConfig
 }
@@ -85,6 +88,7 @@ func MethodFromConfig(config Config) (*Method, error) {
 			FeePayerPolicies:      config.FeePayerPolicies,
 			FeeToken:              config.FeeToken,
 			Store:                 config.Store,
+			ExpireReplayKeys:      config.ExpireReplayKeys,
 		})
 		if err != nil {
 			return nil, err

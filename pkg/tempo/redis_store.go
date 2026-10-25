@@ -20,7 +20,9 @@ var _ ExpiringStore = (*RedisStore)(nil)
 //
 // When ttl is zero, stored values do not expire automatically. PutIfAbsent
 // always keeps replay-protection keys persistent so used payment proofs and
-// hashes cannot become valid again after a TTL window.
+// hashes cannot become valid again after a TTL window. Only PutIfAbsentUntil,
+// which the Tempo charge verifier calls when configured with ExpireReplayKeys,
+// stores keys that expire.
 func NewRedisStore(client redis.Cmdable, ttl time.Duration) *RedisStore {
 	return &RedisStore{client: client, ttl: ttl}
 }

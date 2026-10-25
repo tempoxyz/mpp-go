@@ -28,10 +28,12 @@ type Store interface {
 // need to outlive the credential they protect, like mppx's Store.tryClaim with
 // a ReplayMarker expiry.
 //
-// The Tempo charge verifier calls PutIfAbsentUntil instead of PutIfAbsent when
-// the configured Store implements it, passing a moment after which the
-// credential behind key can no longer be accepted. Stores that do not
-// implement it keep replay keys forever.
+// The Tempo charge verifier calls PutIfAbsentUntil instead of PutIfAbsent only
+// when configured with ExpireReplayKeys, passing a moment after which the
+// credential behind key can no longer be accepted. Otherwise, and for stores
+// that do not implement it, replay keys are kept forever with PutIfAbsent. A
+// store that embeds MemoryStore or RedisStore and overrides PutIfAbsent must
+// also override PutIfAbsentUntil before enabling ExpireReplayKeys.
 type ExpiringStore interface {
 	Store
 	// PutIfAbsentUntil atomically stores value only when key is unused or its
@@ -48,6 +50,8 @@ const memoryStoreSweepInterval = time.Minute
 
 // MemoryStore is an opt-in development replay store. It does not protect across
 // processes or restarts; production replicas must share a persistent Store.
+// PutIfAbsent keeps keys until they are deleted; only keys stored with
+// PutIfAbsentUntil expire.
 type MemoryStore struct {
 	mu        sync.Mutex
 	values    map[string]string
