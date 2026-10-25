@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"runtime"
 	"strings"
 	"sync"
@@ -48,6 +49,12 @@ type Config struct {
 	OrderChallenges OrderChallenges
 	// PaymentPreferences ranks Challenges by "method/intent" q-values.
 	PaymentPreferences mppclient.PaymentPreferences
+	// TrustedTempoProofRealms lists the realms the client signs zero-amount
+	// Tempo proofs for. A zero-amount tempo/charge Challenge authenticates the
+	// payer at the realm it names, and an MCP server has no origin to compare
+	// that realm with, so other realms are refused, like the HTTP Transport
+	// refuses realms its origin does not own.
+	TrustedTempoProofRealms []string
 }
 
 type wrapper struct {
@@ -62,6 +69,7 @@ var wrappers sync.Map // weak.Pointer[mcp.Client] -> *wrapper
 func Wrap(c *mcp.Client, config Config) *mcp.Client {
 	config.Methods = append([]mppclient.Method(nil), config.Methods...)
 	config.PaymentPreferences = maps.Clone(config.PaymentPreferences)
+	config.TrustedTempoProofRealms = append([]string(nil), config.TrustedTempoProofRealms...)
 
 	key := weak.Make(c)
 	w := new(wrapper)
@@ -98,33 +106,48 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			return next(ctx, method, req)
 		}
 		config := w.config.Load()
+		// Credentials are reused per Challenge for the whole call, like the
+		// HTTP Transport, so a rejected or re-offered Challenge is not paid
+		// twice. Only an invalid-payload rejection discards the Credential.
+		credentials := make(map[credentialKey]*mpp.Credential)
+		var sent credentialKey
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
-			data, ok := paymentRequired(result, err)
+			data, invalidPayload, ok := paymentRequired(result, err)
 			if !ok || attempt == maxPaymentAttempts {
 				return result, err
+			}
+			if invalidPayload {
+				delete(credentials, sent)
 			}
 			cause := err
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, payErr := config.pay(ctx, params, data, cause)
+			paid, key, payErr := config.pay(ctx, params, data, credentials, cause)
 			if payErr != nil {
 				return nil, payErr
 			}
+			sent = key
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}
 	}
 }
 
-// pay selects a Challenge, approves and pays it, and returns a copy of the
-// original call's params with the Credential in their metadata.
+type credentialKey struct {
+	id, method, intent string
+}
+
+// pay selects a Challenge, approves and pays it (or reuses the Credential
+// already created for it), and returns a copy of the original call's params
+// with the Credential in their metadata.
 func (config *Config) pay(
 	ctx context.Context,
 	original *mcp.CallToolParams,
 	data *mpp.MCPPaymentRequiredData,
+	credentials map[credentialKey]*mpp.Credential,
 	cause error,
-) (*mcp.CallToolParams, error) {
+) (*mcp.CallToolParams, credentialKey, error) {
 	offered := make([]mpp.Challenge, 0, len(data.Challenges))
 	for _, challenge := range data.Challenges {
 		if challenge != nil {
@@ -133,12 +156,12 @@ func (config *Config) pay(
 	}
 	candidates, err := mppclient.SelectChallengeCandidates(offered, config.Methods, config.PaymentPreferences)
 	if err != nil {
-		return nil, err
+		return nil, credentialKey{}, err
 	}
 	if config.OrderChallenges != nil {
 		candidates, err = config.OrderChallenges(ctx, candidates)
 		if err != nil {
-			return nil, err
+			return nil, credentialKey{}, err
 		}
 	}
 	if len(candidates) == 0 {
@@ -150,14 +173,30 @@ func (config *Config) pay(
 		for i, method := range config.Methods {
 			installed[i] = method.Name() + "." + method.Intent()
 		}
-		return nil, fmt.Errorf(
+		return nil, credentialKey{}, fmt.Errorf(
 			"mpp: no compatible payment method; server offers: %s; client has: %s: %w",
 			strings.Join(available, ", "),
 			strings.Join(installed, ", "),
 			cause,
 		)
 	}
-	selected := candidates[0]
+	var rejected error
+	payable := candidates[:0:0]
+	for _, candidate := range candidates {
+		if err := config.checkProofRealm(candidate.Challenge); err != nil {
+			rejected = err
+			continue
+		}
+		payable = append(payable, candidate)
+	}
+	if len(payable) == 0 {
+		return nil, credentialKey{}, fmt.Errorf("%w: %w", rejected, cause)
+	}
+	selected := payable[0]
+	key := credentialKey{id: selected.Challenge.ID, method: selected.Challenge.Method, intent: selected.Challenge.Intent}
+	if credential, ok := credentials[key]; ok {
+		return withCredential(original, credential), key, nil
+	}
 
 	approve := config.OnPaymentRequired
 	if override, ok := ctx.Value(onPaymentRequiredKey{}).(onPaymentRequiredOverride); ok {
@@ -166,69 +205,112 @@ func (config *Config) pay(
 	if approve != nil {
 		approved, err := approve(ctx, selected.Challenge)
 		if err != nil {
-			return nil, err
+			return nil, credentialKey{}, err
 		}
 		if !approved {
-			return nil, fmt.Errorf("%w: %w", ErrPaymentDeclined, cause)
+			return nil, credentialKey{}, fmt.Errorf("%w: %w", ErrPaymentDeclined, cause)
 		}
 	}
 
 	credential, err := selected.Method.CreateCredential(ctx, selected.Challenge)
 	if err != nil {
-		return nil, fmt.Errorf("mpp: creating credential for method %q: %w", selected.Challenge.Method, err)
+		return nil, credentialKey{}, fmt.Errorf("mpp: creating credential for method %q: %w", selected.Challenge.Method, err)
 	}
 	// Send the Credential in its canonical wire form.
 	authorization, err := mpp.FormatAuthorizationStrict(credential)
 	if err != nil {
-		return nil, err
+		return nil, credentialKey{}, err
 	}
 	credential, err = mpp.ParseCredential(authorization)
 	if err != nil {
-		return nil, err
+		return nil, credentialKey{}, err
 	}
+	credentials[key] = credential
+	return withCredential(original, credential), key, nil
+}
 
+func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *mcp.CallToolParams {
 	params := *original
 	params.Meta = maps.Clone(original.Meta)
 	if params.Meta == nil {
 		params.Meta = mcp.Meta{}
 	}
 	params.Meta[mpp.MCPCredentialMetaKey] = credential
-	return &params, nil
+	return &params
+}
+
+// checkProofRealm refuses a zero-amount tempo/charge Challenge whose realm is
+// not in TrustedTempoProofRealms.
+func (config *Config) checkProofRealm(challenge *mpp.Challenge) error {
+	if challenge.Method != "tempo" || challenge.Intent != "charge" || !isZeroAmount(challenge.Request["amount"]) {
+		return nil
+	}
+	for _, realm := range config.TrustedTempoProofRealms {
+		if strings.EqualFold(realm, challenge.Realm) {
+			return nil
+		}
+	}
+	return fmt.Errorf("mpp: refusing to sign Tempo proof for untrusted realm %q; add it to Config.TrustedTempoProofRealms", challenge.Realm)
+}
+
+func isZeroAmount(value any) bool {
+	amount := strings.TrimSpace(fmt.Sprint(value))
+	if amount == "" {
+		return false
+	}
+	for _, digit := range amount {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	parsed, ok := new(big.Int).SetString(amount, 10)
+	return ok && parsed.Sign() == 0
 }
 
 // IsPaymentRequiredError reports whether err is an MCP payment-required or
 // payment-verification-failed error that carries at least one Challenge.
 func IsPaymentRequiredError(err error) bool {
-	_, ok := paymentRequired(nil, err)
+	_, _, ok := paymentRequired(nil, err)
 	return ok
 }
 
 // paymentRequired returns the payment-required data of a tool call's error
-// or, when it succeeded, of its result metadata.
-func paymentRequired(result mcp.Result, err error) (*mpp.MCPPaymentRequiredData, bool) {
+// or, when it succeeded, of its result metadata. invalidPayload reports an
+// invalid-payload rejection (-32602 with payment data), whose Credential must
+// be recreated, as the HTTP Transport does.
+func paymentRequired(result mcp.Result, err error) (data *mpp.MCPPaymentRequiredData, invalidPayload, ok bool) {
 	if err != nil {
 		var wireErr *jsonrpc.Error
 		if !errors.As(err, &wireErr) {
-			return nil, false
+			return nil, false, false
 		}
-		if wireErr.Code != mpp.MCPPaymentRequiredCode && wireErr.Code != mpp.MCPPaymentVerificationFailedCode {
-			return nil, false
+		switch wireErr.Code {
+		case mpp.MCPPaymentRequiredCode, mpp.MCPPaymentVerificationFailedCode:
+			data, ok = decodePaymentRequired(wireErr.Data)
+			return data, false, ok
+		case mpp.MCPInvalidParamsCode:
+			data, ok = decodePaymentRequired(wireErr.Data)
+			if !ok || data.Problem["type"] != string(mpp.ErrorTypeInvalidPayload) {
+				return nil, false, false
+			}
+			return data, true, true
 		}
-		return decodePaymentRequired(wireErr.Data)
+		return nil, false, false
 	}
-	toolResult, ok := result.(*mcp.CallToolResult)
-	if !ok || toolResult == nil {
-		return nil, false
+	toolResult, isTool := result.(*mcp.CallToolResult)
+	if !isTool || toolResult == nil {
+		return nil, false, false
 	}
-	value, ok := toolResult.Meta[mpp.MCPPaymentRequiredMetaKey]
-	if !ok {
-		return nil, false
+	value, present := toolResult.Meta[mpp.MCPPaymentRequiredMetaKey]
+	if !present {
+		return nil, false, false
 	}
 	raw, marshalErr := json.Marshal(value)
 	if marshalErr != nil {
-		return nil, false
+		return nil, false, false
 	}
-	return decodePaymentRequired(raw)
+	data, ok = decodePaymentRequired(raw)
+	return data, false, ok
 }
 
 func decodePaymentRequired(raw json.RawMessage) (*mpp.MCPPaymentRequiredData, bool) {

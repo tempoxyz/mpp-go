@@ -92,7 +92,7 @@ payment, err := mppserver.New(method, realm, secret)
 
 When a local variable would shadow the package name, use a short variable name (`c`, `srv`) instead of aliasing the import.
 
-**Exception**: Internal library code in `pkg/tempo/server` and `pkg/tempo/client` must use `mppserver`/`mppclient` aliases because the file's own package name (`server`/`client`) would conflict.
+**Exception**: Internal library code in `pkg/tempo/server`, `pkg/tempo/client`, `pkg/mcp/server` and `pkg/mcp/client` must use `mppserver`/`mppclient` aliases because the file's own package name (`server`/`client`) would conflict.
 
 ## Spec Reference
 

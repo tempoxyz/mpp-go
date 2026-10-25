@@ -38,7 +38,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 	if len(configs) == 0 {
 		panic("server: ComposeMiddleware requires at least one ComposeConfig")
 	}
-	entries, realm, err := newComposedEntries(configs)
+	entries, realm, err := newComposedEntries(configs, true)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -114,8 +114,9 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 }
 
 // newComposedEntries validates configs and freezes them into entries that
-// share one realm.
-func newComposedEntries(configs []ComposeConfig) ([]composedEntry, string, error) {
+// share one realm. With buildRequests it also checks that every config can
+// issue its offers now, which ComposeMiddleware does once at construction.
+func newComposedEntries(configs []ComposeConfig, buildRequests bool) ([]composedEntry, string, error) {
 	if len(configs) == 0 {
 		return nil, "", fmt.Errorf("server: compose requires at least one ComposeConfig")
 	}
@@ -132,8 +133,10 @@ func newComposedEntries(configs []ComposeConfig) ([]composedEntry, string, error
 		if cfg.Mpp.realm != realm {
 			return nil, "", fmt.Errorf("server: ComposeConfig[%d] realm %q differs from [0] realm %q", i, cfg.Mpp.realm, realm)
 		}
-		if _, err := cfg.Mpp.buildChargeRequests(cfg.Params); err != nil {
-			return nil, "", fmt.Errorf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err)
+		if buildRequests {
+			if _, err := cfg.Mpp.buildChargeRequests(cfg.Params); err != nil {
+				return nil, "", fmt.Errorf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err)
+			}
 		}
 		entries[i] = composedEntry{
 			mpp:    cfg.Mpp,
@@ -155,7 +158,10 @@ func newComposedEntries(configs []ComposeConfig) ([]composedEntry, string, error
 // malformed-credential error. Each config's ChargeParams are used as given:
 // set Body or MppxScope there to bind them.
 func ComposeCharge(ctx context.Context, authorization string, configs ...ComposeConfig) (*ChargeResult, error) {
-	entries, _, err := newComposedEntries(configs)
+	// Offers are not built up front: an offer that can no longer be issued,
+	// such as a sponsored one close to its fixed Expires, must not reject a
+	// Credential for another offer.
+	entries, _, err := newComposedEntries(configs, false)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +366,7 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
 			continue
 		}
-		requests, err := entry.scopedRequests(scope)
+		requests, err := entry.scopedRequests(scope, cred)
 		if err != nil {
 			return composedEntry{}, false, err
 		}
@@ -389,10 +395,18 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 	return composedEntry{}, false, nil
 }
 
-func (entry composedEntry) scopedRequests(scope map[string]string) ([]map[string]any, error) {
+// scopedRequests builds an entry's offers to match against cred. Building
+// them with the Credential present skips issuance-only checks, such as the
+// sponsored-expiry floor, that do not apply to verifying a Credential.
+func (entry composedEntry) scopedRequests(scope map[string]string, cred *mpp.Credential) ([]map[string]any, error) {
 	params := entry.params
 	if len(scope) > 0 {
 		params.MppxScope = scope
+	}
+	if cred != nil {
+		authorization := mpp.FormatAuthorization(cred)
+		params.Authorization = authorization
+		params.PaymentAuthorization = authorization
 	}
 	return entry.mpp.buildChargeRequests(params)
 }

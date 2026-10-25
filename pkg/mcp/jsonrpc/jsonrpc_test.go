@@ -160,6 +160,14 @@ func TestChargeRejectionsAndMalformedCredentials(t *testing.T) {
 	assert.Equal(t, []string{"A"}, method.recorded())
 }
 
+func TestRequestKeepsLargeIntegersExact(t *testing.T) {
+	req := decodeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"n":9007199254740993}}}`)
+	encoded, err := json.Marshal(req.Meta())
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"n":9007199254740993}`, string(encoded))
+	assert.Contains(t, string(encoded), "9007199254740993")
+}
+
 func TestComposeSettlesOnlyTheChosenOffer(t *testing.T) {
 	method := &testMethod{}
 	payment, err := server.New(method, realm, secretKey)

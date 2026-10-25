@@ -231,8 +231,10 @@ func TestRejectedCredentialKeepsVerificationFailedCode(t *testing.T) {
 	assert.EqualValues(t, 402, data.Problem["status"])
 	assert.Equal(t, string(mpp.ErrorTypeVerificationFailed), data.Problem["type"])
 	assert.Equal(t, data.Challenges[0].ID, data.Problem["challengeId"])
-	// The client pays at most three times for one call, like mppx.
+	// The client retries at most three times and, like the HTTP Transport,
+	// resends the Credential it created instead of paying again.
 	assert.Equal(t, []string{"A", "A", "A"}, method.recorded())
+	assert.Equal(t, []string{"A"}, payer.credentials())
 }
 
 func TestMalformedCredentialUsesInvalidParamsCode(t *testing.T) {
@@ -416,6 +418,86 @@ func TestUnpaidToolsAreUntouched(t *testing.T) {
 	require.ErrorAs(t, err, &wireErr)
 	assert.EqualValues(t, jsonrpc.CodeInvalidParams, wireErr.Code)
 	assert.Empty(t, payer.credentials())
+}
+
+// tokenSequenceMethod pays with the next token on each credential it creates.
+type tokenSequenceMethod struct {
+	testClientMethod
+	tokens []string
+}
+
+func (m *tokenSequenceMethod) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
+	m.mu.Lock()
+	token := m.tokens[len(m.created)]
+	m.mu.Unlock()
+	m.token = token
+	return m.testClientMethod.CreateCredential(ctx, challenge)
+}
+
+// invalidPayloadMethod rejects "stale" payloads as invalid and settles "valid" ones.
+type invalidPayloadMethod struct{ testMethod }
+
+func (m *invalidPayloadMethod) Intents() map[string]server.Intent {
+	intent, err := server.NewIntent("charge", server.IntentHooks{
+		Verify: func(_ context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error) {
+			if credential.Payload["token"] == "stale" {
+				return nil, mpp.ErrInvalidPayload("stale transaction")
+			}
+			return mpp.Success("test", request["currency"].(string)), nil
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return map[string]server.Intent{"charge": intent}
+}
+
+func TestInvalidPayloadRecreatesCredential(t *testing.T) {
+	payment, err := server.New(&invalidPayloadMethod{}, realm, secretKey)
+	require.NoError(t, err)
+	payer := &tokenSequenceMethod{tokens: []string{"stale", "valid"}}
+	session := connect(t, newServer(chargeHandler(payment)), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{payer}}))
+
+	result, err := callPremium(context.Background(), session, nil)
+	require.NoError(t, err)
+	receipt, err := mcpclient.Receipt(result)
+	require.NoError(t, err)
+	require.NotNil(t, receipt)
+	assert.Len(t, payer.credentials(), 2)
+}
+
+// zeroTempoChallengeServer offers a zero-amount tempo/charge Challenge for
+// challengeRealm on every call, like a server relaying another realm's proof.
+func zeroTempoChallengeServer(t *testing.T, challengeRealm string) *mcp.Server {
+	t.Helper()
+	challenge := mpp.NewChallenge(secretKey, challengeRealm, "tempo", "charge", map[string]any{"amount": "0", "currency": "0x20c0"}, mpp.WithExpires(mpp.Expires.Minutes(5)))
+	data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}})
+	require.NoError(t, err)
+	return newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return nil, &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "Payment Required", Data: data}
+	})
+}
+
+type tempoProofMethod struct{ testClientMethod }
+
+func (m *tempoProofMethod) Name() string { return "tempo" }
+
+func TestZeroAmountTempoProofRequiresTrustedRealm(t *testing.T) {
+	refused := &tempoProofMethod{}
+	session := connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{refused}}))
+	_, err := callPremium(context.Background(), session, nil)
+	require.ErrorContains(t, err, "refusing to sign Tempo proof")
+	assert.Empty(t, refused.credentials())
+
+	trusted := &tempoProofMethod{}
+	session = connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{
+		Methods:                 []client.Method{trusted},
+		TrustedTempoProofRealms: []string{"victim.example"},
+	}))
+	_, err = callPremium(context.Background(), session, nil)
+	require.Error(t, err)
+	// The proof is created once and resent on the server's repeated offer.
+	assert.Len(t, trusted.credentials(), 1)
 }
 
 type otherClientMethod struct{}

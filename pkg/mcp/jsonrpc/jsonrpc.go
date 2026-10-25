@@ -23,6 +23,7 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"maps"
@@ -42,6 +43,20 @@ type Request struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  map[string]any  `json:"params,omitempty"`
+}
+
+// UnmarshalJSON decodes numbers as json.Number, so integers above 2^53 in the
+// Credential survive re-encoding and still match the Challenge they echo.
+func (r *Request) UnmarshalJSON(data []byte) error {
+	type request Request
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var decoded request
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*r = Request(decoded)
+	return nil
 }
 
 // Meta returns the request's params._meta, or nil when it has none.
