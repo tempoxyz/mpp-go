@@ -924,8 +924,6 @@ func waitForReceipt(t *testing.T, ctx context.Context, rpc tempo.RPCClient, hash
 	}
 	assert.Failf(t, "", "transaction receipt not found for %s", hash)
 	return *new(map[string]any)
-
-	return nil
 }
 
 func newSigner(t *testing.T) *temposigner.Signer {

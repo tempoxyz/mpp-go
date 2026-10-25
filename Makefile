@@ -34,9 +34,11 @@ fix:
 	gofmt -s -w .
 	go mod tidy
 
-# Run integration tests against the local Tempo devnet by default
+# Run the live integration tests (nested module tests/). Without TEMPO_RPC_URL
+# they start the docker-compose.yml localnet with testcontainers (needs Docker);
+# set TEMPO_RPC_URL to use a running node instead.
 integration:
-	@TEMPO_RPC_URL=$${TEMPO_RPC_URL:-http://localhost:8545} go test -tags=integration -run TestIntegration -timeout=5m ./tests
+	cd tests && go test -race -count=1 -tags=integration -timeout=5m ./...
 
 # Start a local godoc server for this module
 docs:
@@ -54,5 +56,5 @@ help:
 	@echo "  test-coverage   Run unit tests with coverage report"
 	@echo "  check           Run formatting checks, vet, and tests"
 	@echo "  fix             Format code and tidy modules"
-	@echo "  integration     Run integration tests against TEMPO_RPC_URL"
+	@echo "  integration     Run live integration tests (Docker, or TEMPO_RPC_URL)"
 	@echo "  docs            Start a local godoc server"
