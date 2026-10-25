@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -137,8 +138,28 @@ func TestComposeChargeKeepsChallengeCollectionError(t *testing.T) {
 		Params: ChargeParams{Amount: "0.50", Meta: map[string]string{"_mpp_nonce": "fixed"}},
 	})
 	assert.Nil(t, result)
+	require.ErrorContains(t, err, "_mpp_nonce is reserved")
+	// No challenge could be issued: this is a server failure, not a client
+	// PaymentError, so MCP and HTTP report it as internal.
 	var pe *mpp.PaymentError
-	require.ErrorAs(t, err, &pe)
-	assert.Equal(t, mpp.ErrorTypeMalformedCredential, pe.Type)
-	assert.ErrorContains(t, err, "_mpp_nonce is reserved")
+	assert.False(t, errors.As(err, &pe))
+}
+
+func TestComposeMiddlewareMalformedCredentialWithoutChallengesIsInternalError(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	handler := ComposeMiddleware(ComposeConfig{
+		Mpp:    payment,
+		Params: ChargeParams{Amount: "0.50", Meta: map[string]string{"_mpp_nonce": "fixed"}},
+	})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	req.Header.Set(mpp.HeaderAuthorization, "Payment not-base64!")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusInternalServerError, resp.Code)
+	var problem map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem["type"])
 }

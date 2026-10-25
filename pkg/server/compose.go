@@ -215,7 +215,7 @@ func composeMalformedCredentialResult(
 		var collectErr error
 		challenges, collectErr = collectComposeChallenges(ctx, entries, nil, nil)
 		if collectErr != nil {
-			return nil, errors.Join(err, collectErr)
+			return nil, composeChallengeCollectionError(err, collectErr)
 		}
 	}
 	return &ChargeResult{Challenge: challenges[0], Challenges: challenges}, err
@@ -289,11 +289,19 @@ func writeComposeMalformedCredentialError(
 		var collectErr error
 		challenges, collectErr = collectComposeChallenges(r.Context(), entries, body, scope)
 		if collectErr != nil {
-			WritePaymentError(w, errors.Join(err, collectErr))
+			WritePaymentError(w, composeChallengeCollectionError(err, collectErr))
 			return
 		}
 	}
 	writeComposeChallengeResponse(w, challenges, realm, err)
+}
+
+// composeChallengeCollectionError reports that no challenge could be issued in
+// answer to a malformed credential. The collection failure is the primary
+// error: the client's malformed-credential PaymentError is kept only as text,
+// so the response is the server failure, not a client error with no offer.
+func composeChallengeCollectionError(malformed, collectErr error) error {
+	return fmt.Errorf("server: issuing challenges after malformed credential (%v): %w", malformed, collectErr)
 }
 
 func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Challenge, realm string, err error) {

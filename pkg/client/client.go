@@ -3,10 +3,11 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"net/url"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -110,7 +111,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		inner = http.DefaultTransport
 	}
 	origin := requestOrigin(req.URL)
-	req = req.WithContext(withPaymentOrigin(req.Context(), origin))
+	state := &paymentState{origin: origin}
+	req = req.WithContext(withPaymentState(req.Context(), state))
 
 	options := []TransportOption{WithTransportPaymentPreferences(c.paymentPreferences)}
 	if c.onChallenge != nil {
@@ -126,44 +128,75 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	hc.Transport = transport
 	priorCheckRedirect := hc.CheckRedirect
 	hc.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
-		// The Transport attaches credentials to its own retry requests, so
-		// net/http never copies them into a redirect. A Payment credential the
-		// caller set on the request itself would be copied, though, and
-		// net/http does not strip Payment-Authorization: refuse to carry one
-		// to another origin. The Transport separately refuses to pay a
-		// redirected origin.
-		if !sameOriginURL(redirectReq.URL, origin) && hasPaymentCredential(redirectReq.Header) {
-			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q with a Payment credential", origin, requestOrigin(redirectReq.URL))
-		}
+		// Run the caller's hook first: it may change the redirect's headers.
 		if priorCheckRedirect != nil {
-			return priorCheckRedirect(redirectReq, via)
-		}
-		// Keep net/http's default limit of 10 redirects.
-		if len(via) >= maxRedirects {
+			if err := priorCheckRedirect(redirectReq, via); err != nil {
+				return err
+			}
+		} else if len(via) >= maxRedirects {
+			// Keep net/http's default limit of 10 redirects.
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
+		if sameOriginURL(redirectReq.URL, origin) {
+			return nil
+		}
+		// The Transport attaches credentials to its own retry requests, so
+		// net/http never copies them into a redirect. A Payment credential the
+		// caller set on the request itself would be copied, though, in any
+		// field a challenge names, and net/http does not strip those: refuse
+		// to carry one to another origin. The Transport separately refuses to
+		// pay a redirected origin, or this origin once the chain has left it.
+		if hasPaymentCredential(redirectReq.Header) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q with a Payment credential", origin, requestOrigin(redirectReq.URL))
+		}
+		state.mu.Lock()
+		state.leftOrigin = true
+		state.mu.Unlock()
 		return nil
 	}
-	return hc.Do(req)
+	resp, err := hc.Do(req)
+	if err != nil {
+		err = restorePaymentOutcomeUnknown(err, state)
+	}
+	return resp, err
+}
+
+// restorePaymentOutcomeUnknown puts back the PaymentOutcomeUnknownError the
+// Transport returned when net/http replaced it, as it does with its own
+// timeout error when the http.Client has a Timeout.
+func restorePaymentOutcomeUnknown(err error, state *paymentState) error {
+	state.mu.Lock()
+	recorded := state.unknown
+	state.mu.Unlock()
+	var unknown *PaymentOutcomeUnknownError
+	if recorded == nil || errors.As(err, &unknown) {
+		return err
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		restored := *urlErr
+		restored.Err = &PaymentOutcomeUnknownError{
+			Challenge:  recorded.Challenge,
+			Credential: recorded.Credential,
+			Err:        urlErr.Err,
+		}
+		return &restored
+	}
+	return &PaymentOutcomeUnknownError{
+		Challenge:  recorded.Challenge,
+		Credential: recorded.Credential,
+		Err:        err,
+	}
 }
 
 // maxRedirects matches net/http's default redirect limit.
 const maxRedirects = 10
 
-// hasPaymentCredential reports whether header carries a Payment credential in
-// Authorization or Payment-Authorization.
+// hasPaymentCredential reports whether any header field, whatever its name
+// or the case of its name, carries a value in the Payment auth scheme.
 func hasPaymentCredential(header http.Header) bool {
-	for _, name := range []string{mpp.HeaderAuthorization, mpp.HeaderPaymentAuthorization} {
-		for _, value := range header.Values(name) {
-			for _, part := range strings.Split(value, ",") {
-				scheme, _, _ := strings.Cut(strings.TrimSpace(part), " ")
-				if strings.EqualFold(scheme, mpp.SchemePayment) {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	_, ok := paymentCredentialValue(header)
+	return ok
 }
 
 // Get is a convenience method for GET requests.
