@@ -302,7 +302,10 @@ func WritePaymentError(w http.ResponseWriter, err error) {
 		return
 	}
 
-	w.WriteHeader(http.StatusPaymentRequired)
-	problem := mpp.ErrVerificationFailed(err.Error())
+	// Anything that is not a PaymentError is an unexpected server-side
+	// failure: report a fixed internal-payment-error so its text (RPC URLs,
+	// infrastructure details) never reaches the client.
+	problem := mpp.ErrInternalPayment().WithCause(err)
+	w.WriteHeader(problem.Status)
 	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
 }

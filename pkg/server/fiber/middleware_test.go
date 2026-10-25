@@ -356,3 +356,22 @@ func TestChargeMiddlewareBoundsStream(t *testing.T) {
 		})
 	}
 }
+
+func TestWritePaymentErrorHidesUnexpectedErrorText(t *testing.T) {
+	t.Parallel()
+
+	app := fiberfw.New()
+	app.Get("/", func(c *fiberfw.Ctx) error {
+		WritePaymentError(c, fmt.Errorf("dial https://rpc.example/secret-key: connection refused"))
+		return nil
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+	assert.Contains(t, string(body), string(mpp.ErrorTypeInternalPayment))
+	assert.NotContains(t, string(body), "secret-key")
+}

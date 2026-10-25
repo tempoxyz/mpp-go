@@ -215,8 +215,9 @@ func WritePaymentError(c *fiberfw.Ctx, err error) {
 		return
 	}
 
-	problem := mpp.ErrVerificationFailed(err.Error())
+	// See server.WritePaymentError: never echo an unexpected error's text.
+	problem := mpp.ErrInternalPayment().WithCause(err)
 	body, _ := json.Marshal(problem.ProblemDetails(""))
 
-	c.Status(fiberfw.StatusPaymentRequired).Send(body) //nolint:errcheck // matches server.WritePaymentError behavior
+	c.Status(problem.Status).Send(body) //nolint:errcheck // matches server.WritePaymentError behavior
 }
