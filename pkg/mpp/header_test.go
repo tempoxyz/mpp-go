@@ -69,3 +69,46 @@ func TestWWWAuthenticateRoundTripPreservesCredentialHeader(t *testing.T) {
 	assert.Equal(t, HeaderPaymentAuthorization, parsed.CredentialHeader())
 	assert.True(t, parsed.Verify("test-secret", "api.example.com"))
 }
+
+func TestChallengeCreationRejectsInvalidCredentialHeader(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewChallengeWithError(
+		"test-secret",
+		"api.example.com",
+		"tempo",
+		"charge",
+		map[string]any{"amount": "1000000"},
+		WithHeader("Payment Authorization"),
+	)
+	require.EqualError(t, err, "mpp: invalid HTTP header name")
+}
+
+func TestChallengeIDRejectsInvalidCredentialHeader(t *testing.T) {
+	t.Parallel()
+
+	_, err := GenerateChallengeIDWithError(GenerateChallengeIDInput{
+		SecretKey: "test-secret",
+		Realm:     "api.example.com",
+		Method:    "tempo",
+		Intent:    "charge",
+		Request:   map[string]any{"amount": "1000000"},
+		Header:    "Payment Authorization",
+	})
+	require.EqualError(t, err, "mpp: invalid HTTP header name")
+}
+
+func TestFormatAuthenticateStrictRejectsInvalidCredentialHeader(t *testing.T) {
+	t.Parallel()
+
+	challenge := &Challenge{
+		ID:      "challenge-id",
+		Realm:   "api.example.com",
+		Method:  "tempo",
+		Intent:  "charge",
+		Request: map[string]any{"amount": "1000000"},
+		Header:  "Payment Authorization",
+	}
+	_, err := challenge.ToAuthenticateStrict(challenge.Realm)
+	require.EqualError(t, err, "mpp: invalid HTTP header name")
+}

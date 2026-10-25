@@ -316,6 +316,9 @@ func FormatAuthenticate(c *Challenge, realm string) string {
 // FormatAuthenticateStrict formats a Challenge as an authentication header value
 // and rejects values that cannot be safely represented in quoted auth-params.
 func FormatAuthenticateStrict(c *Challenge, realm string) (string, error) {
+	if _, err := parseAdvertisedCredentialHeader(c.Header); err != nil {
+		return "", err
+	}
 	return formatAuthenticate(c, realm, true)
 }
 

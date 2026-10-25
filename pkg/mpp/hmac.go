@@ -41,7 +41,8 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 }
 
 // GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID and
-// rejects ambiguous fields and request values that JCS cannot represent exactly.
+// rejects ambiguous fields, invalid advertised credential headers and request
+// values that JCS cannot represent exactly.
 func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error) {
 	return generateChallengeID(opts, "")
 }
@@ -49,6 +50,10 @@ func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error)
 // generateChallengeID binds encodedOpaque as the opaque slot when it is set,
 // and the canonical encoding of opts.Opaque otherwise.
 func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (string, error) {
+	header, err := parseAdvertisedCredentialHeader(opts.Header)
+	if err != nil {
+		return "", err
+	}
 	fields := []struct {
 		name  string
 		value string
@@ -58,7 +63,7 @@ func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (s
 		{"intent", opts.Intent},
 		{"expires", opts.Expires},
 		{"digest", opts.Digest},
-		{"header", AdvertisedCredentialHeader(opts.Header)},
+		{"header", header},
 	}
 	for _, field := range fields {
 		if strings.Contains(field.value, "|") {
@@ -87,7 +92,7 @@ func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (s
 		opts.Expires,
 		opts.Digest,
 	}
-	if header := AdvertisedCredentialHeader(opts.Header); header != "" {
+	if header != "" {
 		parts = append(parts, header)
 	}
 	parts = append(parts, opaqueB64)
