@@ -2,14 +2,12 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"maps"
-	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	mcppayment "github.com/tempoxyz/mpp-go/pkg/mcp/internal/payment"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -25,6 +23,8 @@ type Result struct {
 	Credential *mpp.Credential
 	// Receipt acknowledges the verified payment on success.
 	Receipt *mpp.Receipt
+
+	outcome *mcppayment.Outcome
 }
 
 // IsChallenge reports whether the tool handler must return Challenge.
@@ -43,17 +43,18 @@ func (r *Result) WithReceipt(result *mcp.CallToolResult) *mcp.CallToolResult {
 	if out.Content == nil {
 		out.Content = []mcp.Content{}
 	}
-	if r.Receipt == nil || r.Credential == nil {
+	if r.outcome == nil {
+		return &out
+	}
+	receipt, ok := r.outcome.MCPReceipt()
+	if !ok {
 		return &out
 	}
 	meta := maps.Clone(out.Meta)
 	if meta == nil {
 		meta = mcp.Meta{}
 	}
-	meta[mpp.MCPReceiptMetaKey] = mpp.MCPReceipt{
-		Receipt:     *r.Receipt,
-		ChallengeID: r.Credential.Challenge.ID,
-	}
+	meta[mpp.MCPReceiptMetaKey] = receipt
 	out.Meta = meta
 	return &out
 }
@@ -69,14 +70,7 @@ func Charge(
 	req *mcp.CallToolRequest,
 	params mppserver.ChargeParams,
 ) (*Result, error) {
-	authorization, credentialErr := credentialAuthorization(req)
-	params.Authorization = authorization
-	params.PaymentAuthorization = authorization
-	result, err := payment.Charge(ctx, params)
-	if credentialErr != nil && err == nil {
-		return challengeResult(result.Challenges, credentialErr), nil
-	}
-	return toResult(result, err)
+	return toResult(mcppayment.Charge(ctx, payment, meta(req), params))
 }
 
 // Compose offers several payment options on one tool, like
@@ -88,110 +82,23 @@ func Compose(
 	req *mcp.CallToolRequest,
 	configs ...mppserver.ComposeConfig,
 ) (*Result, error) {
-	authorization, credentialErr := credentialAuthorization(req)
-	result, err := mppserver.ComposeCharge(ctx, authorization, configs...)
-	if credentialErr != nil && err == nil {
-		return challengeResult(result.Challenges, credentialErr), nil
-	}
-	return toResult(result, err)
+	return toResult(mcppayment.Compose(ctx, meta(req), configs...))
 }
 
-// credentialAuthorization reads the Credential from the tool call's metadata
-// and formats it as a Payment Authorization value. It returns empty when the
-// call carries no Credential, and a malformed-credential error, with an empty
-// value, when it carries one that does not survive the canonical wire format.
-func credentialAuthorization(req *mcp.CallToolRequest) (string, error) {
+func meta(req *mcp.CallToolRequest) map[string]any {
 	if req == nil || req.Params == nil {
-		return "", nil
+		return nil
 	}
-	value, ok := req.Params.Meta[mpp.MCPCredentialMetaKey]
-	if !ok {
-		return "", nil
-	}
-	malformed := mpp.ErrMalformedCredential("invalid credential encoding")
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return "", malformed
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return "", malformed
-	}
-	if _, ok := fields["challenge"]; !ok {
-		return "", malformed
-	}
-	if _, ok := fields["payload"]; !ok {
-		return "", malformed
-	}
-	var credential mpp.Credential
-	if err := json.Unmarshal(raw, &credential); err != nil {
-		return "", malformed
-	}
-	authorization, err := mpp.FormatAuthorizationStrict(&credential)
-	if err != nil {
-		return "", malformed
-	}
-	if _, err := mpp.ParseCredential(authorization); err != nil {
-		return "", malformed
-	}
-	return authorization, nil
+	return req.Params.Meta
 }
 
-func toResult(result *mppserver.ChargeResult, err error) (*Result, error) {
-	var paymentErr *mpp.PaymentError
-	if err != nil && !errors.As(err, &paymentErr) {
+func toResult(outcome *mcppayment.Outcome, err error) (*Result, error) {
+	if err != nil {
 		return nil, err
 	}
-	if result == nil || result.Challenge == nil {
-		if err != nil {
-			// No Challenge could be issued, so the client cannot pay again.
-			return &Result{Challenge: paymentError(nil, err)}, nil
-		}
-		return &Result{Credential: result.Credential, Receipt: result.Receipt}, nil
+	if outcome.Challenged {
+		code, message, data := outcome.Error()
+		return &Result{Challenge: &jsonrpc.Error{Code: code, Message: message, Data: data}}, nil
 	}
-	challenges := result.Challenges
-	if len(challenges) == 0 || (err != nil && paymentErr.Type != mpp.ErrorTypeMalformedCredential) {
-		// A rejected Credential is answered with the offer it echoed, so the
-		// client does not pay another offer for the same failure.
-		challenges = []*mpp.Challenge{result.Challenge}
-	}
-	return challengeResult(challenges, err), nil
-}
-
-func challengeResult(challenges []*mpp.Challenge, err error) *Result {
-	return &Result{Challenge: paymentError(challenges, err)}
-}
-
-// paymentError builds the MCP JSON-RPC error for challenges and err, which is
-// nil when payment is simply required. Like mppx, the data always carries the
-// problem details.
-func paymentError(challenges []*mpp.Challenge, err error) *jsonrpc.Error {
-	code := mpp.MCPErrorCode(err)
-	if err == nil {
-		description := ""
-		if len(challenges) > 0 {
-			description = challenges[0].Description
-		}
-		err = mpp.ErrPaymentRequired("", description)
-	}
-	data := mpp.MCPPaymentRequiredData{
-		HTTPStatus: http.StatusInternalServerError,
-		Challenges: challenges,
-	}
-	message := err.Error()
-	var paymentErr *mpp.PaymentError
-	if errors.As(err, &paymentErr) {
-		data.HTTPStatus = paymentErr.Status
-		message = paymentErr.Detail
-		challengeID := ""
-		if len(challenges) > 0 {
-			challengeID = challenges[0].ID
-		}
-		data.Problem = paymentErr.ProblemDetails(challengeID)
-	}
-	encoded, marshalErr := json.Marshal(data)
-	if marshalErr != nil {
-		return &jsonrpc.Error{Code: mpp.MCPInternalErrorCode, Message: "An internal payment error occurred."}
-	}
-	return &jsonrpc.Error{Code: int64(code), Message: message, Data: encoded}
+	return &Result{Credential: outcome.Credential, Receipt: outcome.Receipt, outcome: outcome}, nil
 }

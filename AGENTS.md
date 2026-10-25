@@ -60,6 +60,7 @@ pkg/
 ├── client/          # Generic HTTP 402 retry transport
 ├── mcp/             # MPP over MCP for the official MCP Go SDK (matches mppx/mcp)
 │   ├── client/      # Payment-aware MCP client middleware
+│   ├── jsonrpc/     # Charge/Compose for raw MCP JSON-RPC messages (mppx Transport.mcp())
 │   └── server/      # Charge/Compose for MCP tool handlers
 ├── mpp/             # Protocol primitives (Challenge, Credential, Receipt, parsing)
 ├── server/          # Generic challenge-or-verify flow

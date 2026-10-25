@@ -356,6 +356,12 @@ receipt, err := mcpclient.Receipt(result)
 `Config.OnPaymentRequired` approves each payment (`mcpclient.WithOnPaymentRequired`
 overrides it per call), and `Config.OrderChallenges` picks among offers.
 
+Servers that handle MCP JSON-RPC messages without an SDK use
+[`pkg/mcp/jsonrpc`](https://pkg.go.dev/github.com/tempoxyz/mpp-go/pkg/mcp/jsonrpc),
+the counterpart of mppx's `Transport.mcp()`: `jsonrpc.Charge` and `jsonrpc.Compose`
+take a `*jsonrpc.Request`, a challenge is a `*jsonrpc.Response` error carrying the
+request's id, and `WithReceipt` adds the receipt to `result._meta`.
+
 ## Protocol
 
 Built on the ["Payment" HTTP Authentication Scheme](https://paymentauth.org), an open specification proposed to the IETF. See [mpp.dev/protocol](https://mpp.dev/protocol/) for the full protocol overview, or the [IETF specification](https://paymentauth.org) for the wire format.
