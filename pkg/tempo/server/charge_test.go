@@ -2231,6 +2231,110 @@ func TestChargeFlow_TransactionCredentialChecksOnceAfterRejectedSubmission(t *te
 	assert.Equal(t, 1, lookups)
 }
 
+func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testing.T) {
+	t.Parallel()
+	for _, mined := range []bool{true, false} {
+		t.Run(fmt.Sprintf("mined=%t", mined), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			var receipt map[string]any
+			// The node still holds the transaction an earlier attempt
+			// broadcast and rejects the re-broadcast as a duplicate.
+			rpc.onSend = func(raw string) (string, map[string]any, error) {
+				tx, err := tempotx.Deserialize(raw)
+				if err != nil {
+					return "", nil, err
+				}
+				sender, err := tempotx.VerifySignature(tx)
+				if err != nil {
+					return "", nil, err
+				}
+				receipt = buildReceipt(raw, request, sender)
+				return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "already known"})
+			}
+			lookups := 0
+			rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+				if len(rpc.sentRawTxs) == 0 {
+					return &temporpc.JSONRPCResponse{}, nil
+				}
+				lookups++
+				if mined && lookups >= 3 {
+					return &temporpc.JSONRPCResponse{Result: receipt}, nil
+				}
+				return &temporpc.JSONRPCResponse{}, nil
+			}
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			require.NoError(t, err)
+
+			got, err := intent.Verify(ctx, credential, request.Map())
+			if mined {
+				// The pending transaction lands while the verifier polls.
+				require.NoError(t, err)
+				assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), got.Reference)
+				assert.Equal(t, 3, lookups)
+				return
+			}
+			require.ErrorContains(t, err, "outcome is unknown")
+			assert.NotContains(t, err.Error(), "transaction submission failed")
+			assert.Greater(t, lookups, 1)
+		})
+	}
+}
+
+func TestChargeFlow_FeePayerRetryFindsReceiptForEarlierFeeToken(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	// The fee payer holds only USDC.e at first, so the first attempt pays gas
+	// in it.
+	rpc.balances = map[common.Address]*big.Int{usdceToken: big.NewInt(1)}
+	failReceiptFetch := true
+	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		if failReceiptFetch && len(rpc.sentRawTxs) > 0 {
+			failReceiptFetch = false
+			return nil, fmt.Errorf("temporary receipt rpc failure")
+		}
+		return &temporpc.JSONRPCResponse{Result: rpc.receipts[hash]}, nil
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{
+		Store:              tempo.NewMemoryStore(),
+		RPC:                rpc,
+		FeePayerPrivateKey: feePayerKey,
+		FeePayerPolicies: map[string]FeePayerPolicy{
+			pathUSDAddress: defaultFeePayerPolicy(),
+			usdceAddress:   defaultFeePayerPolicy(),
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "outcome is unknown")
+	require.Len(t, rpc.sentRawTxs, 1)
+	first, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	require.NoError(t, err)
+	require.Equal(t, usdceToken, first.FeeToken)
+
+	// The included transaction spent the fee payer's USDC.e and the payer's
+	// balance, so the retry picks pathUSD and its simulation would fail. It
+	// still finds the USDC.e envelope's receipt and settles from it.
+	rpc.balances = nil
+	rpc.onCall = drainedBalanceCall
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	require.Len(t, rpc.sentRawTxs, 1)
+	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "already used")
+	assert.Len(t, rpc.sentRawTxs, 1)
+}
+
 // ctxStore fails store calls whose context has ended, like a network store.
 type ctxStore struct{ *tempo.MemoryStore }
 

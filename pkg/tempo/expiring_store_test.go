@@ -116,7 +116,7 @@ func TestRedisStorePutIfAbsentUntil(t *testing.T) {
 	require.True(t, ok)
 	ttl := server.TTL("k")
 	assert.Greater(t, ttl, 59*time.Second)
-	assert.LessOrEqual(t, ttl, time.Minute+time.Millisecond)
+	assert.LessOrEqual(t, ttl, time.Minute+time.Second)
 
 	ok, err = store.PutIfAbsentUntil(ctx, "k", "other", time.Now().Add(time.Hour))
 	require.NoError(t, err)
@@ -132,4 +132,31 @@ func TestRedisStorePutIfAbsentUntil(t *testing.T) {
 	ok, err = store.PutIfAbsentUntil(ctx, "k", "again", time.Now().Add(time.Minute))
 	require.NoError(t, err)
 	assert.True(t, ok)
+}
+
+func TestRedisStorePutIfAbsentUntilUsesAbsoluteDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+	store := NewRedisStore(client, 0)
+
+	// The Redis server's clock is an hour behind the verifier's. A TTL
+	// derived from the verifier's clock would expire the key an hour before
+	// expiresAt by the server's clock; an absolute deadline does not.
+	now := time.Now()
+	server.SetTime(now.Add(-time.Hour))
+	expiresAt := now.Add(time.Minute)
+	ok, err := store.PutIfAbsentUntil(ctx, "k", "v", expiresAt)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Greater(t, server.TTL("k"), time.Hour)
+
+	server.FastForward(time.Hour)
+	_, found, err := store.Get(ctx, "k")
+	require.NoError(t, err)
+	assert.True(t, found, "the key must outlive the verifier's TTL estimate")
 }

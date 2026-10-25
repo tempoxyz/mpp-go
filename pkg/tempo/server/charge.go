@@ -147,6 +147,9 @@ type validatedChargeCredential struct {
 	tx      *tempotx.Tx
 	// feeToken is the token a local fee payer pays gas in.
 	feeToken common.Address
+	// altFeeTokens are the other allowed tokens a local fee payer without a
+	// configured FeeToken may have paid gas in on an earlier attempt.
+	altFeeTokens []common.Address
 	// includedReceipt is the receipt of an unsponsored transaction credential
 	// that is already on chain, found before its simulation.
 	includedReceipt map[string]any
@@ -497,6 +500,13 @@ func (i *Intent) validateTransaction(
 				return err
 			}
 			validated.feeToken = feeToken
+			if i.feeToken == (common.Address{}) {
+				for _, token := range allowed {
+					if token != feeToken {
+						validated.altFeeTokens = append(validated.altFeeTokens, token)
+					}
+				}
+			}
 		}
 		policy, err := i.feePayerPolicyFor(feeToken.Hex())
 		if err != nil {
@@ -629,6 +639,9 @@ func (i *Intent) broadcastTransaction(
 	// sponsorAddress is the fee payer that co-signed a sponsored transaction.
 	var sponsorAddress common.Address
 	senderSimulated := false
+	// senderSigned is the sender-signed transaction before a local fee payer
+	// co-signs it.
+	var senderSigned *tempotx.Tx
 	defer func() {
 		if err == nil || included {
 			return
@@ -683,6 +696,8 @@ func (i *Intent) broadcastTransaction(
 		}
 		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
+			unsigned := *tx
+			senderSigned = &unsigned
 			tx.FeeToken = feeToken
 			tx.AwaitingFeePayer = false
 			if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
@@ -759,11 +774,26 @@ func (i *Intent) broadcastTransaction(
 	// A retry after an inconclusive settlement may find the transaction it
 	// would broadcast already included, with its nonce and funds spent:
 	// simulating it again would fail, so settle from its receipt instead. A
-	// local fee payer re-signs deterministically, so a sponsored retry
-	// rebuilds the same transaction.
+	// local fee payer signs deterministically, so a sponsored retry rebuilds
+	// the same transaction for the same fee token. Without a configured
+	// FeeToken the fee token is picked by live balance and can differ from
+	// the earlier attempt's, so look up the envelope of every other allowed
+	// fee token too.
 	includedReceipt := validated.includedReceipt
 	if request.MethodDetails.FeePayer {
 		includedReceipt = lookupIncludedReceipt(ctx, rpc, signedHash)
+	}
+	if includedReceipt == nil && senderSigned != nil {
+		for _, token := range validated.altFeeTokens {
+			altTx, altSerialized, altHash, err := i.coSignWithFeeToken(*senderSigned, token)
+			if err != nil {
+				continue
+			}
+			if altReceipt := lookupIncludedReceipt(ctx, rpc, altHash); altReceipt != nil {
+				tx, serialized, signedHash, includedReceipt = altTx, altSerialized, altHash, altReceipt
+				break
+			}
+		}
 	}
 	if includedReceipt == nil {
 		if request.MethodDetails.FeePayer {
@@ -819,6 +849,12 @@ func (i *Intent) broadcastTransaction(
 		// The node may have included the transaction before its RPC reply failed.
 		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized, err)
 		if !ok {
+			// A node that already holds the transaction, such as one an
+			// earlier attempt broadcast that is still pending, may include
+			// it later.
+			if isDuplicateSubmission(err) {
+				return nil, broadcastOutcomeUnknown(err)
+			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
 		// An included transaction can never be broadcast again, whether or
@@ -1231,14 +1267,15 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 	}
 	// eth_sendRawTransaction is async, so a transaction the node accepted is
 	// usually still pending when the reply fails: poll like fetchReceipt. A
-	// JSON-RPC error means the node answered and rejected it, so check once.
+	// JSON-RPC error means the node answered and rejected it, so check once,
+	// unless it rejected a duplicate of a transaction it already holds.
 	attempts := receiptRetryAttempts
 	var rpcErr *temporpc.JSONRPCError
-	if errors.As(sendErr, &rpcErr) {
+	if errors.As(sendErr, &rpcErr) && !isDuplicateSubmission(sendErr) {
 		attempts = 1
 	}
 	// The send may have failed because ctx ended; the lookup still needs to run.
-	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(attempts)*receiptRetryDelay)
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), receiptWaitBudget)
 	defer cancel()
 	for attempt := 0; attempt < attempts; attempt++ {
 		response, err := rpc.SendRequest(lookupCtx, "eth_getTransactionReceipt", hash.Hex())
@@ -1259,6 +1296,23 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 		}
 	}
 	return "", nil, false
+}
+
+// isDuplicateSubmission reports whether eth_sendRawTransaction failed because
+// the node already holds the transaction, as geth- and reth-based nodes answer
+// a re-broadcast of a pending transaction.
+func isDuplicateSubmission(err error) bool {
+	var rpcErr *temporpc.JSONRPCError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	message := strings.ToLower(rpcErr.Message)
+	for _, marker := range []string{"already known", "known transaction", "already imported", "alreadyknown"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupIncludedReceipt checks once, without polling, whether the transaction
@@ -1867,6 +1921,32 @@ func (i *Intent) resolveFeeToken(ctx context.Context, rpc tempo.RPCClient, allow
 		}
 	}
 	return allowed[0], nil
+}
+
+// coSignWithFeeToken co-signs a copy of the sender-signed transaction with
+// the local fee payer, paying gas in feeToken, and returns it with its
+// canonical broadcast encoding and hash.
+func (i *Intent) coSignWithFeeToken(senderSigned tempotx.Tx, feeToken common.Address) (*tempotx.Tx, string, string, error) {
+	tx := &senderSigned
+	tx.FeeToken = feeToken
+	tx.AwaitingFeePayer = false
+	tx.FeePayerSignature = nil
+	if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
+		return nil, "", "", err
+	}
+	serialized, err := tempotx.Serialize(tx, nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+	serialized, err = canonicalBroadcastTransaction(serialized)
+	if err != nil {
+		return nil, "", "", err
+	}
+	hash, err := tempotx.ComputeHash(serialized)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return tx, serialized, hash.Hex(), nil
 }
 
 // hasTokenBalance reports whether account holds a nonzero TIP-20 balance.

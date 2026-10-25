@@ -50,17 +50,28 @@ func (s *RedisStore) PutIfAbsent(ctx context.Context, key, value string) (bool, 
 }
 
 // PutIfAbsentUntil stores a replay-protection value only when the key is
-// unused, with SET NX and a TTL that ends no earlier than expiresAt. It stores
-// nothing and returns false when expiresAt is not in the future.
+// unused, with SET NX EXAT, so Redis expires it at the absolute deadline
+// expiresAt rather than after a TTL measured with this process's clock. It
+// stores nothing and returns false when expiresAt is not in the future.
+// EXAT requires Redis 6.2 or later.
 func (s *RedisStore) PutIfAbsentUntil(ctx context.Context, key, value string, expiresAt time.Time) (bool, error) {
-	ttl := time.Until(expiresAt)
-	if ttl <= 0 {
+	if !expiresAt.After(time.Now()) {
 		return false, nil
 	}
-	// Round up to Redis's millisecond precision so the key never expires
-	// before expiresAt.
-	ttl = ttl.Truncate(time.Millisecond) + time.Millisecond
-	return s.client.SetNX(ctx, key, value, ttl).Result()
+	// Round up to EXAT's whole seconds so the key never expires before
+	// expiresAt.
+	deadline := expiresAt.Truncate(time.Second)
+	if deadline.Before(expiresAt) {
+		deadline = deadline.Add(time.Second)
+	}
+	err := s.client.SetArgs(ctx, key, value, redis.SetArgs{Mode: "NX", ExpireAt: deadline}).Err()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Delete removes a replay-protection value.
