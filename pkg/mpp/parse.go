@@ -784,9 +784,26 @@ var receiptBaseFields = map[string]struct{}{
 
 // isEmptyReceiptExtra reports whether a top-level receipt field is an empty
 // "extra" object, which receipts drop rather than keep as an extension.
+// Emptiness is decided by JSON shape, so any value that encodes as {} (such as
+// map[string]string{}, a named map type or json.RawMessage("{}")) is dropped
+// when formatting, as ParseReceipt drops it, keeping parse/format stable.
 func isEmptyReceiptExtra(key string, value any) bool {
-	m, ok := value.(map[string]any)
-	return key == "extra" && ok && len(m) == 0
+	if key != "extra" {
+		return false
+	}
+	if m, ok := value.(map[string]any); ok {
+		return len(m) == 0
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		// Left in place so encoding reports the error.
+		return false
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, encoded); err != nil {
+		return false
+	}
+	return compact.String() == "{}"
 }
 
 // FormatReceiptWithError formats r as a Payment-Receipt header value, the

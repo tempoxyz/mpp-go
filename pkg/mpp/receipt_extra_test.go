@@ -2,6 +2,7 @@ package mpp
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,4 +79,41 @@ func TestReceiptExtraIsAnOrdinaryExtension(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, string(decoded), "extra")
 	})
+
+	type namedMap map[string]int
+	for _, tt := range []struct {
+		name  string
+		extra any
+		empty bool
+	}{
+		{name: "map[string]string{}", extra: map[string]string{}, empty: true},
+		{name: "named map type", extra: namedMap{}, empty: true},
+		{name: "json.RawMessage {}", extra: json.RawMessage("{}"), empty: true},
+		{name: "json.RawMessage spaced", extra: json.RawMessage(" { } "), empty: true},
+		{name: "non-empty map[string]string", extra: map[string]string{"settled": "true"}},
+		{name: "non-empty json.RawMessage", extra: json.RawMessage(`{"settled":true}`)},
+	} {
+		t.Run("format "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			parsed, err := ParseReceipt(b64EncodeAny(base()))
+			require.NoError(t, err)
+			parsed.Extensions = map[string]any{"extra": tt.extra}
+
+			formatted, err := FormatReceiptWithError(parsed)
+			require.NoError(t, err)
+			reparsed, err := ParseReceipt(formatted)
+			require.NoError(t, err)
+			if tt.empty {
+				assert.Equal(t, b64EncodeAny(base()), formatted)
+				assert.NotContains(t, reparsed.Extensions, "extra")
+			} else {
+				assert.Contains(t, reparsed.Extensions, "extra")
+			}
+
+			// Parse/format is stable from here on.
+			again, err := FormatReceiptWithError(reparsed)
+			require.NoError(t, err)
+			assert.Equal(t, formatted, again)
+		})
+	}
 }
