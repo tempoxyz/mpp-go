@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -867,4 +868,29 @@ func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 		return
 	}
 
+}
+
+func TestTransport_PayRedirects_RefusesBrokenRedirectChain(t *testing.T) {
+	transport := NewTransport(nil, nil)
+	transport.payRedirects = true
+	challenge, err := mpp.NewChallengeWithError("secret", "evil.example", "tempo", "charge", map[string]any{"amount": "1"})
+	require.NoError(t, err)
+	candidate := challengeCandidate{challenge: challenge, method: &mockMethod{name: "tempo", intent: "charge"}}
+
+	redirected, err := http.NewRequest(http.MethodGet, "https://evil.example/paid", nil)
+	require.NoError(t, err)
+	redirected.Response = &http.Response{StatusCode: http.StatusFound}
+	err = transport.validatePaymentOrigin(redirected, candidate)
+	require.ErrorContains(t, err, "refusing payment after redirect")
+
+	original, err := http.NewRequest(http.MethodGet, "https://api.example/paid", nil)
+	require.NoError(t, err)
+	redirected.Response = &http.Response{StatusCode: http.StatusFound, Request: original}
+	err = transport.validatePaymentOrigin(redirected, candidate)
+	require.ErrorContains(t, err, "refusing payment for redirected origin")
+
+	sameOrigin, err := http.NewRequest(http.MethodGet, "https://api.example/other", nil)
+	require.NoError(t, err)
+	sameOrigin.Response = &http.Response{StatusCode: http.StatusFound, Request: original}
+	require.NoError(t, transport.validatePaymentOrigin(sameOrigin, candidate))
 }

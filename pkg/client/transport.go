@@ -665,7 +665,12 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 		// NewHTTPClient's CheckRedirect keeps redirects on the origin of the
 		// request the caller sent, the first in the redirect chain.
 		first := req
-		for first.Response != nil && first.Response.Request != nil {
+		for first.Response != nil {
+			if first.Response.Request == nil {
+				// A broken chain hides the request the caller sent: fail
+				// closed rather than trust this redirected request's origin.
+				return fmt.Errorf("mpp: refusing payment after redirect to %q; the redirect chain does not lead back to the original request", requestOrigin(req.URL))
+			}
 			first = first.Response.Request
 		}
 		origin = requestOrigin(first.URL)
