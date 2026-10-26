@@ -13,11 +13,12 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // redisImage is the Redis server the replay-protection test runs against,
@@ -39,9 +40,9 @@ func TestIntegrationRedisStoreReplayAcrossReplicas(t *testing.T) {
 			RPCURL: rpcURL,
 		})
 		require.NoError(t, err)
-		method := chargeserver.NewMethod(chargeserver.MethodConfig{
+		method := mustNewMethod(t, chargeserver.Config{
 			Intent:         intent,
-			Currency:       integrationCurrency,
+			Currencies:     []string{integrationCurrency},
 			Recipient:      integrationRecipient,
 			ChainID:        int64(chainID),
 			SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},

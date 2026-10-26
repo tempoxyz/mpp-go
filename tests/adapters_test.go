@@ -16,6 +16,7 @@ import (
 	fiberfw "github.com/gofiber/fiber/v2"
 	echofw "github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -103,12 +104,12 @@ func newLiveCharge(t *testing.T, store tempo.Store) *server.Mpp {
 	t.Helper()
 	rpcURL := integrationRPCURL(t)
 	chainID := waitForRPC(t, context.Background(), tempo.NewRPCClient(rpcURL))
-	method, err := chargeserver.MethodFromConfig(chargeserver.Config{
-		Store:     store,
-		RPCURL:    rpcURL,
-		ChainID:   int64(chainID),
-		Currency:  integrationCurrency,
-		Recipient: integrationRecipient,
+	method, err := chargeserver.New(chargeserver.Config{
+		Store:      store,
+		RPCURL:     rpcURL,
+		ChainID:    int64(chainID),
+		Currencies: []string{integrationCurrency},
+		Recipient:  integrationRecipient,
 	})
 	require.NoError(t, err)
 	return newTestServer(t, method, integrationRealm, integrationSecretKey)

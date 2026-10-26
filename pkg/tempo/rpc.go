@@ -22,9 +22,18 @@ type RPCClient interface {
 // receipt-polling helpers into tempo-go/client; mpp-go and pympp currently
 // duplicate this Tempo RPC glue.
 
-// NewRPCClient constructs a Tempo JSON-RPC client.
+// NewRPCClient constructs a Tempo JSON-RPC client. Use
+// NewRPCClientWithOptions to set a timeout, an *http.Client or credentials.
 func NewRPCClient(rpcURL string) RPCClient {
 	return temporpc.New(rpcURL)
+}
+
+// NewRPCClientWithOptions constructs a Tempo JSON-RPC client with tempo-go
+// client options, such as client.WithTimeout or client.WithHTTPClient from
+// github.com/tempoxyz/tempo-go/pkg/client. Build it once and reuse it: pass it
+// as the RPC field of the Tempo client or server config.
+func NewRPCClientWithOptions(rpcURL string, opts ...temporpc.Option) RPCClient {
+	return temporpc.New(rpcURL, opts...)
 }
 
 // ParseHexUint64 decodes a JSON-RPC hex integer into uint64. A bare "0x" (or an

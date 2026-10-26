@@ -68,7 +68,10 @@ var _ mppserver.ChargeOffersBuilder = (*Method)(nil)
 // inferred from the intent's RPC URL when ChainID is zero. With no custom RPC,
 // it defaults to mainnet. NewMethod panics
 // when Intent lacks replay storage or the currency configuration is invalid (see MethodConfig.Currencies);
-// use MethodFromConfig to receive the error instead.
+// use New to receive the error instead.
+//
+// Deprecated: Use New instead, which returns configuration errors rather
+// than panicking. To share one Intent between methods, set Config.Intent.
 func NewMethod(config MethodConfig) *Method {
 	if config.Intent == nil || !hasReplayStore(config.Intent.store) {
 		panic("tempo server: Intent must be configured with a replay Store")

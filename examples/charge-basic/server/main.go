@@ -21,13 +21,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	method, err := charge.MethodFromConfig(charge.Config{
+	method, err := charge.New(charge.Config{
 		// Development only: replicas need a shared persistent store.
-		Store:     tempo.NewMemoryStore(),
-		RPCURL:    rpcURL,
-		ChainID:   chainID,
-		Currency:  devnet.Currency,
-		Recipient: devnet.Recipient,
+		Store:      tempo.NewMemoryStore(),
+		RPCURL:     rpcURL,
+		ChainID:    chainID,
+		Currencies: []string{devnet.Currency},
+		Recipient:  devnet.Recipient,
 	})
 	if err != nil {
 		log.Fatal(err)

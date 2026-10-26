@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math/big"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -25,15 +25,20 @@ const maxPaymentAttempts = 3
 
 const methodCallTool = "tools/call"
 
-// ErrPaymentDeclined is returned when the approval hook declines a payment.
-var ErrPaymentDeclined = errors.New("mpp: payment declined")
+// ErrPaymentDeclined is returned, wrapped, when the approval hook declines a
+// payment. It is client.ErrPaymentDeclined, which the HTTP client returns
+// when an OnChallenge hook declines, so errors.Is matches either.
+var ErrPaymentDeclined = mppclient.ErrPaymentDeclined
 
 // OnPaymentRequired approves a payment before a Credential is created for
 // challenge. Returning false declines it.
 type OnPaymentRequired func(ctx context.Context, challenge *mpp.Challenge) (bool, error)
 
 // OrderChallenges filters and sorts the payable Challenges before one is
-// paid; the first one returned is paid.
+// paid; the first one returned that passes the realm checks is paid. It has
+// the semantics and signature of client.OrderChallenges, which the HTTP
+// client takes with client.WithOrderChallenges, so one hook converts to
+// either: mcpclient.OrderChallenges(fn).
 type OrderChallenges func(
 	ctx context.Context,
 	candidates []mppclient.ChallengeCandidate,
@@ -53,7 +58,11 @@ type Config struct {
 	// Tempo proofs for. A zero-amount tempo/charge Challenge authenticates the
 	// payer at the realm it names, and an MCP server has no origin to compare
 	// that realm with, so other realms are refused, like the HTTP Transport
-	// refuses realms its origin does not own.
+	// refuses realms its origin does not own. Realms compare case-insensitively.
+	//
+	// Deprecated: Trust the realm in the Tempo charge method instead, with a
+	// TrustedProofRealm without an Origin in its Config.TrustedProofRealms
+	// (package github.com/tempoxyz/mpp-go/pkg/tempo/client).
 	TrustedTempoProofRealms []string
 }
 
@@ -63,19 +72,34 @@ type wrapper struct {
 
 var wrappers sync.Map // weak.Pointer[mcp.Client] -> *wrapper
 
-// Wrap adds automatic payment handling to tool calls made through sessions of
-// c and returns c. Sessions connected before and after Wrap both use it.
-// Calling Wrap again on the same client replaces its payment configuration.
-func Wrap(c *mcp.Client, config Config) *mcp.Client {
+// Middleware returns sending middleware that pays for tool calls, to install
+// with c.AddSendingMiddleware(mcpclient.Middleware(config)). It is the
+// explicit form of Wrap: every session of c, connected before or after,
+// uses it, and installing it again adds a second payment layer rather than
+// replacing the first.
+func Middleware(config Config) mcp.Middleware {
+	w := new(wrapper)
+	w.config.Store(cloneConfig(config))
+	return w.middleware
+}
+
+func cloneConfig(config Config) *Config {
 	config.Methods = append([]mppclient.Method(nil), config.Methods...)
 	config.PaymentPreferences = maps.Clone(config.PaymentPreferences)
 	config.TrustedTempoProofRealms = append([]string(nil), config.TrustedTempoProofRealms...)
+	return &config
+}
 
+// Wrap adds automatic payment handling to tool calls made through sessions of
+// c and returns c. Sessions connected before and after Wrap both use it.
+// Calling Wrap again on the same client replaces its payment configuration.
+// Middleware installs the same handling without Wrap's per-client registry.
+func Wrap(c *mcp.Client, config Config) *mcp.Client {
 	key := weak.Make(c)
 	w := new(wrapper)
 	actual, loaded := wrappers.LoadOrStore(key, w)
 	w = actual.(*wrapper)
-	w.config.Store(&config)
+	w.config.Store(cloneConfig(config))
 	if !loaded {
 		runtime.AddCleanup(c, func(key weak.Pointer[mcp.Client]) { wrappers.Delete(key) }, key)
 		c.AddSendingMiddleware(w.middleware)
@@ -183,7 +207,7 @@ func (config *Config) pay(
 	var rejected error
 	payable := candidates[:0:0]
 	for _, candidate := range candidates {
-		if err := config.checkProofRealm(candidate.Challenge); err != nil {
+		if err := config.checkOrigin(candidate); err != nil {
 			rejected = err
 			continue
 		}
@@ -239,32 +263,32 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 	return &params
 }
 
-// checkProofRealm refuses a zero-amount tempo/charge Challenge whose realm is
-// not in TrustedTempoProofRealms.
-func (config *Config) checkProofRealm(challenge *mpp.Challenge) error {
-	if challenge.Method != "tempo" || challenge.Intent != mpp.IntentCharge || !isZeroAmount(challenge.Request["amount"]) {
+// checkOrigin asks the candidate's method, when it implements
+// client.OriginValidator, whether it may pay a Challenge from a server without
+// an origin; a realm in the deprecated TrustedTempoProofRealms still passes.
+// Other methods keep the built-in rule: a zero-amount tempo/charge Challenge
+// is refused unless TrustedTempoProofRealms lists its realm.
+func (config *Config) checkOrigin(candidate mppclient.ChallengeCandidate) error {
+	challenge := candidate.Challenge
+	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
+		if err := validator.ValidateOrigin(nil, challenge); err != nil && !config.trustsProofRealm(challenge.Realm) {
+			return err
+		}
 		return nil
 	}
-	for _, realm := range config.TrustedTempoProofRealms {
-		if strings.EqualFold(realm, challenge.Realm) {
-			return nil
-		}
+	if !tempoproof.IsProofChallenge(challenge) || config.trustsProofRealm(challenge.Realm) {
+		return nil
 	}
-	return fmt.Errorf("mpp: refusing to sign Tempo proof for untrusted realm %q; add it to Config.TrustedTempoProofRealms", challenge.Realm)
+	return tempoproof.RealmError(challenge.Realm, "", "trust it with the Tempo method's Config.TrustedProofRealms")
 }
 
-func isZeroAmount(value any) bool {
-	amount := strings.TrimSpace(fmt.Sprint(value))
-	if amount == "" {
-		return false
-	}
-	for _, digit := range amount {
-		if digit < '0' || digit > '9' {
-			return false
+func (config *Config) trustsProofRealm(realm string) bool {
+	for _, trusted := range config.TrustedTempoProofRealms {
+		if strings.EqualFold(trusted, realm) {
+			return true
 		}
 	}
-	parsed, ok := new(big.Int).SetString(amount, 10)
-	return ok && parsed.Sign() == 0
+	return false
 }
 
 // IsPaymentRequiredError reports whether err is an MCP payment-required or

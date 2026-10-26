@@ -8,17 +8,21 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
-	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
+	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/rpccache"
 )
 
 // feePayerMarker is the legacy sponsored-transaction suffix recognized by
@@ -35,7 +39,8 @@ type Config struct {
 	RPC tempo.RPCClient
 	// RPCURL is used to build an RPC client when RPC is nil.
 	RPCURL string
-	// ChainID constrains the challenge to a specific Tempo chain when set.
+	// ChainID constrains the challenge to a specific Tempo chain when set,
+	// such as tempo.ChainIDMainnet or tempo.ChainIDModerato.
 	ChainID int64
 	// ClientID is folded into automatically generated attribution memos.
 	ClientID string
@@ -45,7 +50,31 @@ type Config struct {
 	// Nil rejects paid challenges. Check the normalized amount (including splits),
 	// currency, recipient, and verified RPC chain; enforce cumulative budgets atomically if needed.
 	// The callback may run concurrently and must not mutate the request.
+	//
+	// Build it from the PaymentPolicy helpers, for example at most 0.50 OUSD
+	// per payment on mainnet:
+	//
+	//	PaymentPolicy: charge.AllPolicies(
+	//		charge.MaxAmount(tempo.OUSDAddress, "0.50", 6),
+	//		charge.AllowChainIDs(tempo.ChainIDMainnet),
+	//	),
 	PaymentPolicy func(context.Context, tempo.ChargeRequest) error
+	// TrustedProofRealms lets the method sign zero-amount proofs for a realm
+	// that differs from the hostname of the server sending the challenge. A
+	// proof authenticates the payer at the challenge realm, so by default
+	// the method signs one only when an HTTPS server on the default port
+	// names its own hostname as the realm, and never over MCP.
+	TrustedProofRealms []TrustedProofRealm
+}
+
+// TrustedProofRealm trusts a server to request zero-amount proofs for Realm.
+type TrustedProofRealm struct {
+	// Origin is the scheme://host[:port] origin of the HTTP server, such as
+	// "http://localhost:8080". Empty trusts Realm on transports without an
+	// origin, such as MCP.
+	Origin string
+	// Realm is the challenge realm, compared exactly.
+	Realm string
 }
 
 // Method implements Tempo charge credential creation for the generic MPP client.
@@ -60,6 +89,9 @@ type Method struct {
 	clientID       string
 	credentialType tempo.CredentialType
 	paymentPolicy  func(context.Context, tempo.ChargeRequest) error
+	trustedRealms  []TrustedProofRealm
+	// rpcClients reuses the RPC clients built from chain RPC URLs.
+	rpcClients rpccache.Cache
 
 	signingMu sync.Mutex
 	signing   map[string]*signingCall
@@ -73,7 +105,10 @@ type signingCall struct {
 	err        error
 }
 
-var _ mppclient.Method = (*Method)(nil)
+var (
+	_ mppclient.Method          = (*Method)(nil)
+	_ mppclient.OriginValidator = (*Method)(nil)
+)
 
 // New constructs a Tempo charge client method.
 func New(config Config) (*Method, error) {
@@ -100,15 +135,44 @@ func New(config Config) (*Method, error) {
 	if chainID == 0 {
 		chainID = tempo.InferChainIDFromRPCURL(config.RPCURL)
 	}
+	trustedRealms := make([]TrustedProofRealm, len(config.TrustedProofRealms))
+	for i, trusted := range config.TrustedProofRealms {
+		trustedRealms[i] = TrustedProofRealm{Origin: tempoproof.NormalizeOrigin(trusted.Origin), Realm: trusted.Realm}
+	}
+	rpc := config.RPC
+	if rpc == nil && config.RPCURL != "" {
+		// Build the client once rather than per credential.
+		rpc = tempo.NewRPCClient(config.RPCURL)
+	}
 	return &Method{
 		signer:         signer,
-		rpc:            config.RPC,
+		rpc:            rpc,
 		rpcURL:         config.RPCURL,
 		chainID:        chainID,
 		clientID:       config.ClientID,
 		credentialType: config.CredentialType,
 		paymentPolicy:  config.PaymentPolicy,
+		trustedRealms:  trustedRealms,
 	}, nil
+}
+
+// ValidateOrigin implements client.OriginValidator. It refuses a zero-amount
+// charge challenge, which the method pays with a proof that authenticates
+// the payer at the challenge realm, unless origin is an HTTPS URL on the
+// default port whose hostname is the realm, or Config.TrustedProofRealms
+// trusts the realm for origin. origin is nil on transports without one, such
+// as MCP. Other challenges pass.
+func (m *Method) ValidateOrigin(origin *url.URL, challenge *mpp.Challenge) error {
+	if !tempoproof.IsProofChallenge(challenge) || tempoproof.OriginOwnsRealm(origin, challenge.Realm) {
+		return nil
+	}
+	from := tempoproof.Origin(origin)
+	for _, trusted := range m.trustedRealms {
+		if trusted.Origin == from && trusted.Realm == challenge.Realm {
+			return nil
+		}
+	}
+	return tempoproof.RealmError(challenge.Realm, from, "trust it with Config.TrustedProofRealms")
 }
 
 // Name returns the method token used in Challenges and Credentials.
@@ -228,7 +292,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, err
 	}
 	if rpc == nil {
-		rpc = tempo.NewRPCClient(rpcURL)
+		rpc = m.rpcClients.Get(rpcURL)
 	}
 
 	chainID, err := rpc.GetChainID(ctx)
@@ -582,5 +646,10 @@ func (m *Method) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, strin
 		}
 		return nil, rpcURL, nil
 	}
-	return nil, tempo.DefaultRPCURLForChain(0), nil
+	// Without a chain ID, RPCURLForChain(0) is mainnet.
+	rpcURL, err := tempo.RPCURLForChain(0)
+	if err != nil {
+		return nil, "", fmt.Errorf("tempo client: %w", err)
+	}
+	return nil, rpcURL, nil
 }

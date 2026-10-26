@@ -15,4 +15,9 @@
 //	...
 //	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "premium_tool"})
 //	receipt, err := mcpclient.Receipt(result)
+//
+// Middleware returns the same handling as sending middleware to install
+// yourself, without Wrap's per-client registry:
+//
+//	c.AddSendingMiddleware(mcpclient.Middleware(mcpclient.Config{Methods: methods}))
 package client

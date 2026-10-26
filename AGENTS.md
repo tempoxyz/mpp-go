@@ -99,6 +99,26 @@ pkg/
     └── server/      # Tempo charge server method
 ```
 
+Clients and Tempo methods:
+
+- HTTP clients: `client.NewHTTPClient(methods, opts...)` returns a standard
+  `*http.Client` (same-origin redirects only, config errors at construction);
+  `client.New` and `NewHTTPTransport` take the same `Option`s. `NewTransport` and the
+  `WithTransport*` options are deprecated. Options include `WithMaxRetries` and
+  `WithOrderChallenges`; a declined payment matches `client.ErrPaymentDeclined`
+  (also `mcpclient.ErrPaymentDeclined`). Read receipts with `mpp.ReceiptFromResponse`.
+- Method-specific origin rules belong in the method, through
+  `client.OriginValidator`; the generic clients only keep a built-in Tempo proof
+  check for methods that do not implement it (`pkg/internal/tempoproof`).
+- Tempo server: construct with `charge.New(charge.Config{...})`; `MethodFromConfig`
+  and `NewMethod` are deprecated. Sponsor fees with `AllowedFeeTokens` and
+  `FeePayerPolicy` (not the deprecated `FeePayerPolicies` map).
+- Tempo client: build `Config.PaymentPolicy` from `charge.MaxAmount`,
+  `MaxAtomicAmount` and `AllowChainIDs` combined with `AllPolicies`; trust proof realms
+  with `Config.TrustedProofRealms`. Use `tempo.ChainIDMainnet`/`ChainIDModerato`,
+  `tempo.USDCEAddress` and `tempo.RPCURLForChain` (which reports unknown chains).
+  RPC clients built from URLs are cached per method (`pkg/tempo/internal/rpccache`).
+
 ## Import Conventions
 
 **Use bare package names** — do not alias `pkg/server` as `mppserver` or `pkg/client` as `mppclient`. The Tempo-specific packages already use the `charge` alias, so there is no conflict:

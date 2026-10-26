@@ -9,6 +9,15 @@ import (
 // TODO(tempo-go): move Tempo chain metadata and TIP-20 selectors into tempo-go;
 // these constants are chain-specific primitives rather than MPP-specific state.
 
+// Tempo chain IDs. They have the type of the ChainID fields in the Tempo
+// client and server configs.
+const (
+	// ChainIDMainnet is the chain ID of Tempo mainnet.
+	ChainIDMainnet int64 = 4217
+	// ChainIDModerato is the chain ID of the Tempo Moderato testnet.
+	ChainIDModerato int64 = 42431
+)
+
 const (
 	// MethodName is the Tempo payment method token.
 	MethodName = "tempo"
@@ -47,8 +56,12 @@ const (
 	TransferCalldataLength = 4 + 32 + 32
 	// TransferWithMemoCalldataLength is the exact byte length of transferWithMemo(address,uint256,bytes32).
 	TransferWithMemoCalldataLength = 4 + 32 + 32 + 32
-	// MainnetUSDCAddress is Circle's USDC contract on Tempo mainnet.
-	MainnetUSDCAddress = "0x20C000000000000000000000b9537d11c60E8b50"
+	// USDCEAddress is the bridged USDC (USDC.e) contract on Tempo mainnet.
+	USDCEAddress = "0x20C000000000000000000000b9537d11c60E8b50"
+	// MainnetUSDCAddress is the bridged USDC (USDC.e) contract on Tempo mainnet.
+	//
+	// Deprecated: Use USDCEAddress instead.
+	MainnetUSDCAddress = USDCEAddress
 	// OUSDAddress is the OpenUSD (OUSD) contract, deployed at the same address
 	// on Tempo mainnet and Moderato.
 	OUSDAddress = "0x20c0000000000000000000006a37DA5C996874BE"

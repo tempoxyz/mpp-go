@@ -17,12 +17,12 @@ type exampleServer struct {
 }
 
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
-	method, err := charge.MethodFromConfig(charge.Config{
+	method, err := charge.New(charge.Config{
 		// Development only: replicas need a shared persistent store.
 		Store:              tempo.NewMemoryStore(),
 		RPCURL:             rpcURL,
 		ChainID:            chainID,
-		Currency:           devnet.Currency,
+		Currencies:         []string{devnet.Currency},
 		FeePayerPrivateKey: devnet.FeePayerPrivateKey,
 		FeePayer:           true,
 		Recipient:          devnet.Recipient,

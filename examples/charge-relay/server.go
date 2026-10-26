@@ -23,10 +23,10 @@ func startRelayServer(apiKey, apiURL, secretKey string, chainID int64) (*relaySe
 		return nil, fmt.Errorf("generate recipient: %w", err)
 	}
 	recipient := crypto.PubkeyToAddress(recipientKey.PublicKey)
-	method, err := charge.MethodFromConfig(charge.Config{
-		ChainID:   chainID,
-		Currency:  tempo.DefaultCurrencyForChain(chainID),
-		Recipient: recipient.Hex(),
+	method, err := charge.New(charge.Config{
+		ChainID:    chainID,
+		Currencies: []string{tempo.DefaultCurrencyForChain(chainID)},
+		Recipient:  recipient.Hex(),
 		Relay: &charge.RelayConfig{
 			APIKey:     apiKey,
 			APIBaseURL: apiURL,

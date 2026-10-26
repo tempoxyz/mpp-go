@@ -22,15 +22,16 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tempoxyz/tempo-go/pkg/keychain"
+	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
-	"github.com/tempoxyz/tempo-go/pkg/keychain"
-	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 const (
@@ -490,9 +491,10 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
-		Signer:  payerSigner,
-		RPCURL:  rpcURL,
-		ChainID: int64(chainID),
+		Signer:             payerSigner,
+		RPCURL:             rpcURL,
+		ChainID:            int64(chainID),
+		TrustedProofRealms: []chargeclient.TrustedProofRealm{{Origin: srv.URL, Realm: "127.0.0.1"}},
 	})
 	if !assert.NoErrorf(t, err,
 		"tempo/client.New() error = %v", err) {
@@ -503,7 +505,6 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 	c := client.New(
 		[]client.Method{clientMethod},
 		client.WithHTTPClient(&http.Client{Transport: transport}),
-		client.WithTrustedTempoProofRealm(srv.URL, "127.0.0.1"),
 	)
 	response, err := c.Get(ctx, srv.URL+"/paid-proof")
 	if !assert.NoErrorf(t, err,
@@ -558,9 +559,10 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	defer srv.Close()
 
 	clientMethod, err := chargeclient.New(chargeclient.Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
-		Signer:  payerSigner,
-		RPCURL:  rpcURL,
-		ChainID: int64(chainID),
+		Signer:             payerSigner,
+		RPCURL:             rpcURL,
+		ChainID:            int64(chainID),
+		TrustedProofRealms: []chargeclient.TrustedProofRealm{{Origin: srv.URL, Realm: "127.0.0.1"}},
 	})
 	if !assert.NoErrorf(t, err,
 		"tempo/client.New() error = %v", err) {
@@ -571,7 +573,6 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	c := client.New(
 		[]client.Method{clientMethod},
 		client.WithHTTPClient(&http.Client{Transport: transport}),
-		client.WithTrustedTempoProofRealm(srv.URL, "127.0.0.1"),
 	)
 	response, err := c.Get(ctx, srv.URL+"/paid-proof")
 	if !assert.NoErrorf(t, err,
@@ -941,6 +942,13 @@ func newSigner(t *testing.T) *temposigner.Signer {
 	return temposigner.NewSignerFromKey(privateKey)
 }
 
+func mustNewMethod(t *testing.T, config chargeserver.Config) *chargeserver.Method {
+	t.Helper()
+	method, err := chargeserver.New(config)
+	require.NoError(t, err)
+	return method
+}
+
 func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *temposigner.Signer) *httptest.Server {
 	t.Helper()
 
@@ -953,22 +961,22 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		return *new(*httptest.Server)
 	}
 
-	basicMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
-		Intent:    intent,
-		Currency:  integrationCurrency,
-		Recipient: integrationRecipient,
-		ChainID:   int64(chainID),
+	basicMethod := mustNewMethod(t, chargeserver.Config{
+		Intent:     intent,
+		Currencies: []string{integrationCurrency},
+		Recipient:  integrationRecipient,
+		ChainID:    int64(chainID),
 	})
-	feePayerMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
-		Intent:    intent,
-		Currency:  integrationCurrency,
-		Recipient: integrationRecipient,
-		ChainID:   int64(chainID),
-		FeePayer:  true,
+	feePayerMethod := mustNewMethod(t, chargeserver.Config{
+		Intent:     intent,
+		Currencies: []string{integrationCurrency},
+		Recipient:  integrationRecipient,
+		ChainID:    int64(chainID),
+		FeePayer:   true,
 	})
-	hashMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
+	hashMethod := mustNewMethod(t, chargeserver.Config{
 		Intent:         intent,
-		Currency:       integrationCurrency,
+		Currencies:     []string{integrationCurrency},
 		Recipient:      integrationRecipient,
 		ChainID:        int64(chainID),
 		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
@@ -977,17 +985,17 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 	feePayer := newTestServer(t, feePayerMethod, integrationRealm, integrationSecretKey)
 	hash := newTestServer(t, hashMethod, integrationRealm, integrationSecretKey)
 
-	proofMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
-		Intent:    intent,
-		Currency:  integrationCurrency,
-		Recipient: integrationRecipient,
-		ChainID:   int64(chainID),
+	proofMethod := mustNewMethod(t, chargeserver.Config{
+		Intent:     intent,
+		Currencies: []string{integrationCurrency},
+		Recipient:  integrationRecipient,
+		ChainID:    int64(chainID),
 	})
-	splitsMethod := chargeserver.NewMethod(chargeserver.MethodConfig{
-		Intent:    intent,
-		Currency:  integrationCurrency,
-		Recipient: integrationRecipient,
-		ChainID:   int64(chainID),
+	splitsMethod := mustNewMethod(t, chargeserver.Config{
+		Intent:     intent,
+		Currencies: []string{integrationCurrency},
+		Recipient:  integrationRecipient,
+		ChainID:    int64(chainID),
 	})
 	proof := newTestServer(t, proofMethod, "127.0.0.1", integrationSecretKey)
 	splits := newTestServer(t, splitsMethod, integrationRealm, integrationSecretKey)

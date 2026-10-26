@@ -10,8 +10,8 @@ import (
 func TestDefaultCurrencyForChain(t *testing.T) {
 	t.Parallel()
 
-	if got := DefaultCurrencyForChain(tempotx.ChainIdMainnet); got != MainnetUSDCAddress {
-		assert.Failf(t, "", "DefaultCurrencyForChain(mainnet) = %q, want %q", got, MainnetUSDCAddress)
+	if got := DefaultCurrencyForChain(tempotx.ChainIdMainnet); got != USDCEAddress {
+		assert.Failf(t, "", "DefaultCurrencyForChain(mainnet) = %q, want %q", got, USDCEAddress)
 		return
 	}
 	if got := DefaultCurrencyForChain(tempotx.ChainIdModerato); got != tempotx.AlphaUSDAddress.Hex() {

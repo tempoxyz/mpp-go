@@ -26,7 +26,7 @@ func SelectChallengeCandidates(
 	methods []Method,
 	preferences PaymentPreferences,
 ) ([]ChallengeCandidate, error) {
-	t := NewTransport(methods, nil, WithTransportPaymentPreferences(preferences))
+	t := newTransport(methods, nil, &transportConfig{paymentPreferences: clonePaymentPreferences(preferences)})
 	if t.configErr != nil {
 		return nil, t.configErr
 	}

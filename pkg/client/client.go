@@ -29,6 +29,37 @@ type ChallengeMatcher interface {
 	CanHandleChallenge(challenge *mpp.Challenge) bool
 }
 
+// OriginValidator may be implemented by a Method whose Credentials must only
+// be created for a server that is entitled to them. The Tempo charge client
+// implements it: a zero-amount Tempo proof authenticates the payer at the
+// realm the Challenge names, so it is signed only for a realm the sending
+// server owns. The HTTP Transport calls ValidateOrigin with the request URL
+// and skips a Challenge it rejects; the MCP client calls it with a nil URL,
+// since an MCP server has no origin.
+//
+// A Method that does not implement it gets the Transport's built-in check for
+// zero-amount tempo/charge Challenges.
+type OriginValidator interface {
+	ValidateOrigin(origin *url.URL, challenge *mpp.Challenge) error
+}
+
+// ErrPaymentDeclined is returned, wrapped, when a payment is declined before
+// a Credential is created: by an OnChallengeFunc that returns an error of its
+// own, or by the MCP client's OnPaymentRequired hook. Check it with
+// errors.Is.
+var ErrPaymentDeclined = errors.New("mpp: payment declined")
+
+// OrderChallenges filters and sorts the payable Challenges before one is
+// paid, like mppx's orderChallenges. Candidates arrive ranked by payment
+// preference, then offer order. Return them in the order to try: the first
+// one returned that passes the origin checks is paid. Returning none pays
+// nothing, and the 402 response is returned as is; returning an error fails
+// the request with it.
+type OrderChallenges func(
+	ctx context.Context,
+	candidates []ChallengeCandidate,
+) ([]ChallengeCandidate, error)
+
 // PaymentPreferences assigns HTTP q-values to configured payment methods.
 // Keys use the "method/intent" form. Omitted methods default to q=1.
 type PaymentPreferences map[string]float64
@@ -49,9 +80,12 @@ type Client struct {
 	paymentPreferences PaymentPreferences
 	trustedProofRealms map[string]string
 	onChallenge        OnChallengeFunc
+	maxRetries         *int
+	orderChallenges    OrderChallenges
 }
 
-// Option configures the Client.
+// Option configures a Client, and the http.Client and Transport that
+// NewHTTPClient and NewHTTPTransport build.
 type Option func(*Client)
 
 // WithHTTPClient sets a custom http.Client.
@@ -72,6 +106,10 @@ func WithPaymentPreferences(preferences PaymentPreferences) Option {
 
 // WithTrustedTempoProofRealm pins the proof realm of a server at a known origin.
 // Use this when the server's configured realm differs from its public hostname.
+//
+// Deprecated: Use the Tempo charge client's Config.TrustedProofRealms
+// (package github.com/tempoxyz/mpp-go/pkg/tempo/client) instead, which keeps
+// Tempo rules in the Tempo method.
 func WithTrustedTempoProofRealm(origin, realm string) Option {
 	return func(c *Client) {
 		if c.trustedProofRealms == nil {
@@ -87,6 +125,23 @@ func WithTrustedTempoProofRealm(origin, realm string) Option {
 func WithOnChallenge(onChallenge OnChallengeFunc) Option {
 	return func(c *Client) {
 		c.onChallenge = onChallenge
+	}
+}
+
+// WithMaxRetries sets how many times one request pays a 402 Challenge and
+// retries, like mppx's maxPaymentRetries. The default is 3; 0 never pays. A
+// negative n is a configuration error.
+func WithMaxRetries(n int) Option {
+	return func(c *Client) {
+		c.maxRetries = &n
+	}
+}
+
+// WithOrderChallenges sets a hook that filters and sorts the payable
+// Challenges of each 402 response before one is paid. See OrderChallenges.
+func WithOrderChallenges(fn OrderChallenges) Option {
+	return func(c *Client) {
+		c.orderChallenges = fn
 	}
 }
 
@@ -114,36 +169,12 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	state := &paymentState{origin: origin}
 	req = req.WithContext(withPaymentState(req.Context(), state))
 
-	options := []TransportOption{WithTransportPaymentPreferences(c.paymentPreferences)}
-	if c.onChallenge != nil {
-		options = append(options, WithTransportOnChallenge(c.onChallenge))
-	}
-	for trustedOrigin, realm := range c.trustedProofRealms {
-		options = append(options, WithTransportTrustedProofRealm(trustedOrigin, realm))
-	}
-	transport := NewTransport(c.methods, inner, options...)
+	transport := newTransport(c.methods, inner, c.transportConfig())
 
 	// Use a copy of the http.Client with our payment-aware transport.
 	hc := *c.httpClient
 	hc.Transport = transport
-	priorCheckRedirect := hc.CheckRedirect
-	hc.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
-		// Run the caller's hook first: it may change the redirect's headers.
-		if priorCheckRedirect != nil {
-			if err := priorCheckRedirect(redirectReq, via); err != nil {
-				return err
-			}
-		} else if len(via) >= maxRedirects {
-			// Keep net/http's default limit of 10 redirects.
-			return fmt.Errorf("stopped after %d redirects", maxRedirects)
-		}
-		// Refuse every cross-origin redirect, as mppx does: the other origin
-		// would choose what this client fetches and may pay for.
-		if !sameOriginURL(redirectReq.URL, origin) {
-			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
-		}
-		return nil
-	}
+	hc.CheckRedirect = sameOriginCheckRedirect(hc.CheckRedirect)
 	resp, err := hc.Do(req)
 	if err != nil {
 		err = restorePaymentOutcomeUnknown(err, state)
@@ -181,6 +212,94 @@ func restorePaymentOutcomeUnknown(err error, state *paymentState) error {
 
 // maxRedirects matches net/http's default redirect limit.
 const maxRedirects = 10
+
+// sameOriginCheckRedirect returns a CheckRedirect hook that runs prior (or
+// net/http's 10-redirect limit when prior is nil) and then refuses every
+// redirect away from the origin of the request the caller sent.
+func sameOriginCheckRedirect(prior func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(redirectReq *http.Request, via []*http.Request) error {
+		// Run the caller's hook first: it may change the redirect's headers.
+		if prior != nil {
+			if err := prior(redirectReq, via); err != nil {
+				return err
+			}
+		} else if len(via) >= maxRedirects {
+			// Keep net/http's default limit of 10 redirects.
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if len(via) == 0 {
+			return nil
+		}
+		// Refuse every cross-origin redirect, as mppx does: the other origin
+		// would choose what this client fetches and may pay for.
+		origin := requestOrigin(via[0].URL)
+		if !sameOriginURL(redirectReq.URL, origin) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
+		}
+		return nil
+	}
+}
+
+// transportConfig returns the Transport settings of c's options.
+func (c *Client) transportConfig() *transportConfig {
+	return &transportConfig{
+		paymentPreferences: c.paymentPreferences,
+		trustedProofRealms: c.trustedProofRealms,
+		onChallenge:        c.onChallenge,
+		maxRetries:         c.maxRetries,
+		orderChallenges:    c.orderChallenges,
+	}
+}
+
+// NewHTTPClient returns a standard *http.Client that pays 402 Challenges with
+// methods, as Client.Do does: its Transport is the payment Transport and its
+// CheckRedirect refuses every cross-origin redirect (after the hook and
+// Timeout of an http.Client passed with WithHTTPClient, or net/http's
+// 10-redirect limit), so a payment is only made to the origin the caller
+// asked for. Configuration errors, such as unknown payment preference keys,
+// are returned here rather than on the first request.
+//
+// The http.Client passed with WithHTTPClient is copied, not modified; its
+// Transport, or http.DefaultTransport, sends the requests. Unlike Client.Do,
+// a request that times out after sending a credential reports net/http's
+// timeout error rather than a PaymentOutcomeUnknownError.
+func NewHTTPClient(methods []Method, opts ...Option) (*http.Client, error) {
+	c := New(methods, opts...)
+	base := c.httpClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	transport, err := c.newHTTPTransport(base.Transport)
+	if err != nil {
+		return nil, err
+	}
+	// Redirects stay on the original origin, so the Transport may pay them.
+	transport.payRedirects = true
+	hc := *base
+	hc.Transport = transport
+	hc.CheckRedirect = sameOriginCheckRedirect(base.CheckRedirect)
+	return &hc, nil
+}
+
+// NewHTTPTransport returns a payment-aware http.RoundTripper that sends
+// requests with inner (http.DefaultTransport when nil). It takes the same
+// options as New, except WithHTTPClient, which it ignores, and returns
+// configuration errors that NewTransport only reports from RoundTrip.
+//
+// A bare Transport refuses to pay after a redirect, since it cannot tell
+// whether the caller chose that origin: use NewHTTPClient or Client for
+// redirect-safe payments.
+func NewHTTPTransport(methods []Method, inner http.RoundTripper, opts ...Option) (*Transport, error) {
+	return New(methods, opts...).newHTTPTransport(inner)
+}
+
+func (c *Client) newHTTPTransport(inner http.RoundTripper) (*Transport, error) {
+	transport := newTransport(c.methods, inner, c.transportConfig())
+	if transport.configErr != nil {
+		return nil, transport.configErr
+	}
+	return transport, nil
+}
 
 // Get is a convenience method for GET requests.
 func (c *Client) Get(ctx context.Context, url string) (*http.Response, error) {

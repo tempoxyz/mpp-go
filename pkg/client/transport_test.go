@@ -620,7 +620,7 @@ func TestTransport_ZeroProofRequiresHTTPSDefaultPortOrOriginPin(t *testing.T) {
 			request, err := http.NewRequest(http.MethodGet, tc.url, nil)
 			require.NoError(t, err)
 			challenge := mpp.NewChallenge("secret", "api.example", "tempo", "charge", map[string]any{"amount": "0"})
-			err = transport.validatePaymentOrigin(request, challenge)
+			err = transport.validatePaymentOrigin(request, challengeCandidate{challenge: challenge, method: &mockMethod{name: "tempo", intent: "charge"}})
 			if tc.allowed {
 				require.NoError(t, err)
 			} else {

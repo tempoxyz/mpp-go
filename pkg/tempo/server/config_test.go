@@ -90,9 +90,9 @@ func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
 		return
 	}
 
-	mainnetPolicy, ok := intent.feePayerPolicy[tempo.MainnetUSDCAddress]
+	mainnetPolicy, ok := intent.feePayerPolicy[tempo.USDCEAddress]
 	if !assert.Truef(t, ok,
-		"missing default policy for %s", tempo.MainnetUSDCAddress) {
+		"missing default policy for %s", tempo.USDCEAddress) {
 		return
 	}
 	if !assert.Equalf(t, 0, mainnetPolicy.MaxPriorityFeePerGas.Cmp(big.NewInt(100_000_000_000)),

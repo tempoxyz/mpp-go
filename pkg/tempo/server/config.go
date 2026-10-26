@@ -8,9 +8,11 @@ import (
 )
 
 // Config combines the method defaults and intent verification settings used by
-// the high-level Tempo server constructor.
+// New, the Tempo server constructor.
 type Config struct {
-	// Intent verifies Tempo charge credentials for this method.
+	// Intent verifies Tempo charge credentials for this method. When nil, New
+	// builds one from the verification fields below. It cannot be combined
+	// with Relay.
 	Intent *Intent
 	// Currency restricts issued challenges to exactly this token contract
 	// address. It cannot be combined with Currencies.
@@ -24,7 +26,8 @@ type Config struct {
 	Recipient string
 	// Decimals controls how human-readable amounts are normalized.
 	Decimals int
-	// ChainID binds issued challenges to a specific Tempo chain when set.
+	// ChainID binds issued challenges to a specific Tempo chain when set, such
+	// as tempo.ChainIDMainnet or tempo.ChainIDModerato.
 	ChainID int64
 	// FeePayer enables sponsored transaction flows by default.
 	FeePayer bool
@@ -41,9 +44,21 @@ type Config struct {
 	// FeePayerPrivateKey constructs FeePayerSigner when FeePayerSigner is nil.
 	FeePayerPrivateKey string
 	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
+	//
+	// Deprecated: Use FeePayerPrivateKey: os.Getenv("NAME") instead.
 	FeePayerPrivateKeyEnv string
-	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor.
+	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor,
+	// each with its own limits. It cannot be combined with AllowedFeeTokens
+	// or FeePayerPolicy.
+	//
+	// Deprecated: Use AllowedFeeTokens and FeePayerPolicy instead.
 	FeePayerPolicies map[string]FeePayerPolicy
+	// AllowedFeeTokens lists the fee tokens this verifier will sponsor; see
+	// IntentConfig.AllowedFeeTokens.
+	AllowedFeeTokens []string
+	// FeePayerPolicy sets the sponsorship limits for every allowed fee token;
+	// see IntentConfig.FeePayerPolicy.
+	FeePayerPolicy *FeePayerPolicy
 	// FeeToken fixes the fee token a local fee payer pays gas in; see IntentConfig.FeeToken.
 	FeeToken string
 	// Store is required to verify payments. Use a persistent store shared by all
@@ -53,13 +68,24 @@ type Config struct {
 	// ExpireReplayKeys lets replay keys expire after their challenge; see
 	// IntentConfig.ExpireReplayKeys for when that is safe.
 	ExpireReplayKeys bool
-	// Relay delegates credential validation and finalization to Tempo API or a compatible MPP relay.
+	// Relay delegates credential validation and finalization to Tempo API or
+	// a compatible MPP relay. It cannot be combined with Intent.
 	Relay *RelayConfig
 }
 
-// MethodFromConfig constructs a Tempo charge method from one config struct.
-// It returns an error when the currency configuration is invalid.
-func MethodFromConfig(config Config) (*Method, error) {
+// New constructs a Tempo charge method from one config struct. It returns an
+// error when the configuration is invalid: a missing replay Store (without
+// Relay), an invalid currency or fee-payer configuration, or Intent combined
+// with Relay.
+//
+// Without Currency or Currencies, the method accepts
+// tempo.DefaultCurrenciesForChain for the configured chain, or for the chain
+// inferred from RPCURL when ChainID is zero. With no custom RPC, it defaults
+// to mainnet.
+func New(config Config) (*Method, error) {
+	if config.Intent != nil && config.Relay != nil {
+		return nil, fmt.Errorf("tempo server: Config.Intent cannot be combined with Relay; the relay verifies credentials")
+	}
 	if _, err := resolveCurrencies(config.Currency, config.Currencies, config.ChainID); err != nil {
 		return nil, err
 	}
@@ -86,6 +112,8 @@ func MethodFromConfig(config Config) (*Method, error) {
 			FeePayerPrivateKey:    config.FeePayerPrivateKey,
 			FeePayerPrivateKeyEnv: config.FeePayerPrivateKeyEnv,
 			FeePayerPolicies:      config.FeePayerPolicies,
+			AllowedFeeTokens:      config.AllowedFeeTokens,
+			FeePayerPolicy:        config.FeePayerPolicy,
 			FeeToken:              config.FeeToken,
 			Store:                 config.Store,
 			ExpireReplayKeys:      config.ExpireReplayKeys,
@@ -112,5 +140,13 @@ func MethodFromConfig(config Config) (*Method, error) {
 	if !hasReplayStore(methodConfig.Intent.store) {
 		return nil, fmt.Errorf("tempo server: a replay Store is required")
 	}
-	return NewMethod(methodConfig), nil
+	return newMethod(methodConfig), nil
+}
+
+// MethodFromConfig constructs a Tempo charge method from one config struct.
+// It returns an error when the configuration is invalid.
+//
+// Deprecated: Use New instead.
+func MethodFromConfig(config Config) (*Method, error) {
+	return New(config)
 }

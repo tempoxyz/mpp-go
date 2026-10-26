@@ -22,13 +22,13 @@ type exampleServer struct {
 // startServer serves an MCP server over Streamable HTTP with a free "ping"
 // tool and a paid "fortune" tool.
 func startServer(rpcURL string, chainID int64) (*exampleServer, error) {
-	method, err := charge.MethodFromConfig(charge.Config{
+	method, err := charge.New(charge.Config{
 		// Development only: replicas need a shared persistent store.
-		Store:     tempo.NewMemoryStore(),
-		RPCURL:    rpcURL,
-		ChainID:   chainID,
-		Currency:  devnet.Currency,
-		Recipient: devnet.Recipient,
+		Store:      tempo.NewMemoryStore(),
+		RPCURL:     rpcURL,
+		ChainID:    chainID,
+		Currencies: []string{devnet.Currency},
+		Recipient:  devnet.Recipient,
 	})
 	if err != nil {
 		return nil, err

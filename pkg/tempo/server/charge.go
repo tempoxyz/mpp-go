@@ -17,13 +17,15 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/rpccache"
 )
 
 const receiptRetryDelay = 500 * time.Millisecond
@@ -92,14 +94,31 @@ type IntentConfig struct {
 	// FeePayerPrivateKey constructs FeePayerSigner when FeePayerSigner is nil.
 	FeePayerPrivateKey string
 	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
+	//
+	// Deprecated: Use FeePayerPrivateKey: os.Getenv("NAME") instead.
 	FeePayerPrivateKeyEnv string
 	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor.
 	// With a local fee payer, the configured tokens are the fee tokens it may
 	// pay gas in (tried in address order), independent of the charge currency.
 	// When empty, a local fee payer may use pathUSD and, on mainnet, USDC.e.
 	// Remote fee payers (FeePayerURL) pay in the charge currency, which needs
-	// a policy here.
+	// a policy here. It cannot be combined with AllowedFeeTokens or
+	// FeePayerPolicy.
+	//
+	// Deprecated: Use AllowedFeeTokens and FeePayerPolicy instead.
 	FeePayerPolicies map[string]FeePayerPolicy
+	// AllowedFeeTokens lists the fee tokens this verifier will sponsor, as in
+	// mppx. With a local fee payer, they are the fee tokens it may pay gas in,
+	// tried in this order and independent of the charge currency. Remote fee
+	// payers (FeePayerURL) pay in the charge currency, which must be listed.
+	// When nil, the verifier sponsors pathUSD, AlphaUSD and USDC.e, and a
+	// local fee payer pays in pathUSD or, on mainnet, USDC.e. A non-nil list
+	// must name at least one valid address.
+	AllowedFeeTokens []string
+	// FeePayerPolicy sets the sponsorship limits applied to every allowed fee
+	// token, as mppx's feePayerPolicy does. Nil fields keep the defaults
+	// (100 gwei max fee and priority fee per gas, 0.05 total fee).
+	FeePayerPolicy *FeePayerPolicy
 	// FeeToken fixes the fee token a local fee payer pays gas in. When empty,
 	// the local fee payer uses the first allowed fee token it holds a balance
 	// of, or the first allowed fee token. It must be an allowed fee token and
@@ -134,6 +153,9 @@ type Intent struct {
 	// expireReplayKeys claims replay keys with tempo.ExpiringStore; see
 	// IntentConfig.ExpireReplayKeys.
 	expireReplayKeys bool
+	// rpcClients holds the RPC clients built from URLs, so each is built
+	// once rather than per credential.
+	rpcClients *rpccache.Cache
 }
 
 var _ mppserver.BroadcastingIntent = (*Intent)(nil)
@@ -199,17 +221,9 @@ func newIntent(config IntentConfig) (*Intent, error) {
 			return nil, fmt.Errorf("tempo server: ExpireReplayKeys requires a Store that implements tempo.ExpiringStore")
 		}
 	}
-	feePayerPolicy, err := normalizeFeePayerPolicies(config.FeePayerPolicies)
+	feePayerPolicy, feeTokens, err := resolveFeePayerPolicies(config)
 	if err != nil {
 		return nil, err
-	}
-	var feeTokens []common.Address
-	if len(config.FeePayerPolicies) > 0 {
-		for token := range feePayerPolicy {
-			feeTokens = append(feeTokens, common.HexToAddress(token))
-		}
-		// Map keys have no order; sort by address so selection is deterministic.
-		slices.SortFunc(feeTokens, func(a, b common.Address) int { return a.Cmp(b) })
 	}
 	var feeToken common.Address
 	if config.FeeToken != "" {
@@ -224,6 +238,7 @@ func newIntent(config IntentConfig) (*Intent, error) {
 	return &Intent{
 		rpc:              config.RPC,
 		rpcURL:           config.RPCURL,
+		rpcClients:       new(rpccache.Cache),
 		feePayerSigner:   feePayerSigner,
 		feePayerPolicy:   feePayerPolicy,
 		feeTokens:        feeTokens,
@@ -704,7 +719,7 @@ func (i *Intent) broadcastTransaction(
 				return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer transaction")
 			}
 		} else if request.MethodDetails.FeePayerURL != "" {
-			coSignedRaw, err := signWithRemoteFeePayer(ctx, request.MethodDetails.FeePayerURL, validated.payload.Signature)
+			coSignedRaw, err := signWithRemoteFeePayer(ctx, i.rpcClients.Get(request.MethodDetails.FeePayerURL), validated.payload.Signature)
 			if err != nil {
 				return nil, err
 			}
@@ -1097,16 +1112,18 @@ func (i *Intent) resolveRPC(request tempo.ChargeRequest) (tempo.RPCClient, error
 		return i.rpc, nil
 	}
 	if i.rpcURL != "" {
-		return tempo.NewRPCClient(i.rpcURL), nil
+		return i.rpcClients.Get(i.rpcURL), nil
 	}
+	// Without a chain ID, RPCURLForChain(0) is mainnet.
+	var chainID int64
 	if request.MethodDetails.ChainID != nil {
-		rpcURL, err := tempo.RPCURLForChain(*request.MethodDetails.ChainID)
-		if err != nil {
-			return nil, fmt.Errorf("tempo server: %w; configure Intent.RPC or Intent.RPCURL explicitly", err)
-		}
-		return tempo.NewRPCClient(rpcURL), nil
+		chainID = *request.MethodDetails.ChainID
 	}
-	return tempo.NewRPCClient(tempo.DefaultRPCURLForChain(0)), nil
+	rpcURL, err := tempo.RPCURLForChain(chainID)
+	if err != nil {
+		return nil, fmt.Errorf("tempo server: %w; configure Intent.RPC or Intent.RPCURL explicitly", err)
+	}
+	return i.rpcClients.Get(rpcURL), nil
 }
 
 // sponsoredTransactionHash binds the verified payer to the canonical signing payload.
@@ -1717,8 +1734,8 @@ func addressToWord(address common.Address) string {
 	return strings.Repeat("0", 24) + strings.TrimPrefix(strings.ToLower(address.Hex()), "0x")
 }
 
-func signWithRemoteFeePayer(ctx context.Context, feePayerURL, raw string) (string, error) {
-	response, err := tempo.NewRPCClient(feePayerURL).SendRequest(ctx, "eth_signRawTransaction", raw)
+func signWithRemoteFeePayer(ctx context.Context, feePayer tempo.RPCClient, raw string) (string, error) {
+	response, err := feePayer.SendRequest(ctx, "eth_signRawTransaction", raw)
 	if err != nil {
 		return "", mpp.ErrVerificationFailed("fee payer signing failed")
 	}
@@ -1828,6 +1845,73 @@ func hexBig(value *big.Int) string {
 	return hexutil.EncodeBig(value)
 }
 
+// resolveFeePayerPolicies returns the per-token sponsorship policies and the
+// ordered fee tokens a local fee payer may pay gas in (nil for the per-chain
+// defaults) from either the deprecated FeePayerPolicies map or
+// AllowedFeeTokens and FeePayerPolicy.
+func resolveFeePayerPolicies(config IntentConfig) (map[string]FeePayerPolicy, []common.Address, error) {
+	if len(config.FeePayerPolicies) > 0 && (config.AllowedFeeTokens != nil || config.FeePayerPolicy != nil) {
+		return nil, nil, fmt.Errorf("tempo server: FeePayerPolicies cannot be combined with AllowedFeeTokens or FeePayerPolicy")
+	}
+	if config.AllowedFeeTokens == nil && config.FeePayerPolicy == nil {
+		policies, err := normalizeFeePayerPolicies(config.FeePayerPolicies)
+		if err != nil {
+			return nil, nil, err
+		}
+		var feeTokens []common.Address
+		if len(config.FeePayerPolicies) > 0 {
+			for token := range policies {
+				feeTokens = append(feeTokens, common.HexToAddress(token))
+			}
+			// Map keys have no order; sort by address so selection is deterministic.
+			slices.SortFunc(feeTokens, func(a, b common.Address) int { return a.Cmp(b) })
+		}
+		return policies, feeTokens, nil
+	}
+	policy := defaultFeePayerPolicy()
+	if config.FeePayerPolicy != nil {
+		if config.FeePayerPolicy.MaxFeePerGas != nil {
+			policy.MaxFeePerGas = config.FeePayerPolicy.MaxFeePerGas
+		}
+		if config.FeePayerPolicy.MaxPriorityFeePerGas != nil {
+			policy.MaxPriorityFeePerGas = config.FeePayerPolicy.MaxPriorityFeePerGas
+		}
+		if config.FeePayerPolicy.MaxTotalFee != nil {
+			policy.MaxTotalFee = config.FeePayerPolicy.MaxTotalFee
+		}
+		policy.RejectKeyAuthorization = config.FeePayerPolicy.RejectKeyAuthorization
+	}
+	if config.AllowedFeeTokens == nil {
+		configured := defaultFeePayerPolicies()
+		for token := range configured {
+			configured[token] = policy
+		}
+		policies, err := normalizeFeePayerPolicies(configured)
+		return policies, nil, err
+	}
+	configured := make(map[string]FeePayerPolicy, len(config.AllowedFeeTokens))
+	feeTokens := make([]common.Address, 0, len(config.AllowedFeeTokens))
+	for _, token := range config.AllowedFeeTokens {
+		if !common.IsHexAddress(token) {
+			return nil, nil, fmt.Errorf("tempo server: invalid allowed fee token %q", token)
+		}
+		address := common.HexToAddress(token)
+		if slices.Contains(feeTokens, address) {
+			continue
+		}
+		feeTokens = append(feeTokens, address)
+		configured[address.Hex()] = policy
+	}
+	if len(feeTokens) == 0 {
+		return nil, nil, fmt.Errorf("tempo server: AllowedFeeTokens must contain at least one fee token")
+	}
+	policies, err := normalizeFeePayerPolicies(configured)
+	if err != nil {
+		return nil, nil, err
+	}
+	return policies, feeTokens, nil
+}
+
 func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string]FeePayerPolicy, error) {
 	if len(configured) == 0 {
 		configured = defaultFeePayerPolicies()
@@ -1864,7 +1948,7 @@ func defaultFeePayerPolicies() map[string]FeePayerPolicy {
 	return map[string]FeePayerPolicy{
 		"0x20c0000000000000000000000000000000000000": policy,
 		tempotx.AlphaUSDAddress.Hex():                policy,
-		tempo.MainnetUSDCAddress:                     policy,
+		tempo.USDCEAddress:                           policy,
 	}
 }
 
@@ -1890,7 +1974,7 @@ func (i *Intent) allowedFeeTokens(ctx context.Context, rpc tempo.RPCClient, requ
 	}
 	candidates := []common.Address{common.HexToAddress(tempo.PathUSDAddress)}
 	if chainID == tempotx.ChainIdMainnet {
-		candidates = append(candidates, common.HexToAddress(tempo.MainnetUSDCAddress))
+		candidates = append(candidates, common.HexToAddress(tempo.USDCEAddress))
 	}
 	allowed := make([]common.Address, 0, len(candidates))
 	for _, token := range candidates {

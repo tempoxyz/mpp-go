@@ -417,26 +417,22 @@ func TestNewRelayClientValidationAndDefaults(t *testing.T) {
 	assert.Equal(t, defaultRelayAPIBaseURL+"/v1/mpp/broadcast", relay.broadcastURL)
 }
 
-func TestMethodFromConfigAppliesRelayToCustomIntent(t *testing.T) {
+func TestNewRejectsIntentWithRelay(t *testing.T) {
 	t.Parallel()
-	server, _ := relayTestServer(t, func(string) any {
-		return map[string]any{"success": false, "error": map[string]any{"code": RelayErrorUnsupported}}
-	})
 	localIntent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	require.NoError(t, err)
-	method, err := MethodFromConfig(Config{
+	config := Config{
 		Intent:    localIntent,
 		Recipient: testRecipient,
 		ChainID:   42431,
-		Relay:     &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: server.URL},
-	})
-	require.NoError(t, err)
-
-	configured := method.Intents()[tempo.IntentCharge]
-	_, err = configured.Verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}), nil)
-	var paymentErr *mpp.PaymentError
-	require.ErrorAs(t, err, &paymentErr)
-	assert.Equal(t, map[string]any{"code": string(RelayErrorUnsupported)}, paymentErr.Details)
+		Relay:     &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: "https://relay.example"},
+	}
+	method, err := New(config)
+	require.ErrorContains(t, err, "Config.Intent cannot be combined with Relay")
+	require.Nil(t, method)
+	method, err = MethodFromConfig(config)
+	require.ErrorContains(t, err, "Config.Intent cannot be combined with Relay")
+	require.Nil(t, method)
 }
 
 func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
