@@ -257,10 +257,13 @@ func findEntriesByMethodIntent(entries []composedEntry, cred *mpp.Credential) []
 // authorization is the Payment credential cred was parsed from; offers are
 // built against it as received, not a re-encoding of cred, which can grow
 // past the header size limit. Only entries that read their credential from
-// source are considered. Without an exact match it falls back to an entry
-// for the credential's method and intent, then for its method alone, whose
-// Charge then rejects the credential with retry Challenges.
-func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorization string, source credentialSource, scope map[string]string) (composedEntry, bool, error) {
+// source are considered. Offers are built from the same request-bound params
+// (scope and body) the flow issues Challenges from, so a builder that reads
+// them offers the same requests it issued. Without an exact match it falls
+// back to an entry for the credential's method and intent, then for its
+// method alone, whose Charge then rejects the credential with retry
+// Challenges.
+func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorization string, source credentialSource, scope map[string]string, body []byte) (composedEntry, bool, error) {
 	echoedRequest, err := echoedRequestMap(cred)
 	if err != nil {
 		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err)).WithCause(err)
@@ -271,7 +274,7 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorizat
 		if !source.accepts(entry.mpp) || !entry.offersMethodIntent(cred) {
 			continue
 		}
-		requests, err := entry.scopedRequests(scope, authorization, source)
+		requests, err := entry.scopedRequests(scope, authorization, source, body)
 		if err != nil {
 			return composedEntry{}, false, err
 		}
@@ -324,18 +327,12 @@ func offersMethod(entries []composedEntry, cred *mpp.Credential) bool {
 }
 
 // scopedRequests builds an entry's offers to match against the Payment
-// credential in authorization. Building them with the Credential present
-// skips issuance-only checks, such as the sponsored-expiry floor, that do not
-// apply to verifying a Credential.
-func (entry composedEntry) scopedRequests(scope map[string]string, authorization string, source credentialSource) ([]map[string]any, error) {
-	params := entry.params
-	if len(scope) > 0 && len(params.MppxScope) == 0 {
-		params.MppxScope = scope
-	}
-	if authorization != "" {
-		params.Authorization, params.PaymentAuthorization = credentialFields(authorization, source)
-	}
-	return entry.mpp.buildChargeRequests(params)
+// credential in authorization, from the same request-bound params (scope and
+// body) the entry's Challenges are issued from. Building them with the
+// Credential present skips issuance-only checks, such as the sponsored-expiry
+// floor, that do not apply to verifying a Credential.
+func (entry composedEntry) scopedRequests(scope map[string]string, authorization string, source credentialSource, body []byte) ([]map[string]any, error) {
+	return entry.mpp.buildChargeRequests(entry.requestParams(authorization, source, scope, body))
 }
 
 // composePaymentCredential returns the one Payment credential header carries

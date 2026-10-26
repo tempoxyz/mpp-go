@@ -128,7 +128,7 @@ func (f paymentFlow) charge(ctx context.Context, credential string, source crede
 		f.paymentFailed(ctx, nil, err)
 		return composeRetryResult(ctx, f.entries, nil, body, scope, err)
 	}
-	entry, ok, err := findMatchingEntry(f.entries, cred, credential, source, scope)
+	entry, ok, err := findMatchingEntry(f.entries, cred, credential, source, scope, body)
 	if err != nil {
 		f.paymentFailed(ctx, cred, err)
 		if isMalformedCredential(err) {
