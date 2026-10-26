@@ -22,7 +22,7 @@ Remove the deprecated APIs that the canonical core, client, Tempo and server API
 | `client` | `WithTransportOnChallenge` | `WithOnChallenge` |
 | `client` | `WithTransportPaymentPreferences` | `WithPaymentPreferences` |
 | `client` | `WithTransportTrustedProofRealm`, `WithTrustedTempoProofRealm` | the Tempo charge client's `Config.TrustedProofRealms` |
-| `mcp/client` | `Config.TrustedTempoProofRealms` | a `TrustedProofRealm` without an `Origin` in the Tempo charge client's `Config.TrustedProofRealms` |
+| `mcp/client` | `Config.TrustedTempoProofRealms` | a `TrustedProofRealm` without an `Origin` in the Tempo charge client's `Config.TrustedProofRealms`; its `Realm` must match the challenge realm exactly, including case (the removed field compared case-insensitively) |
 | `server` | `WriteChallenge`, `WriteChallenges` | `WritePaymentResponse(w, nil, challenges...)` |
 | `server` | `WritePaymentErrorWithChallenge`, `WritePaymentErrorWithChallenges` | `WritePaymentResponse(w, err, challenges...)` |
 | `server` | `WritePaymentError` | `WritePaymentResponse(w, err)` |
