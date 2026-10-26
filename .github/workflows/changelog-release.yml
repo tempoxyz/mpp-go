@@ -34,7 +34,7 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - uses: tempoxyz/changelogs@7928d3260c48d9dbe72f9fa4d5fca968cbfa020d # v0.10.0
+      - uses: tempoxyz/changelogs@35288d5b399317c9412f9dd4bfaf8cccf2d22215 # v0.11.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           auto-merge: ${{ github.event_name == 'schedule' }}
