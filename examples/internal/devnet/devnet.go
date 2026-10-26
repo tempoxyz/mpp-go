@@ -50,7 +50,7 @@ func WaitForRPC(ctx context.Context, rpc tempo.RPCClient) (int64, error) {
 	defer cancel()
 	chainID, err := localnet.WaitReady(ctx, rpc)
 	if err != nil {
-		return 0, fmt.Errorf("tempo rpc at %s did not become ready; start the local devnet with `docker compose up -d` or set TEMPO_RPC_URL: %w", RPCURL(), err)
+		return 0, fmt.Errorf("tempo rpc at %s did not become ready; start the local devnet with `docker compose up -d --wait` or set TEMPO_RPC_URL: %w", RPCURL(), err)
 	}
 	return int64(chainID), nil
 }

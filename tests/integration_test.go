@@ -773,7 +773,7 @@ func waitForRPC(t *testing.T, ctx context.Context, rpc tempo.RPCClient) uint64 {
 	ctx, cancel := context.WithTimeout(ctx, rpcReadinessTimeout)
 	defer cancel()
 	chainID, err := localnet.WaitReady(ctx, rpc)
-	require.NoError(t, err, "Tempo RPC at %s did not become ready; start the local devnet with `docker compose up -d` in mpp-go or set TEMPO_RPC_URL", integrationRPCURL(t))
+	require.NoError(t, err, "Tempo RPC at %s did not become ready; start the local devnet with `docker compose up -d --wait` in mpp-go or set TEMPO_RPC_URL", integrationRPCURL(t))
 	return chainID
 }
 

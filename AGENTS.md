@@ -227,7 +227,7 @@ id = base64url(HMAC-SHA256(server_secret, input))
 ```bash
 go test ./...                                        # Run unit tests
 go build ./...                                       # Build all packages
-docker compose up -d                                 # Start local Tempo devnet
+docker compose up -d --wait                          # Start local Tempo devnet, wait until healthy
 go run ./examples/charge-basic                       # Run charge-basic example
 make integration                                     # Run live integration tests (needs Docker)
 make test                                            # Unit tests with -race -shuffle=on -count=1 (as CI)
@@ -288,13 +288,19 @@ TEMPO_RPC_URL=http://localhost:8545 go test -tags integration ./...  # running n
 ```
 
 - Without `TEMPO_RPC_URL`, `TestMain` starts the base Tempo test container,
-  `tests/tempotest` (`Start`, or `Run(tb)` in one test): the image and command
-  of the `tempo-node` service in `docker-compose.yml` (the single source of
-  truth for the pinned image; `TEMPO_LOCALNET_IMAGE` overrides it), on a
-  loopback port, terminated at the end. It funds one shared payer once; tests
-  using it run sequentially.
-- Wait for a node with `internal/localnet.WaitReady` (the examples'
-  `devnet.WaitForRPC` and `tempotest.Start` do), not `eth_chainId` alone: a
+  `tests/tempotest` (`Start`, or `Run(tb)` in one test): a thin wrapper over
+  the Tempo team's published `ghcr.io/tempoxyz/tempo-localnet` image (see
+  [tempoxyz/tempo docs/localnet.md](https://github.com/tempoxyz/tempo/blob/main/docs/localnet.md)),
+  run with the image and command of the `tempo-node` service in
+  `docker-compose.yml` (the single source of truth for the pinned digest;
+  `TEMPO_LOCALNET_IMAGE` overrides it), on a loopback port, terminated at the
+  end. It funds one shared payer once; tests using it run sequentially.
+- The image's Docker `HEALTHCHECK` reports healthy only after the localnet's
+  setup completes, so `tempotest.Start` waits for it
+  (`wait.ForHealthCheck`) and `docker compose up -d --wait` does too.
+- Then check a node with `internal/localnet.WaitReady` (the examples'
+  `devnet.WaitForRPC`, `tempotest.Start` and `TestMain` for a
+  `TEMPO_RPC_URL` node do), not `eth_chainId` alone: a
   fresh localnet answers RPC while its latest block is genesis, at timestamp 0,
   and rejects the faucet's and clients' expiring-nonce transactions
   (`valid_before ... too far in the future`) until it builds a block at the

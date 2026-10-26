@@ -1,7 +1,12 @@
-// Package tempotest is the base Tempo test container: it starts the Tempo
-// localnet that docker-compose.yml pins with testcontainers-go and returns once
-// the node accepts transactions. It lives in the tests module so the library's
-// go.mod stays free of testcontainers-go.
+// Package tempotest is a thin testcontainers-go wrapper over the Tempo team's
+// published localnet image, ghcr.io/tempoxyz/tempo-localnet, at the digest
+// docker-compose.yml pins. The image is a deterministic dev node (chain ID
+// 1337, RPC on 8545) with prefunded dev accounts, a tempo_fundAddress faucet
+// for the canonical TIP-20 tokens, and Fee AMM and DEX liquidity bootstrapped;
+// its Docker HEALTHCHECK reports healthy only once that setup completes. See
+// https://github.com/tempoxyz/tempo/blob/main/docs/localnet.md for the image,
+// its flags and its health check. The package lives in the tests module so the
+// library's go.mod stays free of testcontainers-go.
 package tempotest
 
 import (
@@ -21,14 +26,16 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/tempoxyz/mpp-go/internal/localnet"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-// StartupTimeout bounds waiting for a started container's RPC endpoint and
-// for the node to be ready. Pulling and creating the container run under the
-// caller's context alone, so a slow image pull is not cut short.
+// StartupTimeout bounds each wait for a started container: for Docker to
+// report it healthy, then for its RPC endpoint and node to be ready. Pulling and creating the
+// container run under the caller's context alone, so a slow image pull is not
+// cut short.
 const StartupTimeout = 2 * time.Minute
 
 const rpcPort = "8545/tcp"
@@ -118,11 +125,12 @@ type Localnet struct {
 }
 
 // Start runs the docker-compose.yml tempo-node image and command, publishes its
-// RPC port on an ephemeral 127.0.0.1 port, and returns once the node reports a
-// chain ID and builds blocks at the current time (see localnet.WaitReady): a
-// fresh localnet answers RPC while its latest block is still genesis, at
-// timestamp 0, and rejects transactions until it is not. Call Terminate when
-// done; on error nothing is left running.
+// RPC port on an ephemeral 127.0.0.1 port, and returns once Docker reports the
+// container healthy (the image's HEALTHCHECK passes only after the localnet's
+// setup completes). It then checks with localnet.WaitReady, as for a node from
+// TEMPO_RPC_URL, that the node reports a chain ID and builds blocks at the
+// current time; for a healthy container that returns at once. Call Terminate
+// when done; on error nothing is left running.
 func Start(ctx context.Context) (*Localnet, error) {
 	composeFile, err := ComposeFile()
 	if err != nil {
@@ -133,7 +141,8 @@ func Start(ctx context.Context) (*Localnet, error) {
 		return nil, err
 	}
 	// Pull and create the container under ctx alone: StartupTimeout bounds
-	// only the wait for the started node, not a slow image pull.
+	// only the wait for the started node (the health check below, then
+	// WaitReady), not a slow image pull.
 	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        spec.Image,
@@ -141,6 +150,12 @@ func Start(ctx context.Context) (*Localnet, error) {
 			ExposedPorts: []string{rpcPort},
 			// docker-compose.yml publishes the node on 127.0.0.1 only; so do we.
 			HostConfigModifier: BindLoopback(rpcPort),
+			// The image's HEALTHCHECK reports healthy only after the
+			// localnet's setup (faucet tokens, Fee AMM and DEX liquidity)
+			// completes. A TEMPO_LOCALNET_IMAGE without one never does.
+			WaitingFor: wait.ForHealthCheck().
+				WithStartupTimeout(StartupTimeout).
+				WithPollInterval(250 * time.Millisecond),
 		},
 		Started: true,
 	})
