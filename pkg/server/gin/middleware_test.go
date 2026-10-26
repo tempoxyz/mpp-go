@@ -92,7 +92,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		return
 	}
 
-	receipt, err := mpp.ParsePaymentReceipt(paidResponse.Header().Get("Payment-Receipt"))
+	receipt, err := mpp.ParseReceipt(paidResponse.Header().Get("Payment-Receipt"))
 	if !assert.NoErrorf(t, err,
 		"ParsePaymentReceipt() error = %v", err) {
 		return
@@ -156,7 +156,7 @@ func TestChargeMiddlewareFlushKeepsPaymentReceipt(t *testing.T) {
 	result := paidResponse.Result()
 	defer result.Body.Close()
 	require.Equal(t, http.StatusOK, result.StatusCode)
-	receipt, err := mpp.ParsePaymentReceipt(result.Header.Get(mpp.HeaderPaymentReceipt))
+	receipt, err := mpp.ParseReceipt(result.Header.Get(mpp.HeaderPaymentReceipt))
 	require.NoError(t, err)
 	assert.Equal(t, "0xreceipt", receipt.Reference)
 	assert.Equal(t, "private", result.Header.Get("Cache-Control"))

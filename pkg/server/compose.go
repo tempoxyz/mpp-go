@@ -48,12 +48,12 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			paymentAuth, err := composePaymentCredential(entries, r)
 			if err != nil {
-				WritePaymentError(w, mpp.ErrBadRequest(err.Error()))
+				WritePaymentResponse(w, mpp.ErrBadRequest(err.Error()))
 				return
 			}
 			body, err := ReadRequestBody(r)
 			if err != nil {
-				WritePaymentError(w, RequestBodyError(err))
+				WritePaymentResponse(w, RequestBodyError(err))
 				return
 			}
 			scope := ScopeFromHTTPRequest(r, "")
@@ -77,11 +77,11 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 					writeComposeMalformedCredentialError(w, r, entries, realm, body, scope, cred, err)
 					return
 				}
-				WritePaymentError(w, err)
+				WritePaymentResponse(w, err)
 				return
 			}
 			if !ok {
-				WritePaymentError(w, mpp.ErrMethodUnsupported(cred.Challenge.Method+"/"+cred.Challenge.Intent))
+				WritePaymentResponse(w, mpp.ErrMethodUnsupported(cred.Challenge.Method+"/"+cred.Challenge.Intent))
 				return
 			}
 
@@ -98,14 +98,14 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 			result, err := entry.mpp.Charge(r.Context(), params)
 			if err != nil {
 				if result != nil && result.Challenge != nil {
-					WritePaymentErrorWithChallenges(w, err, result.Challenges, realm)
+					WritePaymentResponse(w, err, result.Challenges...)
 					return
 				}
-				WritePaymentError(w, err)
+				WritePaymentResponse(w, err)
 				return
 			}
 			if result.Challenge != nil {
-				WriteChallenges(w, result.Challenges, realm)
+				WritePaymentResponse(w, nil, result.Challenges...)
 				return
 			}
 
@@ -226,7 +226,7 @@ func composeMalformedCredentialResult(
 func composeChallenges(w http.ResponseWriter, r *http.Request, entries []composedEntry, realm string, body []byte, scope map[string]string) {
 	challenges, err := collectComposeChallenges(r.Context(), entries, body, scope)
 	if err != nil {
-		WritePaymentError(w, err)
+		WritePaymentResponse(w, err)
 		return
 	}
 	writeComposeChallengeResponse(w, challenges, realm, nil)
@@ -289,7 +289,7 @@ func writeComposeMalformedCredentialError(
 		var collectErr error
 		challenges, collectErr = collectComposeChallenges(r.Context(), entries, body, scope)
 		if collectErr != nil {
-			WritePaymentError(w, composeChallengeCollectionError(err, collectErr))
+			WritePaymentResponse(w, composeChallengeCollectionError(err, collectErr))
 			return
 		}
 	}
@@ -304,26 +304,22 @@ func composeChallengeCollectionError(malformed, collectErr error) error {
 	return fmt.Errorf("server: issuing challenges after malformed credential (%v): %w", malformed, collectErr)
 }
 
+// writeComposeChallengeResponse writes challenges with err as
+// WritePaymentResponse does, except that an initial 402 (err nil) also
+// carries a payment-required problem body.
 func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Challenge, realm string, err error) {
-	// Serialize every challenge before writing headers so a later
-	// ToAuthenticateStrict failure cannot leave a partial usable set.
-	headers := make([]string, 0, len(challenges))
-	for _, challenge := range challenges {
-		header, headerErr := challenge.ToAuthenticateStrict(realm)
-		if headerErr != nil {
-			WritePaymentError(w, ChallengeSerializationError(challenge, realm, headerErr))
-			return
-		}
-		headers = append(headers, header)
-	}
-	for _, header := range headers {
-		w.Header().Add(mpp.HeaderWWWAuthenticate, header)
-	}
-
 	if err != nil {
-		WritePaymentError(w, err)
+		WritePaymentResponse(w, err, challenges...)
 		return
 	}
+	// Serialize every challenge before writing headers so a later failure
+	// cannot leave a partial usable set.
+	headers, headerErr := authenticateHeaders(nonNilChallenges(challenges), challengeRealm)
+	if headerErr != nil {
+		writeProblem(w, headerErr)
+		return
+	}
+	setAuthenticateHeaders(w.Header(), headers)
 
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -334,8 +330,7 @@ func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Chal
 }
 
 func isMalformedCredential(err error) bool {
-	var pe *mpp.PaymentError
-	return errors.As(err, &pe) && pe.Type == mpp.ErrorTypeMalformedCredential
+	return errors.Is(err, mpp.ErrorTypeMalformedCredential)
 }
 
 // findEntriesByMethodIntent returns every compose entry whose method and intent
@@ -413,7 +408,10 @@ func (entry composedEntry) scopedRequests(scope map[string]string, cred *mpp.Cre
 		params.MppxScope = scope
 	}
 	if cred != nil {
-		authorization := mpp.FormatAuthorization(cred)
+		authorization, err := mpp.FormatCredential(cred)
+		if err != nil {
+			return nil, err
+		}
 		params.Authorization = authorization
 		params.PaymentAuthorization = authorization
 	}

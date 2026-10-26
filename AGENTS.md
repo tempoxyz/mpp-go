@@ -53,6 +53,32 @@ Low-level data structures in `pkg/mpp` that compose into the core abstractions:
 - **`Credential`** — Client-submitted payment proof (appears in `Authorization` header). Contains `Challenge` echo, `Payload` (method-specific proof), and optional `Source` (payer identity).
 - **`Receipt`** — Server-issued settlement confirmation (appears in `Payment-Receipt` header). Contains `Status`, `Method`, `Timestamp`, and `Reference`.
 
+Each type has one canonical Parse/Format pair; the other spellings
+(`FormatAuthenticate*`, `ToAuthenticate*`, `FromAuthenticate`,
+`FormatAuthorization*`, `ToAuthorization`, `FromAuthorization`,
+`*PaymentReceipt`, `FormatReceipt`) are deprecated wrappers:
+
+| Type | Parse | Format |
+| --- | --- | --- |
+| `Challenge` | `ParseChallenge` | `FormatChallenge(c) (string, error)`, writes `c.Realm` |
+| `Credential` | `ParseCredential` | `FormatCredential(c) (string, error)` |
+| `Receipt` | `ParseReceipt` | `FormatReceiptWithError(r) (string, error)` |
+
+- Create challenges with `NewChallengeWithError` and check an echoed ID with
+  `(*Challenge).VerifyID(secret)`, which binds `c.Realm`. `NewChallenge`,
+  `GenerateChallengeID` and `Verify(secret, realm)` are deprecated.
+- Responses: `ChallengesFromResponse` and `ReceiptFromResponse`. Expiry:
+  `ExpiresIn`, `ParseExpires`, `CheckExpires`. Body digests:
+  `ComputeBodyDigest`, `VerifyBodyDigest`. Amounts: `ParseAmount` (`*big.Int`).
+  Intents: `IntentCharge`, `IntentSession`.
+- Match problem types with `errors.Is(err, mpp.ErrorTypeX)`: `PaymentError`
+  implements `Is` for `ErrorType` targets.
+- Servers write every 402 and problem response with
+  `server.WritePaymentResponse(w, err, challenges...)` (Fiber:
+  `fiberadapter.WritePaymentResponse(c, err, challenges...)`).
+  `WritePaymentError`, `WritePaymentErrorWithChallenge(s)` and
+  `WriteChallenge(s)` are deprecated.
+
 ### Package Layout
 
 ```

@@ -11,6 +11,12 @@ const (
 	HeaderWWWAuthenticate        = "WWW-Authenticate"
 )
 
+// MPP payment intent names.
+const (
+	IntentCharge  = "charge"
+	IntentSession = "session"
+)
+
 // MPP HTTP authentication schemes.
 const (
 	SchemePayment = "Payment"

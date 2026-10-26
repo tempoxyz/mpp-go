@@ -217,7 +217,7 @@ func (config *Config) pay(
 		return nil, credentialKey{}, fmt.Errorf("mpp: creating credential for method %q: %w", selected.Challenge.Method, err)
 	}
 	// Send the Credential in its canonical wire form.
-	authorization, err := mpp.FormatAuthorizationStrict(credential)
+	authorization, err := mpp.FormatCredential(credential)
 	if err != nil {
 		return nil, credentialKey{}, err
 	}
@@ -242,7 +242,7 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 // checkProofRealm refuses a zero-amount tempo/charge Challenge whose realm is
 // not in TrustedTempoProofRealms.
 func (config *Config) checkProofRealm(challenge *mpp.Challenge) error {
-	if challenge.Method != "tempo" || challenge.Intent != "charge" || !isZeroAmount(challenge.Request["amount"]) {
+	if challenge.Method != "tempo" || challenge.Intent != mpp.IntentCharge || !isZeroAmount(challenge.Request["amount"]) {
 		return nil
 	}
 	for _, realm := range config.TrustedTempoProofRealms {

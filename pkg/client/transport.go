@@ -237,7 +237,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			credentials[key] = cred
 		}
 
-		authorization, err := mpp.FormatAuthorizationStrict(cred)
+		authorization, err := mpp.FormatCredential(cred)
 		if err != nil {
 			if retry.Body != nil {
 				_ = retry.Body.Close()
@@ -428,7 +428,7 @@ func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences 
 	for i := range challenges {
 		ch := &challenges[i]
 		if ch.Expires != "" {
-			expiry, err := parseChallengeExpiry(ch.Expires)
+			expiry, err := mpp.ParseExpires(ch.Expires)
 			if err != nil {
 				// Unparseable expiry: the issuing server rejects such a
 				// credential (server.VerifyOrChallenge returns "invalid expires
@@ -502,15 +502,6 @@ func headerValue(header http.Header, name string) (string, bool) {
 func drainAndClose(body io.ReadCloser) {
 	_, _ = io.Copy(io.Discard, body)
 	_ = body.Close()
-}
-
-// parseChallengeExpiry parses a challenge expiry using RFC 3339 and the
-// millisecond format emitted by the mpp.Expires helpers.
-func parseChallengeExpiry(value string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, value); err == nil {
-		return t, nil
-	}
-	return time.Parse("2006-01-02T15:04:05.000Z", value)
 }
 
 // cloneRequest creates a copy of the request suitable for retry.
@@ -605,7 +596,7 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, challenge *mpp.Chal
 	}
 	// A zero-amount Tempo proof can authenticate the payer at the realm named
 	// in the challenge. The HTTP server that sent it must own that realm.
-	if challenge.Method == "tempo" && challenge.Intent == "charge" &&
+	if challenge.Method == "tempo" && challenge.Intent == mpp.IntentCharge &&
 		isZeroTempoAmount(challenge.Request["amount"]) &&
 		!(req.URL.Scheme == "https" && (req.URL.Port() == "" || req.URL.Port() == "443") &&
 			strings.EqualFold(challenge.Realm, req.URL.Hostname())) &&

@@ -1,6 +1,7 @@
 package ginadapter
 
 import (
+	"fmt"
 	"net/http"
 
 	ginfw "github.com/gin-gonic/gin"
@@ -38,7 +39,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		}
 		body, err := server.ReadRequestBody(c.Request)
 		if err != nil {
-			server.WritePaymentError(c.Writer, server.RequestBodyError(err))
+			server.WritePaymentResponse(c.Writer, server.RequestBodyError(err))
 			c.Abort()
 			return
 		}
@@ -49,28 +50,34 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 		result, err := m.Charge(c.Request.Context(), chargeParams)
 		if err != nil {
 			if result != nil && result.Challenge != nil {
-				server.WritePaymentErrorWithChallenges(c.Writer, err, result.Challenges, m.Realm())
+				server.WritePaymentResponse(c.Writer, err, result.Challenges...)
 				c.Abort()
 				return
 			}
-			server.WritePaymentError(c.Writer, err)
+			server.WritePaymentResponse(c.Writer, err)
 			c.Abort()
 			return
 		}
 
 		if result.Challenge != nil {
-			server.WriteChallenges(c.Writer, result.Challenges, m.Realm())
+			server.WritePaymentResponse(c.Writer, nil, result.Challenges...)
 			c.Abort()
 			return
 		}
 
+		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
+		if err != nil {
+			server.WritePaymentResponse(c.Writer, fmt.Errorf("ginadapter: formatting receipt: %w", err))
+			c.Abort()
+			return
+		}
 		ctx := server.ContextWithPayment(c.Request.Context(), result.Credential, result.Receipt)
 		c.Request = c.Request.WithContext(ctx)
 		c.Set(credentialKey, result.Credential)
 		c.Set(receiptKey, result.Receipt)
 		writer := &paymentReceiptWriter{
 			ResponseWriter: c.Writer,
-			receipt:        result.Receipt.ToPaymentReceipt(),
+			receipt:        receipt,
 		}
 		c.Writer = writer
 		c.Next()

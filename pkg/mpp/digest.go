@@ -10,6 +10,20 @@ import (
 	"reflect"
 )
 
+// ComputeBodyDigest returns the SHA-256 digest of body in the form
+// "sha-256=<base64>", the value of a challenge's digest parameter. Pass the
+// raw request bytes so the digest binds exactly what the client sent.
+func ComputeBodyDigest(body []byte) string {
+	h := sha256.Sum256(body)
+	return "sha-256=" + base64.StdEncoding.EncodeToString(h[:])
+}
+
+// VerifyBodyDigest reports whether digest is the ComputeBodyDigest of body,
+// using constant-time comparison.
+func VerifyBodyDigest(digest string, body []byte) bool {
+	return subtle.ConstantTimeCompare([]byte(ComputeBodyDigest(body)), []byte(digest)) == 1
+}
+
 // BodyDigest provides helpers for computing and verifying SHA-256 digests.
 // Compute returns a digest string in the form "sha-256=<base64>".
 // Verify recomputes the digest and compares using constant-time comparison.
@@ -20,6 +34,9 @@ import (
 // the raw bytes to bind exactly what the client sent. Compute and Verify panic
 // for a value json.Marshal cannot encode, such as a channel or function, and
 // for an io.Reader such as http.Request.Body: read it and pass the bytes.
+//
+// Deprecated: Use ComputeBodyDigest and VerifyBodyDigest instead, which take
+// the raw body bytes and never panic.
 var BodyDigest = struct {
 	Compute func(body any) string
 	Verify  func(digest string, body any) bool
@@ -29,14 +46,11 @@ var BodyDigest = struct {
 }
 
 func computeDigest(body any) string {
-	data := toBytes(body)
-	h := sha256.Sum256(data)
-	return "sha-256=" + base64.StdEncoding.EncodeToString(h[:])
+	return ComputeBodyDigest(toBytes(body))
 }
 
 func verifyDigest(digest string, body any) bool {
-	expected := computeDigest(body)
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(digest)) == 1
+	return VerifyBodyDigest(digest, toBytes(body))
 }
 
 func toBytes(body any) []byte {

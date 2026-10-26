@@ -77,7 +77,7 @@ func Authorization(meta map[string]any) (string, error) {
 	if err := json.Unmarshal(raw, &credential); err != nil {
 		return "", malformed
 	}
-	authorization, err := mpp.FormatAuthorizationStrict(&credential)
+	authorization, err := mpp.FormatCredential(&credential)
 	if err != nil {
 		return "", malformed
 	}

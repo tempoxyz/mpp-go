@@ -4,30 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
-// ParseUnits converts a human-readable decimal string to base units.
-// For example, ParseUnits("1.5", 6) returns 1500000.
-// Returns an error if value is not a valid decimal, is negative,
-// would produce fractional base units, or decimals is negative.
-func ParseUnits(value string, decimals int) (int64, error) {
+// ParseAmount converts a human-readable decimal string to base units. For
+// example, ParseAmount("1.5", 6) returns 1500000. The result is unbounded,
+// so 18-decimal token amounts do not overflow. It returns an error if value
+// is empty, negative or not a plain decimal (digits with an optional single
+// "."), if it would produce fractional base units, or if decimals is
+// negative.
+func ParseAmount(value string, decimals int) (*big.Int, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return 0, fmt.Errorf("mpp: empty value")
+		return nil, fmt.Errorf("mpp: empty value")
 	}
-
 	// Guard decimals before it is used to slice the fractional part: a negative
 	// value would panic on fracPart[decimals:].
 	if decimals < 0 {
-		return 0, fmt.Errorf("mpp: negative decimals: %d", decimals)
+		return nil, fmt.Errorf("mpp: negative decimals: %d", decimals)
 	}
-
 	if strings.HasPrefix(value, "-") {
-		return 0, fmt.Errorf("mpp: negative value: %q", value)
-	}
-	if decimals < 0 {
-		return 0, fmt.Errorf("mpp: decimals must be non-negative")
+		return nil, fmt.Errorf("mpp: negative value: %q", value)
 	}
 
 	// Split into integer and fractional parts via string manipulation
@@ -37,27 +35,18 @@ func ParseUnits(value string, decimals int) (int64, error) {
 		intPart = value[:dot]
 		fracPart = value[dot+1:]
 	}
-
 	// A bare "." carries no digits on either side of the separator. Without
 	// this guard both parts pass the digit checks below and the value parses
 	// as 0 instead of being rejected.
 	if intPart == "" && fracPart == "" {
-		return 0, fmt.Errorf("mpp: invalid decimal value: %q", value)
+		return nil, fmt.Errorf("mpp: invalid decimal value: %q", value)
 	}
-
 	if intPart == "" {
 		intPart = "0"
 	}
-
-	// Validate that both parts are pure digits.
-	for _, c := range intPart {
+	for _, c := range intPart + fracPart {
 		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("mpp: invalid decimal value: %q", value)
-		}
-	}
-	for _, c := range fracPart {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("mpp: invalid decimal value: %q", value)
+			return nil, fmt.Errorf("mpp: invalid decimal value: %q", value)
 		}
 	}
 
@@ -65,28 +54,36 @@ func ParseUnits(value string, decimals int) (int64, error) {
 	if len(fracPart) > decimals {
 		for _, c := range fracPart[decimals:] {
 			if c != '0' {
-				return 0, fmt.Errorf("mpp: value %q with %d decimals produces fractional base units", value, decimals)
+				return nil, fmt.Errorf("mpp: value %q with %d decimals produces fractional base units", value, decimals)
 			}
 		}
 		fracPart = fracPart[:decimals]
 	}
+	fracPart += strings.Repeat("0", decimals-len(fracPart))
 
-	// Pad fractional part with trailing zeros to fill decimals places.
-	for len(fracPart) < decimals {
-		fracPart += "0"
-	}
-
-	// Concatenate integer + padded fraction and parse as big.Int.
-	combined := intPart + fracPart
-	result, ok := new(big.Int).SetString(combined, 10)
+	result, ok := new(big.Int).SetString(intPart+fracPart, 10)
 	if !ok {
-		return 0, fmt.Errorf("mpp: invalid decimal value: %q", value)
+		return nil, fmt.Errorf("mpp: invalid decimal value: %q", value)
 	}
+	return result, nil
+}
 
+// ParseUnits converts a human-readable decimal string to base units.
+// For example, ParseUnits("1.5", 6) returns 1500000.
+// Returns an error if value is not a valid decimal, is negative,
+// would produce fractional base units, decimals is negative, or the result
+// overflows int64.
+//
+// Deprecated: Use ParseAmount instead, which does not overflow for
+// 18-decimal tokens.
+func ParseUnits(value string, decimals int) (int64, error) {
+	result, err := ParseAmount(value, decimals)
+	if err != nil {
+		return 0, err
+	}
 	if !result.IsInt64() {
 		return 0, fmt.Errorf("mpp: value %q with %d decimals overflows int64", value, decimals)
 	}
-
 	return result.Int64(), nil
 }
 
@@ -95,6 +92,8 @@ func ParseUnits(value string, decimals int) (int64, error) {
 // field (and optionally "suggestedDeposit") from human-readable decimal strings
 // to base unit strings, then removes the "decimals" key.
 // If no "decimals" key is present, the request is returned unchanged.
+//
+// Deprecated: Convert amounts with ParseAmount when building the request.
 func TransformUnits(request map[string]any) (map[string]any, error) {
 	decRaw, ok := request["decimals"]
 	if !ok {
@@ -120,7 +119,7 @@ func TransformUnits(request map[string]any) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mpp: converting amount: %w", err)
 		}
-		out["amount"] = fmt.Sprintf("%d", units)
+		out["amount"] = strconv.FormatInt(units, 10)
 	}
 
 	if depositRaw, ok := out["suggestedDeposit"]; ok {
@@ -132,7 +131,7 @@ func TransformUnits(request map[string]any) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mpp: converting suggestedDeposit: %w", err)
 		}
-		out["suggestedDeposit"] = fmt.Sprintf("%d", units)
+		out["suggestedDeposit"] = strconv.FormatInt(units, 10)
 	}
 
 	delete(out, "decimals")

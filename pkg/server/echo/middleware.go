@@ -1,6 +1,8 @@
 package echoadapter
 
 import (
+	"fmt"
+
 	echofw "github.com/labstack/echo/v4"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -37,7 +39,7 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			}
 			body, err := server.ReadRequestBody(c.Request())
 			if err != nil {
-				server.WritePaymentError(c.Response(), server.RequestBodyError(err))
+				server.WritePaymentResponse(c.Response(), server.RequestBodyError(err))
 				return nil
 			}
 			if len(body) > 0 {
@@ -47,18 +49,22 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			result, err := m.Charge(c.Request().Context(), chargeParams)
 			if err != nil {
 				if result != nil && result.Challenge != nil {
-					server.WritePaymentErrorWithChallenges(c.Response(), err, result.Challenges, m.Realm())
+					server.WritePaymentResponse(c.Response(), err, result.Challenges...)
 					return nil
 				}
-				server.WritePaymentError(c.Response(), err)
+				server.WritePaymentResponse(c.Response(), err)
 				return nil
 			}
 
 			if result.Challenge != nil {
-				server.WriteChallenges(c.Response(), result.Challenges, m.Realm())
+				server.WritePaymentResponse(c.Response(), nil, result.Challenges...)
 				return nil
 			}
 
+			if _, err := mpp.FormatReceiptWithError(result.Receipt); err != nil {
+				server.WritePaymentResponse(c.Response(), fmt.Errorf("echoadapter: formatting receipt: %w", err))
+				return nil
+			}
 			ctx := server.ContextWithPayment(c.Request().Context(), result.Credential, result.Receipt)
 			c.SetRequest(c.Request().WithContext(ctx))
 			c.Set(credentialKey, result.Credential)

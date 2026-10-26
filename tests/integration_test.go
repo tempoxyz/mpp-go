@@ -119,9 +119,9 @@ func TestIntegrationChargeFlow_LocalNode(t *testing.T) {
 		return
 	}
 
-	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	receipt, err := mpp.ParseReceipt(receiptHeader)
 	if !assert.NoErrorf(t, err,
-		"ParsePaymentReceipt() error = %v", err) {
+		"ParseReceipt() error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "success", receipt.Status,
@@ -287,7 +287,9 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 
 	paidRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/paid-fee-payer", nil)
 	require.NoError(t, err)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	credentialHeader, err := mpp.FormatCredential(credential)
+	require.NoError(t, err)
+	paidRequest.Header.Set("Authorization", credentialHeader)
 	paidResponse, err := http.DefaultClient.Do(paidRequest)
 	require.NoError(t, err)
 	defer paidResponse.Body.Close()
@@ -295,7 +297,7 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 		body, _ := io.ReadAll(paidResponse.Body)
 		t.Fatalf("paid response status = %d, want %d: %s", paidResponse.StatusCode, http.StatusOK, body)
 	}
-	receipt, err := mpp.ParsePaymentReceipt(paidResponse.Header.Get("Payment-Receipt"))
+	receipt, err := mpp.ParseReceipt(paidResponse.Header.Get("Payment-Receipt"))
 	require.NoError(t, err)
 	require.Equal(t, "success", receipt.Status)
 	require.NotEmpty(t, receipt.Reference)
@@ -450,7 +452,9 @@ func TestIntegrationChargeFlow_HashCredentialRequiresSource(t *testing.T) {
 		return
 	}
 
-	replayRequest.Header.Set("Authorization", credential.ToAuthorization())
+	credentialHeader, err := mpp.FormatCredential(credential)
+	require.NoError(t, err)
+	replayRequest.Header.Set("Authorization", credentialHeader)
 	replayResponse, err := http.DefaultClient.Do(replayRequest)
 	if !assert.NoErrorf(t, err,
 		"sourceless request error = %v", err) {
@@ -520,9 +524,9 @@ func TestIntegrationChargeFlow_ProofCredentialZeroAmount(t *testing.T) {
 		return
 	}
 
-	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	receipt, err := mpp.ParseReceipt(receiptHeader)
 	if !assert.NoErrorf(t, err,
-		"ParsePaymentReceipt() error = %v", err) {
+		"ParseReceipt() error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "success", receipt.Status,
@@ -664,9 +668,9 @@ func TestIntegrationChargeFlow_TransactionCredentialWithSplits(t *testing.T) {
 		return
 	}
 
-	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	receipt, err := mpp.ParseReceipt(receiptHeader)
 	if !assert.NoErrorf(t, err,
-		"ParsePaymentReceipt() error = %v", err) {
+		"ParseReceipt() error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "success", receipt.Status,
@@ -737,9 +741,9 @@ func TestIntegrationChargeFlow_ReceiptPropagatesExternalID(t *testing.T) {
 		return
 	}
 
-	receipt, err := mpp.ParsePaymentReceipt(receiptHeader)
+	receipt, err := mpp.ParseReceipt(receiptHeader)
 	if !assert.NoErrorf(t, err,
-		"ParsePaymentReceipt() error = %v", err) {
+		"ParseReceipt() error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "ext-integration-123", receipt.ExternalID,
@@ -1013,12 +1017,22 @@ func paidHandler(t *testing.T, payment *server.Mpp, feePayer bool) http.HandlerF
 		}
 
 		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			challenge, err := mpp.FormatChallenge(result.Challenge)
+			if err != nil {
+				writeIntegrationPaymentError(w, err)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", challenge)
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 
-		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+		w.Header().Set("Payment-Receipt", receipt)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"payer": result.Credential.Source,
 			"tx":    result.Receipt.Reference,
@@ -1042,12 +1056,22 @@ func paidHandlerWithAmount(t *testing.T, payment *server.Mpp, amount string) htt
 		}
 
 		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(result.Challenge.Realm))
+			challenge, err := mpp.FormatChallenge(result.Challenge)
+			if err != nil {
+				writeIntegrationPaymentError(w, err)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", challenge)
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 
-		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+		w.Header().Set("Payment-Receipt", receipt)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"payer": result.Credential.Source,
 			"tx":    result.Receipt.Reference,
@@ -1075,12 +1099,22 @@ func paidHandlerWithSplitsAndExternalID(t *testing.T, payment *server.Mpp) http.
 		}
 
 		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			challenge, err := mpp.FormatChallenge(result.Challenge)
+			if err != nil {
+				writeIntegrationPaymentError(w, err)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", challenge)
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 
-		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+		w.Header().Set("Payment-Receipt", receipt)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"payer":      result.Credential.Source,
 			"tx":         result.Receipt.Reference,
@@ -1106,12 +1140,22 @@ func paidHandlerWithExternalID(t *testing.T, payment *server.Mpp, amount, extern
 		}
 
 		if result.IsChallenge() {
-			w.Header().Set("WWW-Authenticate", result.Challenge.ToAuthenticate(integrationRealm))
+			challenge, err := mpp.FormatChallenge(result.Challenge)
+			if err != nil {
+				writeIntegrationPaymentError(w, err)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", challenge)
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
 
-		w.Header().Set("Payment-Receipt", result.Receipt.ToPaymentReceipt())
+		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
+		if err != nil {
+			writeIntegrationPaymentError(w, err)
+			return
+		}
+		w.Header().Set("Payment-Receipt", receipt)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"payer":      result.Credential.Source,
 			"tx":         result.Receipt.Reference,

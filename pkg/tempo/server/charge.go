@@ -2071,10 +2071,7 @@ func parseSourceDID(source string) (*sourceDID, error) {
 }
 
 func parseExpires(value string) (time.Time, error) {
-	if expires, err := time.Parse(time.RFC3339, value); err == nil {
-		return expires, nil
-	}
-	return time.Parse("2006-01-02T15:04:05.000Z", value)
+	return mpp.ParseExpires(value)
 }
 
 func asString(value any) string {

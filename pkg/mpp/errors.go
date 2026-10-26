@@ -38,6 +38,13 @@ const (
 	ErrorTypePaymentOutcomeUnknown ErrorType = "https://paymentauth.org/problems/payment-outcome-unknown"
 )
 
+// Error returns the problem type URI, so an ErrorType can be the target of
+// errors.Is: errors.Is(err, ErrorTypeMalformedCredential) reports whether err
+// wraps a PaymentError of that type.
+func (t ErrorType) Error() string {
+	return string(t)
+}
+
 // Title returns the default RFC 9457 title for the error type.
 func (t ErrorType) Title() string {
 	switch t {
@@ -84,6 +91,12 @@ func (t ErrorType) Status() int {
 }
 
 // PaymentError represents an MPP error using RFC 9457 Problem Details.
+//
+// Match its problem type through wrapping with errors.Is and an ErrorType:
+//
+//	if errors.Is(err, mpp.ErrorTypePaymentExpired) { ... }
+//
+// errors.As(err, &pe) reaches the PaymentError itself.
 type PaymentError struct {
 	Type   ErrorType `json:"type"`
 	Title  string    `json:"title"`
@@ -100,6 +113,13 @@ type PaymentError struct {
 
 func (e *PaymentError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Title, e.Detail)
+}
+
+// Is reports whether target is the ErrorType of e, so errors.Is(err,
+// ErrorTypeVerificationFailed) matches a wrapped PaymentError of that type.
+func (e *PaymentError) Is(target error) bool {
+	t, ok := target.(ErrorType)
+	return ok && e.Type == t
 }
 
 // Unwrap returns the cause attached with WithCause, if any, so errors.Is and

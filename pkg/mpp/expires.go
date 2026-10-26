@@ -1,9 +1,51 @@
 package mpp
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
+// ExpiresIn returns the RFC 3339 timestamp d from now, in UTC with
+// millisecond precision and a Z suffix, as mppx's Expires helpers emit. Use it
+// for a challenge's expires parameter:
+//
+//	mpp.WithExpires(mpp.ExpiresIn(5 * time.Minute))
+func ExpiresIn(d time.Duration) string {
+	return formatISO(time.Now().UTC().Add(d))
+}
+
+// ParseExpires parses an expires timestamp in the RFC 3339 format challenges
+// use, with or without fractional seconds.
+func ParseExpires(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("mpp: invalid expires timestamp: %w", err)
+	}
+	return t, nil
+}
+
+// CheckExpires checks a challenge's expires parameter at now, as mppx's
+// Expires.assert does. It returns an invalid-challenge PaymentError when
+// expires is empty or malformed, and ErrPaymentExpired when now is at or after
+// it: a challenge is no longer valid at its exact expiry instant.
+func CheckExpires(expires string, now time.Time) error {
+	if expires == "" {
+		return newPaymentError(ErrorTypeInvalidChallenge, "missing required expires field")
+	}
+	t, err := ParseExpires(expires)
+	if err != nil {
+		return newPaymentError(ErrorTypeInvalidChallenge, "malformed expires timestamp").WithCause(err)
+	}
+	if !now.Before(t) {
+		return ErrPaymentExpired(expires)
+	}
+	return nil
+}
 
 // Expires provides helpers for generating ISO 8601 expiration timestamps
 // with millisecond precision and Z suffix.
+//
+// Deprecated: Use ExpiresIn instead, such as ExpiresIn(5 * time.Minute).
 var Expires = struct {
 	Seconds func(n int) string
 	Minutes func(n int) string
@@ -11,11 +53,11 @@ var Expires = struct {
 	Days    func(n int) string
 	Weeks   func(n int) string
 }{
-	Seconds: func(n int) string { return formatISO(time.Now().UTC().Add(time.Duration(n) * time.Second)) },
-	Minutes: func(n int) string { return formatISO(time.Now().UTC().Add(time.Duration(n) * time.Minute)) },
-	Hours:   func(n int) string { return formatISO(time.Now().UTC().Add(time.Duration(n) * time.Hour)) },
-	Days:    func(n int) string { return formatISO(time.Now().UTC().Add(time.Duration(n) * 24 * time.Hour)) },
-	Weeks:   func(n int) string { return formatISO(time.Now().UTC().Add(time.Duration(n) * 7 * 24 * time.Hour)) },
+	Seconds: func(n int) string { return ExpiresIn(time.Duration(n) * time.Second) },
+	Minutes: func(n int) string { return ExpiresIn(time.Duration(n) * time.Minute) },
+	Hours:   func(n int) string { return ExpiresIn(time.Duration(n) * time.Hour) },
+	Days:    func(n int) string { return ExpiresIn(time.Duration(n) * 24 * time.Hour) },
+	Weeks:   func(n int) string { return ExpiresIn(time.Duration(n) * 7 * 24 * time.Hour) },
 }
 
 func formatISO(t time.Time) string {

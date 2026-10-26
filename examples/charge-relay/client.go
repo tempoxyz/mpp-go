@@ -81,7 +81,11 @@ func runRelayClient(
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", credential.ToAuthorization())
+	authorization, err := mpp.FormatCredential(credential)
+	if err != nil {
+		return nil, fmt.Errorf("format payment credential: %w", err)
+	}
+	request.Header.Set("Authorization", authorization)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("pay for photo: %w", err)

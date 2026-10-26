@@ -82,7 +82,7 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 	if echoed.Expires == "" {
 		return nil, nil, mpp.ErrInvalidChallenge(echoed.ID, "missing required expires")
 	}
-	expires, err := parseChallengeExpiry(echoed.Expires)
+	expires, err := mpp.ParseExpires(echoed.Expires)
 	if err != nil {
 		return nil, nil, mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format")
 	}
@@ -97,10 +97,4 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 // verifier and mppx.
 func challengeExpired(expires, now time.Time) bool {
 	return !now.Before(expires)
-}
-
-// parseChallengeExpiry accepts the protocol's RFC 3339 timestamp format,
-// including fractional seconds supported by time.Parse.
-func parseChallengeExpiry(value string) (time.Time, error) {
-	return time.Parse(time.RFC3339, value)
 }

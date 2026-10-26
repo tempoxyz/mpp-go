@@ -32,6 +32,8 @@ func (c *Challenge) NewCredential(payload map[string]any, opts ...CredentialOpti
 }
 
 // FromAuthorization parses an Authorization header value into a Credential.
+//
+// Deprecated: Use ParseCredential instead.
 func FromAuthorization(header string) (*Credential, error) {
 	return ParseCredential(header)
 }
@@ -81,6 +83,10 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 }
 
 // ToAuthorization formats this Credential as an Authorization header value.
+// It returns an empty string when c cannot be formatted.
+//
+// Deprecated: Use FormatCredential instead, which returns formatting errors.
 func (c *Credential) ToAuthorization() string {
-	return FormatAuthorization(c)
+	header, _ := formatAuthorization(c)
+	return header
 }

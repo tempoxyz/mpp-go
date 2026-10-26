@@ -307,19 +307,46 @@ func ParseChallenge(header string) (*Challenge, error) {
 	}, nil
 }
 
-// FormatAuthenticate formats a Challenge as an authentication header value.
+// FormatChallenge formats c as a WWW-Authenticate header value, the inverse
+// of ParseChallenge:
+//
+//	Payment id="...", realm="...", method="...", intent="...", request="..."
+//
+// It writes c.Realm, the realm the challenge ID binds. It rejects a nil
+// challenge, values that cannot be safely represented in quoted auth-params,
+// an invalid advertised credential header, empty required auth-params (id,
+// realm, method, intent, request), which would otherwise be omitted and yield
+// a challenge ParseChallenge rejects, and a header over the size limit.
+func FormatChallenge(c *Challenge) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("mpp: challenge is nil")
+	}
+	return formatAuthenticateStrict(c, c.Realm)
+}
+
+// FormatAuthenticate formats a Challenge as an authentication header value
+// with the given realm. It returns an empty string when c cannot be
+// formatted.
 //
 // Output format: Payment id="...", realm="...", method="...", intent="...", request="..."
+//
+// Deprecated: Use FormatChallenge instead, which writes c.Realm (the realm
+// the challenge ID binds) and returns formatting errors.
 func FormatAuthenticate(c *Challenge, realm string) string {
 	header, _ := formatAuthenticate(c, realm, false)
 	return header
 }
 
-// FormatAuthenticateStrict formats a Challenge as an authentication header value.
-// It rejects values that cannot be safely represented in quoted auth-params, and
-// empty required auth-params (id, realm, method, intent, request), which would
-// otherwise be omitted and yield a challenge ParseChallenge rejects.
+// FormatAuthenticateStrict formats a Challenge as an authentication header value
+// with the given realm, rejecting what FormatChallenge rejects.
+//
+// Deprecated: Use FormatChallenge instead, which writes c.Realm, the realm the
+// challenge ID binds.
 func FormatAuthenticateStrict(c *Challenge, realm string) (string, error) {
+	return formatAuthenticateStrict(c, realm)
+}
+
+func formatAuthenticateStrict(c *Challenge, realm string) (string, error) {
 	if _, err := parseAdvertisedCredentialHeader(c.Header); err != nil {
 		return "", err
 	}
@@ -382,7 +409,11 @@ func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error)
 	}
 
 	if c.Opaque != nil {
-		if err := add("opaque", wireOpaque(c.Opaque, c.opaqueB64), false); err != nil {
+		opaque, err := wireOpaque(c.Opaque, c.opaqueB64)
+		if err != nil {
+			return "", fmt.Errorf("mpp: invalid challenge opaque: %w", err)
+		}
+		if err := add("opaque", opaque, false); err != nil {
 			return "", err
 		}
 	}
@@ -548,9 +579,30 @@ func ParseCredential(header string) (*Credential, error) {
 	}, nil
 }
 
+// FormatCredential formats c as an Authorization (or Payment-Authorization)
+// header value, the inverse of ParseCredential:
+//
+//	Payment <base64url-json>
+//
+// It returns an error for a nil credential, values JSON cannot encode, and a
+// header over the size limit.
+func FormatCredential(c *Credential) (string, error) {
+	header, err := formatAuthorization(c)
+	if err != nil {
+		return "", err
+	}
+	if len(header) > maxAuthorizationPayload {
+		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
+	}
+	return header, nil
+}
+
 // FormatAuthorization formats a Credential as an Authorization header value.
+// It returns an empty string when c cannot be formatted.
 //
 // Output format: Payment <base64url-json>
+//
+// Deprecated: Use FormatCredential instead, which returns formatting errors.
 func FormatAuthorization(c *Credential) string {
 	header, _ := formatAuthorization(c)
 	return header
@@ -582,7 +634,7 @@ func formatAuthorization(c *Credential) (string, error) {
 		} else if raw, ok := c.Challenge.Opaque["_raw"]; ok {
 			challengeDict["opaque"] = raw
 		} else {
-			encoded, err := b64EncodeSortedStringMapWithError(c.Challenge.Opaque)
+			encoded, err := b64EncodeSortedStringMap(c.Challenge.Opaque)
 			if err != nil {
 				return "", err
 			}
@@ -606,21 +658,25 @@ func formatAuthorization(c *Credential) (string, error) {
 }
 
 // FormatAuthorizationStrict formats a credential and enforces the wire size limit.
+//
+// Deprecated: Use FormatCredential instead.
 func FormatAuthorizationStrict(c *Credential) (string, error) {
-	header, err := formatAuthorization(c)
-	if err != nil {
-		return "", err
-	}
-	if len(header) > maxAuthorizationPayload {
-		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
-	}
-	return header, nil
+	return FormatCredential(c)
 }
 
 // ParsePaymentReceipt parses a Payment-Receipt header value into a Receipt.
 //
-// Expected format: <base64url-json>
+// Deprecated: Use ParseReceipt instead.
 func ParsePaymentReceipt(header string) (*Receipt, error) {
+	return ParseReceipt(header)
+}
+
+// ParseReceipt parses a Payment-Receipt header value into a Receipt. It
+// requires status "success", reference, method and an RFC 3339 timestamp, and
+// keeps method-defined top-level fields in Receipt.Extensions.
+//
+// Expected format: <base64url-json>
+func ParseReceipt(header string) (*Receipt, error) {
 	header = strings.TrimSpace(header)
 	if len(header) > maxHeaderPayload {
 		return nil, fmt.Errorf("mpp: Payment-Receipt header exceeds maximum size")
@@ -739,10 +795,41 @@ var receiptBaseFields = map[string]struct{}{
 }
 
 // FormatPaymentReceipt formats a Receipt as a Payment-Receipt header value.
+// It returns the encoding of an empty object when r cannot be encoded.
 //
-// Output format: <base64url-json>
+// Deprecated: Use FormatReceiptWithError instead, which returns formatting
+// errors.
 func FormatPaymentReceipt(r *Receipt) string {
 	return b64EncodeAny(receiptFields(r))
+}
+
+// FormatReceiptWithError formats r as a Payment-Receipt header value, the
+// inverse of ParseReceipt:
+//
+//	<base64url-json>
+//
+// It returns an error for a nil receipt, for a receipt ParseReceipt would
+// reject because its status, reference or method is missing or its method is
+// not a valid method name, and for Extensions values JSON cannot encode.
+func FormatReceiptWithError(r *Receipt) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("mpp: receipt is nil")
+	}
+	switch {
+	case r.Status == "":
+		return "", fmt.Errorf("mpp: receipt missing status")
+	case r.Reference == "":
+		return "", fmt.Errorf("mpp: receipt missing reference")
+	case r.Method == "":
+		return "", fmt.Errorf("mpp: receipt missing method")
+	case !isMethodName(r.Method):
+		return "", fmt.Errorf("mpp: invalid receipt method %q", r.Method)
+	}
+	encoded, err := encodeStableJSON(receiptFields(r))
+	if err != nil {
+		return "", fmt.Errorf("mpp: encoding receipt: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
 // receiptFields returns the canonical Payment-Receipt JSON fields of r.

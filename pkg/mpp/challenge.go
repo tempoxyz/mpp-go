@@ -9,16 +9,18 @@ import (
 // Challenge represents a server-issued payment challenge sent via the
 // WWW-Authenticate header.
 type Challenge struct {
-	ID          string            `json:"id"`
-	Method      string            `json:"method"`
-	Intent      string            `json:"intent"`
-	Request     map[string]any    `json:"request,omitempty"`
-	Realm       string            `json:"realm,omitempty"`
-	RequestB64  string            `json:"requestB64,omitempty"`
-	Digest      string            `json:"digest,omitempty"`
-	Expires     string            `json:"expires,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Opaque      map[string]string `json:"opaque,omitempty"`
+	ID          string         `json:"id"`
+	Method      string         `json:"method"`
+	Intent      string         `json:"intent"`
+	Request     map[string]any `json:"request,omitempty"`
+	Realm       string         `json:"realm,omitempty"`
+	RequestB64  string         `json:"requestB64,omitempty"`
+	Digest      string         `json:"digest,omitempty"`
+	Expires     string         `json:"expires,omitempty"`
+	Description string         `json:"description,omitempty"`
+	// Opaque is the decoded opaque auth-param: server-defined metadata that
+	// clients echo unchanged. mppx calls it meta; set it with WithMeta.
+	Opaque map[string]string `json:"opaque,omitempty"`
 	// opaqueB64 keeps the issuer's encoded opaque parameter when it differs
 	// from the canonical encoding of Opaque, so that formatting echoes it
 	// unchanged.
@@ -83,7 +85,10 @@ func WithHeader(header string) ChallengeOption {
 }
 
 // NewChallenge creates a new Challenge with an HMAC-bound ID. The secretKey
-// and realm are used to compute the ID via GenerateChallengeID.
+// and realm are used to compute the ID via GenerateChallengeIDWithError. It
+// panics where NewChallengeWithError returns an error.
+//
+// Deprecated: Use NewChallengeWithError instead.
 func NewChallenge(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) *Challenge {
 	challenge, err := NewChallengeWithError(secretKey, realm, method, intent, request, opts...)
 	if err != nil {
@@ -92,9 +97,11 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 	return challenge
 }
 
-// NewChallengeWithError creates a new Challenge with an HMAC-bound ID. It
-// rejects invalid advertised credential headers and request values that JCS
-// cannot represent without changing their numeric value.
+// NewChallengeWithError creates a new Challenge with an HMAC-bound ID
+// computed from secretKey over realm and the other challenge parameters (see
+// GenerateChallengeIDWithError). It rejects invalid advertised credential
+// headers and request values that JCS cannot represent without changing their
+// numeric value. Check the ID of an echoed challenge with Challenge.VerifyID.
 func NewChallengeWithError(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) (*Challenge, error) {
 	cfg := &challengeConfig{}
 	for _, o := range opts {
@@ -220,26 +227,48 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 }
 
 // FromAuthenticate parses an authentication header value into a Challenge.
+//
+// Deprecated: Use ParseChallenge instead.
 func FromAuthenticate(header string) (*Challenge, error) {
 	return ParseChallenge(header)
 }
 
-// ToAuthenticate formats this Challenge as an authentication header value.
+// ToAuthenticate formats this Challenge as an authentication header value
+// with the given realm, which the challenge ID does not bind unless it equals
+// c.Realm. It returns an empty string when c cannot be formatted.
+//
+// Deprecated: Use FormatChallenge instead, which writes c.Realm and returns
+// formatting errors.
 func (c *Challenge) ToAuthenticate(realm string) string {
-	return FormatAuthenticate(c, realm)
+	header, _ := formatAuthenticate(c, realm, false)
+	return header
 }
 
 // ToAuthenticateStrict formats this Challenge as an authentication header value
 // and rejects values that cannot be safely represented in quoted auth-params.
+//
+// Deprecated: Use FormatChallenge instead, which writes c.Realm.
 func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
-	return FormatAuthenticateStrict(c, realm)
+	return formatAuthenticateStrict(c, realm)
+}
+
+// VerifyID reports whether the challenge ID is the HMAC that secretKey binds
+// to the challenge's parameters, including c.Realm. It uses constant-time
+// comparison. A parsed challenge whose issuer encoded opaque non-canonically
+// is verified against that encoding, as it is echoed.
+func (c *Challenge) VerifyID(secretKey string) bool {
+	return c.verify(secretKey, c.Realm)
 }
 
 // Verify checks whether the challenge ID matches the expected HMAC for the
-// given secretKey and realm. Uses constant-time comparison. A parsed challenge
-// whose issuer encoded opaque non-canonically is verified against that
-// encoding, as it is echoed.
+// given secretKey and realm. Uses constant-time comparison.
+//
+// Deprecated: Use VerifyID instead, which checks the challenge's own Realm.
 func (c *Challenge) Verify(secretKey, realm string) bool {
+	return c.verify(secretKey, realm)
+}
+
+func (c *Challenge) verify(secretKey, realm string) bool {
 	expected, err := generateChallengeID(GenerateChallengeIDInput{
 		SecretKey: secretKey,
 		Realm:     realm,
@@ -447,8 +476,10 @@ func preservedOpaqueB64(opaque map[string]string, encoded string) string {
 	if encoded == "" {
 		return ""
 	}
-	if _, hasRaw := opaque["_raw"]; !hasRaw && b64EncodeSortedStringMap(opaque) == encoded {
-		return ""
+	if _, hasRaw := opaque["_raw"]; !hasRaw {
+		if canonical, err := b64EncodeSortedStringMap(opaque); err == nil && canonical == encoded {
+			return ""
+		}
 	}
 	return encoded
 }
@@ -475,9 +506,9 @@ func (c *Challenge) opaqueJSON() any {
 // issuer's encoding when that encoding still decodes to opaque. Otherwise it
 // returns the canonical encoding of opaque. Clients must not modify opaque, and
 // servers can bind the challenge ID to the encoded value.
-func wireOpaque(opaque map[string]string, encoded string) string {
+func wireOpaque(opaque map[string]string, encoded string) (string, error) {
 	if encoded != "" && opaqueEncodes(opaque, encoded) {
-		return encoded
+		return encoded, nil
 	}
 	return b64EncodeSortedStringMap(opaque)
 }

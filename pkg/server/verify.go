@@ -26,8 +26,10 @@ type VerifyParams struct {
 	Request map[string]any
 	// Body is the actual request body bytes/string/object the digest binds to.
 	// When set, issued challenges include a body digest and submitted
-	// credentials must echo a digest matching this value. See mpp.BodyDigest
-	// for how non-byte, non-string values are digested.
+	// credentials must echo a digest matching this value (see
+	// mpp.ComputeBodyDigest). A []byte or string, or a named type of either,
+	// is digested as is; any other value as its json.Marshal output. An
+	// io.Reader or a value json.Marshal cannot encode is an error.
 	Body any
 	// Realm is the expected server realm.
 	Realm string
@@ -73,7 +75,7 @@ type VerifyResult struct {
 func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult, error) {
 	expires := params.Expires
 	if expires == "" {
-		expires = mpp.Expires.Minutes(5)
+		expires = mpp.ExpiresIn(5 * time.Minute)
 	}
 
 	// Build the challenge from server-side parameters. Used both for
@@ -105,7 +107,11 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		opts = append(opts, mpp.WithHeader(params.Header))
 	}
 	if params.Body != nil {
-		opts = append(opts, mpp.WithDigest(mpp.BodyDigest.Compute(params.Body)))
+		body, err := bodyBytes(params.Body)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, mpp.WithDigest(mpp.ComputeBodyDigest(body)))
 	}
 
 	challenge, err := mpp.NewChallengeWithError(
@@ -198,7 +204,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 	// 7. Check expiry before body-digest validation so expired credentials
 	// consistently return the payment-expired 402 path.
-	expiresTime, err := parseChallengeExpiry(echoed.Expires)
+	expiresTime, err := mpp.ParseExpires(echoed.Expires)
 	if err != nil {
 		return challengeResultError(
 			challenge,
@@ -268,7 +274,11 @@ func verifyBodyDigest(challengeID, digest string, body any) error {
 	if digest == "" {
 		return mpp.ErrInvalidChallenge(challengeID, "missing body digest")
 	}
-	if !mpp.BodyDigest.Verify(digest, body) {
+	data, err := bodyBytes(body)
+	if err != nil {
+		return err
+	}
+	if !mpp.VerifyBodyDigest(digest, data) {
 		return mpp.ErrInvalidChallenge(challengeID, "body digest mismatch")
 	}
 	return nil

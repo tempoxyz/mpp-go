@@ -82,7 +82,7 @@ func TestFormatAuthenticateReencodesModifiedOpaque(t *testing.T) {
 	formatted := FormatAuthenticate(challenge, challenge.Realm)
 	assert.NotContains(t, formatted, `opaque="`+raw+`"`,
 		"a stale encoding must not be emitted after the decoded opaque changes")
-	assert.Contains(t, formatted, `opaque="`+b64EncodeSortedStringMap(challenge.Opaque)+`"`)
+	assert.Contains(t, formatted, `opaque="`+canonicalOpaque(t, challenge.Opaque)+`"`)
 }
 
 func TestIssuedChallengeWithMetaVerifiesAfterWireRoundTrip(t *testing.T) {
@@ -94,7 +94,7 @@ func TestIssuedChallengeWithMetaVerifiesAfterWireRoundTrip(t *testing.T) {
 	issued := NewChallenge(secret, realm, "tempo", "charge", map[string]any{"amount": "1"}, WithMeta(meta))
 
 	formatted := issued.ToAuthenticate(realm)
-	assert.Contains(t, formatted, `opaque="`+b64EncodeSortedStringMap(meta)+`"`)
+	assert.Contains(t, formatted, `opaque="`+canonicalOpaque(t, meta)+`"`)
 
 	parsed, err := ParseChallenge(formatted)
 	require.NoError(t, err)
@@ -161,4 +161,13 @@ func TestOpaqueWithRawKeyIsEchoed(t *testing.T) {
 	authorization := FormatAuthorization(challenge.NewCredential(map[string]any{"type": "test"}))
 	assert.Equal(t, raw, credentialChallengeOpaque(t, authorization),
 		"an issuer's _raw key must not be taken for the undecodable-opaque sentinel")
+}
+
+func canonicalOpaque(t *testing.T, m map[string]string) string {
+	t.Helper()
+	encoded, err := b64EncodeSortedStringMap(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

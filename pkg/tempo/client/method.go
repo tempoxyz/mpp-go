@@ -300,7 +300,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 			Payload:   tempo.ChargeCredentialPayload{Type: credentialType, Hash: "0x" + strings.Repeat("0", 64)}.Map(),
 			Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
 		}
-		if _, err := mpp.FormatAuthorizationStrict(preflight); err != nil {
+		if _, err := mpp.FormatCredential(preflight); err != nil {
 			return nil, err
 		}
 		hash, err := rpc.SendRawTransaction(ctx, rawTx)
@@ -317,7 +317,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		Payload:   payload.Map(),
 		Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
 	}
-	if _, err := mpp.FormatAuthorizationStrict(credential); err != nil {
+	if _, err := mpp.FormatCredential(credential); err != nil {
 		return nil, err
 	}
 	return credential, nil
@@ -432,7 +432,7 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 	if expires == "" {
 		return uint64(validBefore), nil
 	}
-	expiry, err := parseChallengeExpiry(expires)
+	expiry, err := mpp.ParseExpires(expires)
 	if err != nil {
 		return 0, fmt.Errorf("tempo client: invalid challenge expires %q: %w", expires, err)
 	}
@@ -445,15 +445,6 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 		validBefore = challengeMax
 	}
 	return uint64(validBefore), nil
-}
-
-// parseChallengeExpiry parses a challenge expiry using RFC 3339 and the
-// millisecond format emitted by the mpp.Expires helpers.
-func parseChallengeExpiry(value string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, value); err == nil {
-		return t, nil
-	}
-	return time.Parse("2006-01-02T15:04:05.000Z", value)
 }
 
 func (m *Method) signProof(chainID int64, challengeID, realm string) (string, error) {

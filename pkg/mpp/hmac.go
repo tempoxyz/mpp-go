@@ -31,7 +31,10 @@ type GenerateChallengeIDInput struct {
 // the final opaque slot. Authorization is the implicit default and is never
 // included, preserving the legacy binding.
 //
-// The result is base64url-encoded without padding.
+// The result is base64url-encoded without padding. It panics where
+// GenerateChallengeIDWithError returns an error.
+//
+// Deprecated: Use GenerateChallengeIDWithError instead.
 func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 	id, err := GenerateChallengeIDWithError(opts)
 	if err != nil {
@@ -40,9 +43,17 @@ func GenerateChallengeID(opts GenerateChallengeIDInput) string {
 	return id
 }
 
-// GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID and
-// rejects ambiguous fields, invalid advertised credential headers and request
-// values that JCS cannot represent exactly.
+// GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID from the
+// given inputs and rejects ambiguous fields, invalid advertised credential
+// headers and request values that JCS cannot represent exactly. The HMAC is
+// computed over pipe-delimited fields:
+//
+//	realm|method|intent|request_b64|expires|digest|opaque_b64
+//
+// Challenges that advertise a credential header insert it immediately before
+// the final opaque slot. Authorization is the implicit default and is never
+// included, preserving the legacy binding. The result is base64url-encoded
+// without padding.
 func GenerateChallengeIDWithError(opts GenerateChallengeIDInput) (string, error) {
 	return generateChallengeID(opts, "")
 }
@@ -78,7 +89,7 @@ func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (s
 
 	opaqueB64 := encodedOpaque
 	if opaqueB64 == "" && opts.Opaque != nil {
-		opaqueB64, err = b64EncodeSortedStringMapWithError(opts.Opaque)
+		opaqueB64, err = b64EncodeSortedStringMap(opts.Opaque)
 		if err != nil {
 			return "", err
 		}
@@ -135,12 +146,7 @@ func ConstantTimeEqual(a, b string) bool {
 
 // b64EncodeSortedStringMap encodes a map[string]string as RFC 8785 canonical
 // JSON, then base64url without padding.
-func b64EncodeSortedStringMap(m map[string]string) string {
-	encoded, _ := b64EncodeSortedStringMapWithError(m)
-	return encoded
-}
-
-func b64EncodeSortedStringMapWithError(m map[string]string) (string, error) {
+func b64EncodeSortedStringMap(m map[string]string) (string, error) {
 	encoded, err := encodeCanonicalJSON(m)
 	if err != nil {
 		return "", err

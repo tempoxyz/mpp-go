@@ -9,6 +9,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -296,8 +297,8 @@ type ChargeParams struct {
 	Recipient string
 	// ExternalID is copied into the request and echoed back in the Receipt.
 	ExternalID string
-	// Body is the actual request body to bind via the challenge digest. See
-	// mpp.BodyDigest for how non-byte, non-string values are digested.
+	// Body is the actual request body to bind via the challenge digest. It is
+	// digested as VerifyParams.Body is.
 	Body any
 	// Expires overrides the default Challenge expiry.
 	Expires string
@@ -433,7 +434,7 @@ func applyMppxScope(request map[string]any, scope map[string]string) {
 // then returns one Challenge per offer and verifies a Credential against the
 // offer it echoes.
 func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, error) {
-	intent, ok := m.method.Intents()["charge"]
+	intent, ok := m.method.Intents()[mpp.IntentCharge]
 	if !ok {
 		return nil, fmt.Errorf("method %q does not support charge intent", m.method.Name())
 	}
@@ -446,7 +447,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	// Share one expiry so every offer in a response expires together.
 	expires := params.Expires
 	if expires == "" {
-		expires = mpp.Expires.Minutes(5)
+		expires = mpp.ExpiresIn(5 * time.Minute)
 	}
 	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
 	selected := selectChargeOffer(authorization, requests)

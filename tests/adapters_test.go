@@ -149,7 +149,7 @@ func assertPaidRoute(t *testing.T, url string) {
 	defer response.Body.Close()
 	require.Equal(t, http.StatusOK, response.StatusCode)
 
-	receipt, err := mpp.ParsePaymentReceipt(response.Header.Get("Payment-Receipt"))
+	receipt, err := mpp.ParseReceipt(response.Header.Get("Payment-Receipt"))
 	require.NoError(t, err)
 	require.Equal(t, "success", receipt.Status)
 	require.Equal(t, tempo.MethodName, receipt.Method)

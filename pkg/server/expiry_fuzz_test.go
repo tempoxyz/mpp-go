@@ -3,11 +3,13 @@ package server
 import (
 	"testing"
 	"time"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // FuzzParseChallengeExpiry checks the challenge expires parser: it never
 // panics, and every instant it accepts survives formatting in the
-// millisecond UTC form mpp.Expires emits.
+// millisecond UTC form mpp.ExpiresIn emits.
 //
 //	go test -run='^$' -fuzz='^FuzzParseChallengeExpiry$' -fuzztime=60s ./pkg/server
 func FuzzParseChallengeExpiry(f *testing.F) {
@@ -27,7 +29,7 @@ func FuzzParseChallengeExpiry(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, value string) {
-		parsed, err := parseChallengeExpiry(value)
+		parsed, err := mpp.ParseExpires(value)
 		if err != nil {
 			return
 		}
@@ -36,12 +38,12 @@ func FuzzParseChallengeExpiry(f *testing.F) {
 			t.Skip("instant outside RFC 3339's four-digit years after UTC conversion")
 		}
 		formatted := utc.Format("2006-01-02T15:04:05.000Z")
-		again, err := parseChallengeExpiry(formatted)
+		again, err := mpp.ParseExpires(formatted)
 		if err != nil {
-			t.Fatalf("parseChallengeExpiry(%q) failed after formatting %q: %v", formatted, value, err)
+			t.Fatalf("mpp.ParseExpires(%q) failed after formatting %q: %v", formatted, value, err)
 		}
 		if want := utc.Truncate(time.Millisecond); !again.Equal(want) {
-			t.Fatalf("parseChallengeExpiry(%q) = %v, want %v", formatted, again, want)
+			t.Fatalf("mpp.ParseExpires(%q) = %v, want %v", formatted, again, want)
 		}
 		if challengeExpired(parsed, parsed.Add(-time.Nanosecond)) || !challengeExpired(parsed, parsed) {
 			t.Fatalf("challengeExpired disagrees with its own expiry instant %v", parsed)
