@@ -341,7 +341,7 @@ func TestAuthorizationExtractionBoundsRawHeader(t *testing.T) {
 }
 
 func TestCredentialAcceptsExpandedChallengeEcho(t *testing.T) {
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret",
 		"api.example.com",
 		"tempo",
@@ -353,7 +353,7 @@ func TestCredentialAcceptsExpandedChallengeEcho(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0x1"},
 	}
 
-	header, err := FormatAuthorizationStrict(credential)
+	header, err := FormatCredential(credential)
 	require.NoError(t, err)
 	require.Greater(t, len(header), maxHeaderPayload)
 	require.Equal(t, header, FindPaymentAuthorization(header))

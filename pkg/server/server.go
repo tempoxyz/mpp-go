@@ -212,8 +212,7 @@ func WithRequiresAuth(enabled bool) Option {
 // binding a random _mpp_nonce into its opaque metadata, so identical charges
 // never share a Challenge ID. Enable it only after every replica verifies
 // nonce-bearing Challenges; verification accepts Challenges with and without
-// a nonce either way. A ChargeParams.EnableChallengeNonce of true still
-// enables it for that call.
+// a nonce either way.
 func WithChallengeNonce(enabled bool) Option {
 	return func(m *Mpp) {
 		m.challengeNonce = enabled
@@ -328,13 +327,6 @@ func (m *Mpp) VerifyCredential(ctx context.Context, credential *mpp.Credential) 
 // the framework adapters set them from the HTTP request; set them yourself
 // only when calling Charge for another transport.
 type ChargeParams struct {
-	// EnableChallengeNonce opts into unique issuance after every replica has
-	// nonce-aware verification. Leave false during the initial rolling upgrade.
-	// True enables it for this call even when the handler's default is off.
-	//
-	// Deprecated: Use WithChallengeNonce instead, which sets it for every
-	// Challenge the handler issues.
-	EnableChallengeNonce bool
 	// Authorization is the incoming Authorization header value. ChargeRequest
 	// sets it from the request.
 	Authorization string
@@ -572,7 +564,7 @@ func (m *Mpp) charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
 	selected := selectChargeOffer(authorization, requests)
 	verifyParams := VerifyParams{
-		EnableChallengeNonce: params.EnableChallengeNonce || m.challengeNonce,
+		EnableChallengeNonce: m.challengeNonce,
 		Authorization:        authorization,
 		Intent:               intent,
 		Request:              requests[selected],

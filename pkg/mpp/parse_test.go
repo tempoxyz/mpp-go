@@ -14,7 +14,7 @@ import (
 func TestSplitAuthenticate(t *testing.T) {
 	t.Parallel()
 
-	payment := NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).ToAuthenticate("realm")
+	payment := newChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "100"}).toAuthenticate("realm")
 
 	tests := []struct {
 		name   string
@@ -48,16 +48,16 @@ func TestSplitAuthenticate(t *testing.T) {
 		},
 		{
 			name: "multiple payment challenges stay separate",
-			header: payment + `, ` + NewChallenge(
+			header: payment + `, ` + newChallenge(
 				"secret",
 				"realm",
 				"stripe",
 				"charge",
 				map[string]any{"amount": "200"},
-			).ToAuthenticate("realm"),
+			).toAuthenticate("realm"),
 			want: []string{
 				payment,
-				NewChallenge("secret", "realm", "stripe", "charge", map[string]any{"amount": "200"}).ToAuthenticate("realm"),
+				newChallenge("secret", "realm", "stripe", "charge", map[string]any{"amount": "200"}).toAuthenticate("realm"),
 			},
 		},
 		{
@@ -194,7 +194,7 @@ func TestIsMethodName(t *testing.T) {
 func TestFormatAuthenticateStrict(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret",
 		"api.example.com",
 		"tempo",
@@ -203,16 +203,16 @@ func TestFormatAuthenticateStrict(t *testing.T) {
 		WithDescription(`Pay "premium" path C:\tempo\api`),
 	)
 
-	got, err := challenge.ToAuthenticateStrict("api.example.com")
+	got, err := challenge.toAuthenticateStrict("api.example.com")
 	require.NoError(t, err)
-	assert.Equal(t, challenge.ToAuthenticate("api.example.com"), got)
+	assert.Equal(t, challenge.toAuthenticate("api.example.com"), got)
 	assert.Contains(t, got, `description="Pay \"premium\" path C:\\tempo\\api"`)
 }
 
 func TestFormatAuthenticateEscapesUnicodeAsUTF16(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret",
 		"api.example.com",
 		"tempo",
@@ -221,7 +221,7 @@ func TestFormatAuthenticateEscapesUnicodeAsUTF16(t *testing.T) {
 		WithDescription("Payment — coffee ☕ 😀"),
 	)
 
-	header, err := challenge.ToAuthenticateStrict("api.example.com")
+	header, err := challenge.toAuthenticateStrict("api.example.com")
 	require.NoError(t, err)
 	assert.Contains(t, header, `description="Payment \u2014 coffee \u2615 \ud83d\ude00"`)
 
@@ -234,7 +234,7 @@ func TestFormatAuthenticatePreservesRawLatin1Bytes(t *testing.T) {
 	t.Parallel()
 
 	description := string([]byte{'c', 'a', 'f', 0xe9})
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret",
 		"api.example.com",
 		"tempo",
@@ -243,7 +243,7 @@ func TestFormatAuthenticatePreservesRawLatin1Bytes(t *testing.T) {
 		WithDescription(description),
 	)
 
-	header, err := challenge.ToAuthenticateStrict("api.example.com")
+	header, err := challenge.toAuthenticateStrict("api.example.com")
 	require.NoError(t, err)
 	assert.Contains(t, header, `description="`+description+`"`)
 
@@ -255,7 +255,7 @@ func TestFormatAuthenticatePreservesRawLatin1Bytes(t *testing.T) {
 func TestFormatAuthenticateRejectsExpandedHeaderAboveLimit(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret",
 		"api.example.com",
 		"tempo",
@@ -264,10 +264,10 @@ func TestFormatAuthenticateRejectsExpandedHeaderAboveLimit(t *testing.T) {
 		WithDescription(strings.Repeat("😀", 1400)),
 	)
 
-	header, err := challenge.ToAuthenticateStrict("api.example.com")
+	header, err := challenge.toAuthenticateStrict("api.example.com")
 	require.ErrorContains(t, err, "exceeds maximum size")
 	assert.Empty(t, header)
-	assert.Empty(t, challenge.ToAuthenticate("api.example.com"))
+	assert.Empty(t, challenge.toAuthenticate("api.example.com"))
 }
 
 func TestParseChallengeDecodesUnicodeEscapes(t *testing.T) {
@@ -309,10 +309,10 @@ func TestFormatAuthenticateStrictRejectsLossyJCSRequest(t *testing.T) {
 		Intent:  "charge",
 		Request: map[string]any{"amount": json.Number("1234567890123456789")},
 	}
-	_, err := challenge.ToAuthenticateStrict("api.example.com")
+	_, err := challenge.toAuthenticateStrict("api.example.com")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid challenge request")
-	assert.Empty(t, challenge.ToAuthenticate("api.example.com"))
+	assert.Empty(t, challenge.toAuthenticate("api.example.com"))
 }
 
 func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
@@ -350,7 +350,7 @@ func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			challenge := NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+			challenge := newChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
 			if tt.mutate != nil {
 				tt.mutate(challenge)
 			}
@@ -359,8 +359,8 @@ func TestFormatAuthenticateStrictRejectsCRLF(t *testing.T) {
 				realm = tt.realm
 			}
 
-			got, err := challenge.ToAuthenticateStrict(realm)
-			require.Error(t, err, "ToAuthenticateStrict() = %q", got)
+			got, err := challenge.toAuthenticateStrict(realm)
+			require.Error(t, err, "toAuthenticateStrict() = %q", got)
 			assert.Contains(t, err.Error(), tt.wantErr)
 			assert.Contains(t, err.Error(), "CR or LF")
 		})
@@ -401,7 +401,7 @@ func TestFormatAuthenticateStrictRejectsEmptyRequiredAuthParams(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			challenge := NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+			challenge := newChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
 			realm := "api.example.com"
 			if tt.mutate != nil {
 				tt.mutate(challenge)
@@ -409,8 +409,8 @@ func TestFormatAuthenticateStrictRejectsEmptyRequiredAuthParams(t *testing.T) {
 				realm = ""
 			}
 
-			got, err := challenge.ToAuthenticateStrict(realm)
-			require.Error(t, err, "ToAuthenticateStrict() = %q", got)
+			got, err := challenge.toAuthenticateStrict(realm)
+			require.Error(t, err, "toAuthenticateStrict() = %q", got)
 			assert.EqualError(t, err, tt.wantErr)
 			assert.Empty(t, got)
 		})
@@ -425,7 +425,7 @@ func TestFormatAuthenticateAlwaysEncodesRequest(t *testing.T) {
 	// the required-field guard on "request" cannot be reached by accident.
 	challenge := &Challenge{ID: "ch_1", Method: "tempo", Intent: "charge"}
 
-	got, err := challenge.ToAuthenticateStrict("api.example.com")
+	got, err := challenge.toAuthenticateStrict("api.example.com")
 	require.NoError(t, err)
 	assert.Contains(t, got, `request="e30"`)
 }
@@ -465,7 +465,7 @@ func TestFormatAuthenticateStrictDropsEmptyOptionalAuthParams(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			challenge := NewChallenge("secret", "api.example.com", "tempo", "charge",
+			challenge := newChallenge("secret", "api.example.com", "tempo", "charge",
 				map[string]any{"amount": "100"},
 				WithDigest("sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE="),
 				WithExpires("2026-01-29T12:05:00Z"),
@@ -474,7 +474,7 @@ func TestFormatAuthenticateStrictDropsEmptyOptionalAuthParams(t *testing.T) {
 			)
 			tt.mutate(challenge)
 
-			got, err := challenge.ToAuthenticateStrict("api.example.com")
+			got, err := challenge.toAuthenticateStrict("api.example.com")
 			require.NoError(t, err)
 			assert.NotContains(t, got, tt.absent)
 
@@ -491,10 +491,10 @@ func TestFormatAuthenticateLenientKeepsDroppingEmptyAuthParams(t *testing.T) {
 
 	// The lenient formatter returns only a string, so callers cannot observe an
 	// error. Its behavior must stay unchanged: empty auth-params are dropped.
-	challenge := NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+	challenge := newChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
 	challenge.ID = ""
 
-	got := challenge.ToAuthenticate("")
+	got := challenge.toAuthenticate("")
 
 	assert.Equal(t, `Payment method="tempo", intent="charge", request="eyJhbW91bnQiOiIxMDAifQ"`, got)
 	assert.NotContains(t, got, "id=")
@@ -504,11 +504,11 @@ func TestFormatAuthenticateLenientKeepsDroppingEmptyAuthParams(t *testing.T) {
 func TestFormatAuthenticateStripsCRLF(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge("secret", "api.example.com", "tempo", "charge",
+	challenge := newChallenge("secret", "api.example.com", "tempo", "charge",
 		map[string]any{"amount": "100"},
 		WithDescription("Line one\r\nX-Injected: pwned"))
 
-	got := challenge.ToAuthenticate("api.example.com")
+	got := challenge.toAuthenticate("api.example.com")
 
 	// The non-strict formatter must never emit CR or LF; otherwise the value
 	// could split the HTTP response when written to a header.
@@ -525,9 +525,9 @@ func TestFormatAuthenticateStripsCRLF(t *testing.T) {
 func TestParseChallenge(t *testing.T) {
 	t.Parallel()
 
-	minimal := NewChallenge("secret", "api.example.com", "tempo", "charge", nil)
+	minimal := newChallenge("secret", "api.example.com", "tempo", "charge", nil)
 	minimal.Request = map[string]any{}
-	optional := NewChallenge(
+	optional := newChallenge(
 		"secret",
 		"api.example.com",
 		"tempo",
@@ -548,12 +548,12 @@ func TestParseChallenge(t *testing.T) {
 	}{
 		{
 			name:   "roundtrip with empty request",
-			header: minimal.ToAuthenticate("api.example.com"),
+			header: minimal.toAuthenticate("api.example.com"),
 			want:   minimal,
 		},
 		{
 			name:   "roundtrip with optional fields",
-			header: optional.ToAuthenticate("api.example.com"),
+			header: optional.toAuthenticate("api.example.com"),
 			want:   optional,
 		},
 		{
@@ -649,9 +649,9 @@ func TestParseChallenge(t *testing.T) {
 		},
 		{
 			name: "omits default authorization header",
-			header: NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{}, WithHeader(HeaderAuthorization)).
-				ToAuthenticate("api.example.com"),
-			want: NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{}),
+			header: newChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{}, WithHeader(HeaderAuthorization)).
+				toAuthenticate("api.example.com"),
+			want: newChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{}),
 		},
 		{
 			name:    "header too large",
@@ -732,22 +732,22 @@ func TestParseCredential(t *testing.T) {
 	}{
 		{
 			name:   "roundtrip payment credential",
-			header: credential.ToAuthorization(),
+			header: credential.toAuthorization(),
 			want:   credential,
 		},
 		{
 			name:   "roundtrip preserves credential header",
-			header: headerCredential.ToAuthorization(),
+			header: headerCredential.toAuthorization(),
 			want:   headerCredential,
 		},
 		{
 			name:   "merged authorization header",
-			header: `Digest realm="alpha,beta", nonce="123", ` + credential.ToAuthorization(),
+			header: `Digest realm="alpha,beta", nonce="123", ` + credential.toAuthorization(),
 			want:   credential,
 		},
 		{
 			name:    "multiple payment credentials",
-			header:  credential.ToAuthorization() + ", " + credential.ToAuthorization(),
+			header:  credential.toAuthorization() + ", " + credential.toAuthorization(),
 			wantErr: `multiple Payment credentials`,
 		},
 		{
@@ -931,9 +931,9 @@ func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
 		9007199254740991,
 	} {
 		request := map[string]any{"amount": amount, "asset": "usdc"}
-		issued := NewChallenge(secret, realm, "tempo", "charge", request)
+		issued := newChallenge(secret, realm, "tempo", "charge", request)
 
-		parsed, err := ParseChallenge(issued.ToAuthenticate(realm))
+		parsed, err := ParseChallenge(issued.toAuthenticate(realm))
 		require.NoError(t, err)
 		assert.True(t, parsed.verify(secret, realm),
 			"challenge for amount %d was issued by this server and must verify", amount)

@@ -91,14 +91,14 @@ func TestIssuedChallengeWithMetaVerifiesAfterWireRoundTrip(t *testing.T) {
 		realm  = "api"
 	)
 	meta := map[string]string{"z": "last", "a": "first"}
-	issued := NewChallenge(secret, realm, "tempo", "charge", map[string]any{"amount": "1"}, WithMeta(meta))
+	issued := newChallenge(secret, realm, "tempo", "charge", map[string]any{"amount": "1"}, WithMeta(meta))
 
-	formatted := issued.ToAuthenticate(realm)
+	formatted := issued.toAuthenticate(realm)
 	assert.Contains(t, formatted, `opaque="`+canonicalOpaque(t, meta)+`"`)
 
 	parsed, err := ParseChallenge(formatted)
 	require.NoError(t, err)
-	assert.Equal(t, formatted, parsed.ToAuthenticate(realm))
+	assert.Equal(t, formatted, parsed.toAuthenticate(realm))
 	assert.True(t, parsed.verify(secret, realm))
 }
 

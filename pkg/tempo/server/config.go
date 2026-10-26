@@ -14,17 +14,12 @@ type Config struct {
 	// builds one from the verification fields below. It cannot be combined
 	// with Relay.
 	Intent *Intent
-	// Currency restricts issued challenges to exactly this token contract
-	// address. It cannot be combined with Currencies.
-	//
-	// Deprecated: Use Currencies with a single element.
-	Currency string
 	// Currencies lists the accepted token contract addresses in presentation
 	// order. The server issues one charge Challenge per currency, and a
 	// Credential for any of them verifies. An explicit list replaces the chain
 	// defaults from tempo.DefaultCurrenciesForChain; it must contain at least
 	// one valid 0x-prefixed address, and case-insensitive duplicates are
-	// dropped. It cannot be combined with Currency.
+	// dropped.
 	Currencies []string
 	// Recipient is the default payee address for issued challenges.
 	Recipient string
@@ -72,7 +67,7 @@ type Config struct {
 // Relay), an invalid currency or fee-payer configuration, or Intent combined
 // with Relay.
 //
-// Without Currency or Currencies, the method accepts
+// Without Currencies, the method accepts
 // tempo.DefaultCurrenciesForChain for the configured chain, or for the chain
 // inferred from RPCURL when ChainID is zero. With no custom RPC, it defaults
 // to mainnet.
@@ -80,12 +75,11 @@ func New(config Config) (*Method, error) {
 	if config.Intent != nil && config.Relay != nil {
 		return nil, fmt.Errorf("tempo server: Config.Intent cannot be combined with Relay; the relay verifies credentials")
 	}
-	if _, err := resolveCurrencies(config.Currency, config.Currencies, config.ChainID); err != nil {
+	if _, err := resolveCurrencies(config.Currencies, config.ChainID); err != nil {
 		return nil, err
 	}
 	methodConfig := methodConfig{
 		Intent:         config.Intent,
-		Currency:       config.Currency,
 		Currencies:     config.Currencies,
 		Recipient:      config.Recipient,
 		Decimals:       config.Decimals,
@@ -133,12 +127,4 @@ func New(config Config) (*Method, error) {
 		return nil, fmt.Errorf("tempo server: a replay Store is required")
 	}
 	return newMethod(methodConfig), nil
-}
-
-// MethodFromConfig constructs a Tempo charge method from one config struct.
-// It returns an error when the configuration is invalid.
-//
-// Deprecated: Use New instead.
-func MethodFromConfig(config Config) (*Method, error) {
-	return New(config)
 }

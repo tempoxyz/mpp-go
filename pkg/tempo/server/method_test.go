@@ -60,7 +60,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		{
 			name: "includes external id and fee payer url",
 			config: methodConfig{Intent: testStoredIntent(),
-				Currency:    "0x20c0000000000000000000000000000000000001",
+				Currencies:  []string{"0x20c0000000000000000000000000000000000001"},
 				Recipient:   "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 				ChainID:     42431,
 				FeePayer:    true,
@@ -91,7 +91,7 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		{
 			name: "includes splits and request modes",
 			config: methodConfig{Intent: testStoredIntent(),
-				Currency:       "0x20c0000000000000000000000000000000000001",
+				Currencies:     []string{"0x20c0000000000000000000000000000000000001"},
 				Recipient:      "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 				ChainID:        42431,
 				SupportedModes: []tempo.ChargeMode{tempo.ChargeModePull},
@@ -127,9 +127,9 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 		{
 			name: "preserves push mode",
 			config: methodConfig{Intent: testStoredIntent(),
-				Currency:  "0x20c0000000000000000000000000000000000001",
-				Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-				ChainID:   42431,
+				Currencies: []string{"0x20c0000000000000000000000000000000000001"},
+				Recipient:  "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+				ChainID:    42431,
 			},
 			params: mppserver.ChargeParams{
 				Amount:         "0.50",

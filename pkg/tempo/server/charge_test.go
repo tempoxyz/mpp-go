@@ -706,11 +706,11 @@ func TestChargeHTTPFlow_KeychainFeePayerSigningForm(t *testing.T) {
 				t.Fatalf("NewIntent() error = %v", err)
 			}
 			method := newMethod(methodConfig{
-				Intent:    intent,
-				Currency:  testCurrency,
-				Recipient: testRecipient,
-				ChainID:   42431,
-				FeePayer:  true,
+				Intent:     intent,
+				Currencies: []string{testCurrency},
+				Recipient:  testRecipient,
+				ChainID:    42431,
+				FeePayer:   true,
 			})
 			payment, err := server.New(method, testRealm, "test-secret-key-at-least-32-bytes")
 			if err != nil {
@@ -1271,10 +1271,10 @@ func TestChargeFlow_HashCredentialRejectsReplayWithAlternateSpelling(t *testing.
 func TestChargeFlow_HashCredentialAcceptsAttributionMemo(t *testing.T) {
 	ctx := context.Background()
 	method := newMethod(methodConfig{Intent: testStoredIntent(),
-		Currency:  testCurrency,
-		Recipient: testRecipient,
-		Decimals:  6,
-		ChainID:   42431,
+		Currencies: []string{testCurrency},
+		Recipient:  testRecipient,
+		Decimals:   6,
+		ChainID:    42431,
 	})
 	requestMap, err := method.BuildChargeRequest(server.ChargeParams{
 		Amount:         "0.50",
@@ -1853,7 +1853,7 @@ func TestChargeFlow_FeePayerHonorsLegacyReservation(t *testing.T) {
 	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, challenge)
 	require.NoError(t, err)
 	store := tempo.NewMemoryStore()
-	require.NoError(t, store.Put(ctx, tempo.ChargeSponsoredChallengeStoreKey(challenge.ID), challenge.ID))
+	require.NoError(t, store.Put(ctx, legacySponsoredChallengeStoreKey(challenge.ID), challenge.ID))
 	intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store, FeePayerPrivateKey: feePayerKey})
 	require.NoError(t, err)
 	_, err = intent.Verify(ctx, credential, request.Map())

@@ -18,7 +18,6 @@ import (
 // each field.
 type methodConfig struct {
 	Intent         *Intent
-	Currency       string
 	Currencies     []string
 	Recipient      string
 	Decimals       int
@@ -61,7 +60,7 @@ func newMethod(config methodConfig) *Method {
 			chainID = tempotx.ChainIdMainnet
 		}
 	}
-	currencies, err := resolveCurrencies(config.Currency, config.Currencies, chainID)
+	currencies, err := resolveCurrencies(config.Currencies, chainID)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -200,16 +199,10 @@ func resolvedModes(requestModes, defaultModes []tempo.ChargeMode) []tempo.Charge
 	return append([]tempo.ChargeMode(nil), defaultModes...)
 }
 
-// resolveCurrencies returns the ordered accepted currencies for a method. The
-// legacy single Currency is kept verbatim; an explicit Currencies list is
-// validated and deduplicated case-insensitively; otherwise chain defaults apply.
-func resolveCurrencies(currency string, currencies []string, chainID int64) ([]string, error) {
-	if currency != "" && currencies != nil {
-		return nil, fmt.Errorf("tempo server: specify either Currency or Currencies, not both")
-	}
-	if currency != "" {
-		return []string{currency}, nil
-	}
+// resolveCurrencies returns the ordered accepted currencies for a method. An
+// explicit Currencies list is validated and deduplicated case-insensitively;
+// otherwise chain defaults apply.
+func resolveCurrencies(currencies []string, chainID int64) ([]string, error) {
 	if currencies == nil {
 		return tempo.DefaultCurrenciesForChain(chainID), nil
 	}

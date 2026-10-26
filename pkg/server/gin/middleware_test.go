@@ -97,7 +97,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 
 	receipt, err := mpp.ParseReceipt(paidResponse.Header().Get("Payment-Receipt"))
 	if !assert.NoErrorf(t, err,
-		"ParsePaymentReceipt() error = %v", err) {
+		"ParseReceipt() error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "0xreceipt", receipt.Reference,

@@ -431,7 +431,7 @@ func b64EncodeRequestWithError(request map[string]any) (string, error) {
 }
 
 func escapeQuoted(value string) string {
-	// Strip CR and LF unconditionally so the non-strict Challenge.ToAuthenticate
+	// Strip CR and LF unconditionally so the non-strict formatAuthenticate
 	// can never emit a header value that splits the HTTP response. FormatChallenge
 	// rejects such values earlier with an error; this keeps the default path safe too.
 	var builder strings.Builder
@@ -668,20 +668,6 @@ func formatAuthorization(c *Credential) (string, error) {
 	return SchemePayment + " " + base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
-// FormatAuthorizationStrict formats a credential and enforces the wire size limit.
-//
-// Deprecated: Use FormatCredential instead.
-func FormatAuthorizationStrict(c *Credential) (string, error) {
-	return FormatCredential(c)
-}
-
-// ParsePaymentReceipt parses a Payment-Receipt header value into a Receipt.
-//
-// Deprecated: Use ParseReceipt instead.
-func ParsePaymentReceipt(header string) (*Receipt, error) {
-	return ParseReceipt(header)
-}
-
 // ParseReceipt parses a Payment-Receipt header value into a Receipt. It
 // requires status "success", reference, method and an RFC 3339 timestamp, and
 // keeps method-defined top-level fields in Receipt.Extensions.
@@ -753,20 +739,13 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 		fundingCurrency = anyStr(v)
 	}
 
-	var extra map[string]any
-	if v, ok := data["extra"]; ok {
-		if m, ok := v.(map[string]any); ok {
-			extra = m
-		}
-	}
-
 	// Preserve method-defined top-level extension fields. Payment method
 	// specifications MAY define additional receipt fields (draft-ietf-httpauth-payment
 	// §5.3); the canonical mppx schema keeps them across a parse/format round trip
 	// rather than dropping them. Everything outside the known base keys is retained.
 	var extensions map[string]any
 	for k, v := range data {
-		if _, known := receiptBaseFields[k]; known {
+		if _, known := receiptBaseFields[k]; known || isEmptyReceiptExtra(k, v) {
 			continue
 		}
 		if extensions == nil {
@@ -783,7 +762,6 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 		ExternalID:      externalID,
 		SubscriptionID:  subscriptionID,
 		FundingCurrency: fundingCurrency,
-		Extra:           extra,
 		Extensions:      extensions,
 	}, nil
 }
@@ -802,7 +780,30 @@ var receiptBaseFields = map[string]struct{}{
 	"method":         {},
 	"externalId":     {},
 	"subscriptionId": {},
-	"extra":          {},
+}
+
+// isEmptyReceiptExtra reports whether a top-level receipt field is an empty
+// "extra" object, which receipts drop rather than keep as an extension.
+// Emptiness is decided by JSON shape, so any value that encodes as {} (such as
+// map[string]string{}, a named map type or json.RawMessage("{}")) is dropped
+// when formatting, as ParseReceipt drops it, keeping parse/format stable.
+func isEmptyReceiptExtra(key string, value any) bool {
+	if key != "extra" {
+		return false
+	}
+	if m, ok := value.(map[string]any); ok {
+		return len(m) == 0
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		// Left in place so encoding reports the error.
+		return false
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, encoded); err != nil {
+		return false
+	}
+	return compact.String() == "{}"
 }
 
 // FormatReceiptWithError formats r as a Payment-Receipt header value, the
@@ -860,14 +861,11 @@ func receiptFields(r *Receipt) map[string]any {
 	if r.FundingCurrency != "" {
 		data["fundingCurrency"] = r.FundingCurrency
 	}
-	if len(r.Extra) > 0 {
-		data["extra"] = r.Extra
-	}
 	// Re-emit method-defined extension fields at the top level, matching the
 	// canonical wire shape. Base fields always win, so reserved keys are never
 	// overwritten by an Extensions entry.
 	for k, v := range r.Extensions {
-		if _, reserved := receiptBaseFields[k]; reserved {
+		if _, reserved := receiptBaseFields[k]; reserved || isEmptyReceiptExtra(k, v) {
 			continue
 		}
 		if _, set := data[k]; set {

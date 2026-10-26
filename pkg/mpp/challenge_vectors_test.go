@@ -149,9 +149,9 @@ func TestGenerateChallengeIDCrossSDKCompatibilityVectors(t *testing.T) {
 			t.Parallel()
 			{
 
-				got := GenerateChallengeID(tt.in)
+				got := mustChallengeID(tt.in)
 				if !assert.Equalf(t, tt.want, got,
-					"GenerateChallengeID() = %q, want %q", got, tt.want) {
+					"mustChallengeID() = %q, want %q", got, tt.want) {
 					return
 				}
 			}
@@ -279,9 +279,9 @@ func TestGenerateChallengeIDGoldenVectors(t *testing.T) {
 			t.Parallel()
 			{
 
-				got := GenerateChallengeID(tt.in)
+				got := mustChallengeID(tt.in)
 				if !assert.Equalf(t, tt.want, got,
-					"GenerateChallengeID() = %q, want %q", got, tt.want) {
+					"mustChallengeID() = %q, want %q", got, tt.want) {
 					return
 				}
 			}
@@ -331,9 +331,9 @@ func TestGenerateChallengeIDOpaqueGoldenVectors(t *testing.T) {
 			t.Parallel()
 			{
 
-				got := GenerateChallengeID(tt.in)
+				got := mustChallengeID(tt.in)
 				if !assert.Equalf(t, tt.want, got,
-					"GenerateChallengeID() = %q, want %q", got, tt.want) {
+					"mustChallengeID() = %q, want %q", got, tt.want) {
 					return
 				}
 			}
@@ -345,7 +345,7 @@ func TestGenerateChallengeIDOpaqueGoldenVectors(t *testing.T) {
 func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"test-vector-secret",
 		"api.example.com",
 		"tempo",
@@ -354,7 +354,7 @@ func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 		WithMeta(map[string]string{}),
 	)
 
-	header := challenge.ToAuthenticate("api.example.com")
+	header := challenge.toAuthenticate("api.example.com")
 	if !assert.Containsf(t, header, `opaque="`,
 		"challenge header = %q, want opaque field", header) {
 		return
@@ -370,7 +370,7 @@ func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 		return
 	}
 
-	if got := GenerateChallengeID(GenerateChallengeIDInput{
+	if got := mustChallengeID(GenerateChallengeIDInput{
 		SecretKey: "test-vector-secret",
 		Realm:     "api.example.com",
 		Method:    "tempo",
@@ -378,12 +378,12 @@ func TestEmptyOpaquePreservedOnWire(t *testing.T) {
 		Request:   map[string]any{"amount": "1000000"},
 		Opaque:    parsed.Opaque,
 	}); got != challenge.ID {
-		assert.Failf(t, "", "GenerateChallengeID(parsed opaque) = %q, want %q", got, challenge.ID)
+		assert.Failf(t, "", "mustChallengeID(parsed opaque) = %q, want %q", got, challenge.ID)
 		return
 	}
 
 	credential := &Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": "0xabc123"}}
-	authorization := credential.ToAuthorization()
+	authorization := credential.toAuthorization()
 	if !assert.Containsf(t, authorization, "ey",
 		"credential authorization = %q, want base64 payload", authorization) {
 		return

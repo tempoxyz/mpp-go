@@ -37,4 +37,4 @@ Remove the deprecated APIs that the canonical core, client, Tempo and server API
 
 The realm written by the removed realm-taking writers is now always the Challenge's own `Realm`, which its ID binds. Without the removed realm pins, a zero-amount `tempo/charge` proof is paid only when the Tempo method's `OriginValidator` (its `Config.TrustedProofRealms`) accepts it, or, for methods without one, when the request origin owns the realm.
 
-Still deprecated but kept, because the mpp-tools conformance adapter or the README uses them: `mpp.NewChallenge`, `mpp.GenerateChallengeID`, `mpp.ParsePaymentReceipt`, `mpp.FormatAuthorizationStrict`, `(*Challenge).ToAuthenticate`, `(*Challenge).ToAuthenticateStrict`, `(*Credential).ToAuthorization`, `Receipt.Extra`, `server.ChargeParams.EnableChallengeNonce`, `tempo/server.MethodFromConfig` and `tempo/server.Config.Currency`. `tempo.ChargeSponsoredChallengeStoreKey` stays because verification still checks that legacy reservation key.
+The deprecated APIs this release still kept are removed as well; see `remove-remaining-deprecated-apis.md`.
