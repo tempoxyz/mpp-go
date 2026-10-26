@@ -332,8 +332,10 @@ func TestClient_Do_KeepsUnknownOutcomeOnClientTimeout(t *testing.T) {
 	assert.Same(t, cred, unknown.Credential)
 	var urlErr *url.Error
 	require.ErrorAs(t, err, &urlErr)
+	// Whether net/http replaces the error with its own "Client.Timeout
+	// exceeded" text depends on which deadline fires first; either way the
+	// error must stay a PaymentOutcomeUnknownError that reports a timeout.
 	assert.True(t, urlErr.Timeout())
-	assert.Contains(t, err.Error(), "Client.Timeout exceeded")
 }
 
 func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T) {
