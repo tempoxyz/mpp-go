@@ -19,6 +19,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
+	"github.com/tempoxyz/mpp-go/tests/tempotest"
 )
 
 // redisImage is the Redis server the replay-protection test runs against,
@@ -114,7 +115,7 @@ func startRedisContainer(t *testing.T) testcontainers.Container {
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:              redisImage,
 			ExposedPorts:       []string{"6379/tcp"},
-			HostConfigModifier: bindLoopback("6379/tcp"),
+			HostConfigModifier: tempotest.BindLoopback("6379/tcp"),
 			WaitingFor:         wait.ForListeningPort("6379/tcp").WithStartupTimeout(time.Minute),
 		},
 		Started: true,

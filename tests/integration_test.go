@@ -26,6 +26,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/internal/localnet"
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -42,11 +43,10 @@ const (
 	// integrationCurrency is the fixed TIP-20 token used in the local devnet tests.
 	integrationCurrency = "0x20c0000000000000000000000000000000000000"
 	// integrationRecipient is the account that receives paid transfers during tests.
-	integrationRecipient     = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
-	receiptPollingTimeout    = 45 * time.Second
-	receiptPollingInterval   = 500 * time.Millisecond
-	rpcReadinessTimeout      = 45 * time.Second
-	rpcReadinessPollInterval = 500 * time.Millisecond
+	integrationRecipient   = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+	receiptPollingTimeout  = 45 * time.Second
+	receiptPollingInterval = 500 * time.Millisecond
+	rpcReadinessTimeout    = 45 * time.Second
 )
 
 var integrationFundingAmount = big.NewInt(100_000_000_000)
@@ -770,16 +770,11 @@ func integrationRPCURL(t *testing.T) string {
 func waitForRPC(t *testing.T, ctx context.Context, rpc tempo.RPCClient) uint64 {
 	t.Helper()
 
-	deadline := time.Now().Add(rpcReadinessTimeout)
-	for time.Now().Before(deadline) {
-		chainID, err := rpc.GetChainID(ctx)
-		if err == nil && chainID != 0 {
-			return chainID
-		}
-		time.Sleep(rpcReadinessPollInterval)
-	}
-	require.Failf(t, "", "Tempo RPC at %s did not become ready before timeout; start the local devnet with `docker compose up -d` in mpp-go or set TEMPO_RPC_URL", integrationRPCURL(t))
-	return *new(uint64)
+	ctx, cancel := context.WithTimeout(ctx, rpcReadinessTimeout)
+	defer cancel()
+	chainID, err := localnet.WaitReady(ctx, rpc)
+	require.NoError(t, err, "Tempo RPC at %s did not become ready; start the local devnet with `docker compose up -d` in mpp-go or set TEMPO_RPC_URL", integrationRPCURL(t))
+	return chainID
 }
 
 func fundAddress(t *testing.T, ctx context.Context, rpc tempo.RPCClient, address common.Address) {

@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+
+	"github.com/tempoxyz/mpp-go/internal/localnet"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
 const (
@@ -23,10 +25,9 @@ const (
 	Recipient          = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
 	Realm              = "api.example.com"
 
-	rpcReadinessTimeout    = 30 * time.Second
-	rpcReadinessPollPeriod = 500 * time.Millisecond
-	receiptWaitTimeout     = 30 * time.Second
-	receiptWaitPollPeriod  = 500 * time.Millisecond
+	rpcReadinessTimeout   = 30 * time.Second
+	receiptWaitTimeout    = 30 * time.Second
+	receiptWaitPollPeriod = 500 * time.Millisecond
 )
 
 // TODO(tempo-go): move these local-devnet readiness and faucet helpers into a
@@ -40,28 +41,18 @@ func RPCURL() string {
 	return defaultRPCURL
 }
 
-// WaitForRPC polls the node until it reports a chain ID, ctx ends, or the
-// readiness timeout passes, and returns the chain ID.
+// WaitForRPC waits until the node reports a chain ID and builds blocks at the
+// current time, ctx ends, or the readiness timeout passes, and returns the chain
+// ID. A fresh localnet answers eth_chainId while its latest block is still
+// genesis (timestamp 0), and the faucet's transactions fail until it is not.
 func WaitForRPC(ctx context.Context, rpc tempo.RPCClient) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcReadinessTimeout)
 	defer cancel()
-	ticker := time.NewTicker(rpcReadinessPollPeriod)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		chainID, err := rpc.GetChainID(ctx)
-		if err == nil && chainID != 0 {
-			return int64(chainID), nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			return 0, fmt.Errorf("tempo rpc at %s did not become ready; start the local devnet with `docker compose up -d` or set TEMPO_RPC_URL: %w", RPCURL(), lastErrOr(lastErr, ctx.Err()))
-		case <-ticker.C:
-		}
+	chainID, err := localnet.WaitReady(ctx, rpc)
+	if err != nil {
+		return 0, fmt.Errorf("tempo rpc at %s did not become ready; start the local devnet with `docker compose up -d` or set TEMPO_RPC_URL: %w", RPCURL(), err)
 	}
+	return int64(chainID), nil
 }
 
 // FundAddress funds address from the devnet faucet and waits for the funding

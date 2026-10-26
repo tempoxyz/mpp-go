@@ -287,10 +287,18 @@ cd tests && go test -race -tags integration ./...                    # Docker on
 TEMPO_RPC_URL=http://localhost:8545 go test -tags integration ./...  # running node (compose, Moderato)
 ```
 
-- Without `TEMPO_RPC_URL`, `TestMain` starts the image and command of the
-  `tempo-node` service in `docker-compose.yml` (the single source of truth for
-  the pinned image; `TEMPO_LOCALNET_IMAGE` overrides it) and terminates it at
-  the end. It funds one shared payer once; tests using it run sequentially.
+- Without `TEMPO_RPC_URL`, `TestMain` starts the base Tempo test container,
+  `tests/tempotest` (`Start`, or `Run(tb)` in one test): the image and command
+  of the `tempo-node` service in `docker-compose.yml` (the single source of
+  truth for the pinned image; `TEMPO_LOCALNET_IMAGE` overrides it), on a
+  loopback port, terminated at the end. It funds one shared payer once; tests
+  using it run sequentially.
+- Wait for a node with `internal/localnet.WaitReady` (the examples'
+  `devnet.WaitForRPC` and `tempotest.Start` do), not `eth_chainId` alone: a
+  fresh localnet answers RPC while its latest block is genesis, at timestamp 0,
+  and rejects the faucet's and clients' expiring-nonce transactions
+  (`valid_before ... too far in the future`) until it builds a block at the
+  current time. `WaitReady` requires the latest block within 10s of the clock.
 - They cover the HTTP charge flows, each framework adapter (net/http, chi, gin,
   echo, fiber), a paid MCP tool call, `tempo.RedisStore` replay protection
   against a real Redis container, and the examples: `examples/*/smoke_test.go`
