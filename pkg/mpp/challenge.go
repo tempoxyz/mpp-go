@@ -84,19 +84,6 @@ func WithHeader(header string) ChallengeOption {
 	return func(c *challengeConfig) { c.header = AdvertisedCredentialHeader(header) }
 }
 
-// NewChallenge creates a new Challenge with an HMAC-bound ID. The secretKey
-// and realm are used to compute the ID via GenerateChallengeIDWithError. It
-// panics where NewChallengeWithError returns an error.
-//
-// Deprecated: Use NewChallengeWithError instead.
-func NewChallenge(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) *Challenge {
-	challenge, err := NewChallengeWithError(secretKey, realm, method, intent, request, opts...)
-	if err != nil {
-		panic(fmt.Sprintf("mpp: invalid challenge request: %v", err))
-	}
-	return challenge
-}
-
 // NewChallengeWithError creates a new Challenge with an HMAC-bound ID
 // computed from secretKey over realm and the other challenge parameters (see
 // GenerateChallengeIDWithError). It rejects invalid advertised credential
@@ -225,25 +212,6 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		opaqueB64: preservedOpaque,
 	}
 	return nil
-}
-
-// ToAuthenticate formats this Challenge as an authentication header value
-// with the given realm, which the challenge ID does not bind unless it equals
-// c.Realm. It returns an empty string when c cannot be formatted.
-//
-// Deprecated: Use FormatChallenge instead, which writes c.Realm and returns
-// formatting errors.
-func (c *Challenge) ToAuthenticate(realm string) string {
-	header, _ := formatAuthenticate(c, realm, false)
-	return header
-}
-
-// ToAuthenticateStrict formats this Challenge as an authentication header value
-// and rejects values that cannot be safely represented in quoted auth-params.
-//
-// Deprecated: Use FormatChallenge instead, which writes c.Realm.
-func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
-	return formatAuthenticateStrict(c, realm)
 }
 
 // VerifyID reports whether the challenge ID is the HMAC that secretKey binds

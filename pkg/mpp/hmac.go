@@ -22,27 +22,6 @@ type GenerateChallengeIDInput struct {
 	Header    string
 }
 
-// GenerateChallengeID produces an HMAC-SHA256 challenge ID from the given inputs.
-// The HMAC is computed over pipe-delimited fields:
-//
-//	realm|method|intent|request_b64|expires|digest|opaque_b64
-//
-// Challenges that advertise a credential header insert it immediately before
-// the final opaque slot. Authorization is the implicit default and is never
-// included, preserving the legacy binding.
-//
-// The result is base64url-encoded without padding. It panics where
-// GenerateChallengeIDWithError returns an error.
-//
-// Deprecated: Use GenerateChallengeIDWithError instead.
-func GenerateChallengeID(opts GenerateChallengeIDInput) string {
-	id, err := GenerateChallengeIDWithError(opts)
-	if err != nil {
-		panic(fmt.Sprintf("mpp: invalid challenge request: %v", err))
-	}
-	return id
-}
-
 // GenerateChallengeIDWithError produces an HMAC-SHA256 challenge ID from the
 // given inputs and rejects ambiguous fields, invalid advertised credential
 // headers and request values that JCS cannot represent exactly. The HMAC is

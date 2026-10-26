@@ -104,7 +104,7 @@ func TestChallengeWireAndIDUseSameJCSValues(t *testing.T) {
 		"\U00010000": "supplementary",
 		"\ue000":     "private",
 	}
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"test-secret",
 		"api.example.com",
 		"tempo",
@@ -118,7 +118,7 @@ func TestChallengeWireAndIDUseSameJCSValues(t *testing.T) {
 		"5ICqnT2yXt8jNyNF013hXjilUbs6zxFDO4jjYfsRi3w",
 		challenge.ID,
 	)
-	header := challenge.ToAuthenticate(challenge.Realm)
+	header := challenge.toAuthenticate(challenge.Realm)
 	assert.Contains(t, header, `request="`+requestB64+`"`)
 	assert.Contains(t, header, `opaque="`+opaqueB64+`"`)
 	assert.Equal(t, requestB64, challenge.ToEcho().Request)
@@ -128,13 +128,13 @@ func TestChallengeWireAndIDUseSameJCSValues(t *testing.T) {
 		return
 	}
 	assert.True(t, parsed.verify("test-secret", "api.example.com"))
-	assert.Equal(t, header, parsed.ToAuthenticate(parsed.Realm))
+	assert.Equal(t, header, parsed.toAuthenticate(parsed.Realm))
 
 	credential := &Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   map[string]any{"type": "hash"},
 	}
-	parsedCredential, err := ParseCredential(credential.ToAuthorization())
+	parsedCredential, err := ParseCredential(credential.toAuthorization())
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -142,7 +142,7 @@ func TestChallengeWireAndIDUseSameJCSValues(t *testing.T) {
 	if !assert.NoError(t, err) {
 		return
 	}
-	reconstructed := NewChallenge(
+	reconstructed := newChallenge(
 		"test-secret",
 		parsedCredential.Challenge.Realm,
 		parsedCredential.Challenge.Method,

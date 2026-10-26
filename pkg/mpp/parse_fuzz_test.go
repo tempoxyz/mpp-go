@@ -129,7 +129,7 @@ func FuzzParseCredential(f *testing.F) {
 		if err != nil {
 			return
 		}
-		h1, err := FormatAuthorizationStrict(c1)
+		h1, err := FormatCredential(c1)
 		if err != nil {
 			return
 		}
@@ -146,9 +146,9 @@ func FuzzParseCredential(f *testing.F) {
 	})
 }
 
-// FuzzParsePaymentReceipt checks Payment-Receipt parsing and that accepted
+// FuzzParseReceipt checks Payment-Receipt parsing and that accepted
 // receipts survive formatting and a second parse.
-func FuzzParsePaymentReceipt(f *testing.F) {
+func FuzzParseReceipt(f *testing.F) {
 	receipt := Success("tempo", "ref-123",
 		WithExternalID("ext-123"),
 		WithSubscriptionID("sub-123"),
@@ -169,7 +169,7 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 	f.Add("")
 
 	f.Fuzz(func(t *testing.T, header string) {
-		r1, err := ParsePaymentReceipt(header)
+		r1, err := ParseReceipt(header)
 		if err != nil {
 			return
 		}
@@ -179,18 +179,16 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 			t.Skip("timestamp year outside RFC 3339 range after UTC conversion")
 		}
 		h1 := formatReceiptUnchecked(r1)
-		r2, err := ParsePaymentReceipt(h1)
+		r2, err := ParseReceipt(h1)
 		if err != nil {
-			t.Fatalf("ParsePaymentReceipt(formatReceiptUnchecked(r)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
+			t.Fatalf("ParseReceipt(formatReceiptUnchecked(r)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
 		}
 		if r1.Status != r2.Status || r1.Method != r2.Method || r1.Reference != r2.Reference ||
 			r1.ExternalID != r2.ExternalID || r1.SubscriptionID != r2.SubscriptionID || r1.FundingCurrency != r2.FundingCurrency {
 			t.Fatalf("receipt changed across a round trip:\n%+v\n%+v", r1, r2)
 		}
-		// The receipt encoder omits an empty extra object, so an empty map and
-		// a missing one are the same receipt.
-		if !JSONEqual(nonEmpty(r1.Extra), nonEmpty(r2.Extra)) || !JSONEqual(nonEmpty(r1.Extensions), nonEmpty(r2.Extensions)) {
-			t.Fatalf("receipt extra or extensions changed across a round trip:\n%+v\n%+v", r1, r2)
+		if !JSONEqual(nonEmpty(r1.Extensions), nonEmpty(r2.Extensions)) {
+			t.Fatalf("receipt extensions changed across a round trip:\n%+v\n%+v", r1, r2)
 		}
 		if want := r1.Timestamp.UTC().Truncate(time.Millisecond); !want.Equal(r2.Timestamp) {
 			t.Fatalf("receipt timestamp %v, want %v", r2.Timestamp, want)

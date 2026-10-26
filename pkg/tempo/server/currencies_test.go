@@ -163,16 +163,6 @@ func TestNewMethodExplicitCurrencies(t *testing.T) {
 			}},
 			want: []string{ousdAddress, usdceAddress},
 		},
-		{
-			name:   "legacy currency restricts acceptance to one token",
-			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress},
-			want:   []string{usdceAddress},
-		},
-		{
-			name:   "legacy currency is kept verbatim",
-			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currency: strings.ToLower(ousdAddress)},
-			want:   []string{strings.ToLower(ousdAddress)},
-		},
 	}
 
 	for _, tt := range tests {
@@ -202,22 +192,9 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		currency   string
 		currencies []string
 		wantErr    string
 	}{
-		{
-			name:       "currency and currencies together",
-			currency:   usdceAddress,
-			currencies: []string{ousdAddress},
-			wantErr:    "tempo server: specify either Currency or Currencies, not both",
-		},
-		{
-			name:       "currency and empty currencies together",
-			currency:   usdceAddress,
-			currencies: []string{},
-			wantErr:    "tempo server: specify either Currency or Currencies, not both",
-		},
 		{
 			name:       "empty currencies",
 			currencies: []string{},
@@ -249,14 +226,13 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := resolveCurrencies(tt.currency, tt.currencies, tempotx.ChainIdMainnet)
+			_, err := resolveCurrencies(tt.currencies, tempotx.ChainIdMainnet)
 			require.EqualError(t, err, tt.wantErr)
 
 			assert.PanicsWithValue(t, tt.wantErr, func() {
 				newMethod(methodConfig{Intent: testStoredIntent(),
 					ChainID:    tempotx.ChainIdMainnet,
 					Recipient:  testRecipient,
-					Currency:   tt.currency,
 					Currencies: tt.currencies,
 				})
 			})
@@ -264,7 +240,6 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 			method, err := New(Config{Store: tempo.NewMemoryStore(),
 				ChainID:    tempotx.ChainIdMainnet,
 				Recipient:  testRecipient,
-				Currency:   tt.currency,
 				Currencies: tt.currencies,
 			})
 			require.EqualError(t, err, tt.wantErr)
@@ -273,7 +248,7 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 	}
 }
 
-func TestMethodFromConfigCurrencies(t *testing.T) {
+func TestNewCurrencies(t *testing.T) {
 	t.Parallel()
 
 	defaults, err := New(Config{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato, Recipient: testRecipient})
@@ -287,14 +262,6 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{pathUSDAddress}, explicit.currencies)
-
-	legacy, err := New(Config{Store: tempo.NewMemoryStore(),
-		RPCURL:    tempotx.RpcUrlModerato,
-		Recipient: testRecipient,
-		Currency:  testCurrency,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, []string{testCurrency}, legacy.currencies)
 
 	relayed, err := New(Config{Store: tempo.NewMemoryStore(),
 		ChainID:    tempotx.ChainIdMainnet,
@@ -458,32 +425,6 @@ func TestChargeOffers_RejectsCredentialForUnofferedCurrency(t *testing.T) {
 	assert.Equal(t, checksummed(ousdAddress, usdceAddress), challengeCurrencies(result.Challenges))
 	assert.Same(t, result.Challenges[0], result.Challenge)
 	assert.Empty(t, rpc.sentRawTxs)
-}
-
-func TestChargeOffers_LegacyCurrencyRejectsOtherDefaultOffer(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	defaults := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
-	legacy := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress})
-
-	legacyOffers := issueOffers(t, legacy, mppserver.ChargeParams{Amount: "0.50"})
-	require.Equal(t, checksummed(usdceAddress), challengeCurrencies(legacyOffers))
-
-	// A challenge for OUSD signed with the same secret is not accepted by the
-	// USDC.e-only server.
-	ousdOffer := issueOffers(t, defaults, mppserver.ChargeParams{Amount: "0.50"})[0]
-	require.Equal(t, checksummed(ousdAddress), []string{ousdOffer.Request["currency"].(string)})
-	credential := ousdOffer.NewCredential(map[string]any{"type": "hash", "hash": testReceiptHash})
-	_, err := legacy.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(credential)})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "credential request does not match this route's requirements")
-
-	paid := payWithHash(t, rpc, legacyOffers[0])
-	result, err := legacy.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(paid)})
-	require.NoError(t, err)
-	assert.Equal(t, "success", result.Receipt.Status)
 }
 
 func TestChargeOffers_ExplicitCurrenciesRejectDroppedDefault(t *testing.T) {
@@ -676,7 +617,7 @@ func checksummed(values ...string) []string {
 	return out
 }
 
-func TestMethodFromConfigDefaultOffers(t *testing.T) {
+func TestNewDefaultOffers(t *testing.T) {
 	method, err := New(Config{Store: tempo.NewMemoryStore(), Recipient: testRecipient})
 	require.NoError(t, err)
 	assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))

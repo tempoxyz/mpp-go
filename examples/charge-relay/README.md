@@ -34,10 +34,10 @@ credential to `/api/photo`, and prints the relay receipt reference.
 ## Relay configuration
 
 ```go
-method, err := charge.MethodFromConfig(charge.Config{
-	ChainID:   tempotx.ChainIdModerato,
-	Currency:  tempo.DefaultCurrencyForChain(tempotx.ChainIdModerato),
-	Recipient: recipient,
+method, err := charge.New(charge.Config{
+	ChainID:    tempotx.ChainIdModerato,
+	Currencies: []string{tempo.DefaultCurrencyForChain(tempotx.ChainIdModerato)},
+	Recipient:  recipient,
 	Relay: &charge.RelayConfig{
 		APIKey:     os.Getenv("TEMPO_API_KEY"),
 		APIBaseURL: os.Getenv("TEMPO_API_URL"),

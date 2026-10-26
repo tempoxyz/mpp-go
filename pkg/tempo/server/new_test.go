@@ -13,7 +13,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-func TestNewMatchesMethodFromConfig(t *testing.T) {
+func TestNewDefaultsAndValidation(t *testing.T) {
 	t.Parallel()
 	method, err := New(Config{Store: tempo.NewMemoryStore(), Recipient: testRecipient, ChainID: tempo.ChainIDModerato})
 	require.NoError(t, err)

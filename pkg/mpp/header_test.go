@@ -11,8 +11,8 @@ func TestAuthorizationHeaderDoesNotChangeChallengeID(t *testing.T) {
 	t.Parallel()
 
 	params := map[string]any{"amount": "1000000"}
-	implicit := NewChallenge("test-secret-key-12345", "api.example.com", "tempo", "charge", params)
-	explicit := NewChallenge(
+	implicit := newChallenge("test-secret-key-12345", "api.example.com", "tempo", "charge", params)
+	explicit := newChallenge(
 		"test-secret-key-12345",
 		"api.example.com",
 		"tempo",
@@ -24,7 +24,7 @@ func TestAuthorizationHeaderDoesNotChangeChallengeID(t *testing.T) {
 	assert.Empty(t, implicit.Header)
 	assert.Empty(t, explicit.Header)
 	assert.Equal(t, implicit.ID, explicit.ID)
-	assert.NotContains(t, implicit.ToAuthenticate("api.example.com"), "header=")
+	assert.NotContains(t, implicit.toAuthenticate("api.example.com"), "header=")
 	assert.Equal(t, HeaderAuthorization, implicit.CredentialHeader())
 }
 
@@ -32,8 +32,8 @@ func TestPaymentAuthorizationHeaderIsBoundIntoID(t *testing.T) {
 	t.Parallel()
 
 	params := map[string]any{"amount": "1000000"}
-	implicit := NewChallenge("test-secret-key-12345", "api.example.com", "tempo", "charge", params)
-	advertised := NewChallenge(
+	implicit := newChallenge("test-secret-key-12345", "api.example.com", "tempo", "charge", params)
+	advertised := newChallenge(
 		"test-secret-key-12345",
 		"api.example.com",
 		"tempo",
@@ -45,14 +45,14 @@ func TestPaymentAuthorizationHeaderIsBoundIntoID(t *testing.T) {
 	assert.NotEqual(t, implicit.ID, advertised.ID)
 	assert.Equal(t, HeaderPaymentAuthorization, advertised.Header)
 	assert.True(t, advertised.verify("test-secret-key-12345", "api.example.com"))
-	assert.Contains(t, advertised.ToAuthenticate("api.example.com"), `header="`+HeaderPaymentAuthorization+`"`)
+	assert.Contains(t, advertised.toAuthenticate("api.example.com"), `header="`+HeaderPaymentAuthorization+`"`)
 	assert.Equal(t, HeaderPaymentAuthorization, advertised.CredentialHeader())
 }
 
 func TestWWWAuthenticateRoundTripPreservesCredentialHeader(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"test-secret",
 		"api.example.com",
 		"tempo",
@@ -60,7 +60,7 @@ func TestWWWAuthenticateRoundTripPreservesCredentialHeader(t *testing.T) {
 		map[string]any{"amount": "1000000"},
 		WithHeader(HeaderPaymentAuthorization),
 	)
-	header := challenge.ToAuthenticate("api.example.com")
+	header := challenge.toAuthenticate("api.example.com")
 	parsed, err := ParseChallenge(header)
 	require.NoError(t, err)
 
@@ -109,6 +109,6 @@ func TestFormatAuthenticateStrictRejectsInvalidCredentialHeader(t *testing.T) {
 		Request: map[string]any{"amount": "1000000"},
 		Header:  "Payment Authorization",
 	}
-	_, err := challenge.ToAuthenticateStrict(challenge.Realm)
+	_, err := challenge.toAuthenticateStrict(challenge.Realm)
 	require.EqualError(t, err, "mpp: invalid HTTP header name")
 }

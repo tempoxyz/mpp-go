@@ -198,7 +198,7 @@ func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
 
 	receipt, err := mpp.ParseReceipt(paid.Header.Get("Payment-Receipt"))
 	if !assert.NoErrorf(t, err,
-		"ParsePaymentReceipt() error = %v", err) {
+		"ParseReceipt() error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "0xreceipt-beta", receipt.Reference,

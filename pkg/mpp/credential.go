@@ -74,12 +74,3 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 	}
 	return nil
 }
-
-// ToAuthorization formats this Credential as an Authorization header value.
-// It returns an empty string when c cannot be formatted.
-//
-// Deprecated: Use FormatCredential instead, which returns formatting errors.
-func (c *Credential) ToAuthorization() string {
-	header, _ := formatAuthorization(c)
-	return header
-}

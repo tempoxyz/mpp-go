@@ -53,10 +53,7 @@ Low-level data structures in `pkg/mpp` that compose into the core abstractions:
 - **`Credential`** — Client-submitted payment proof (appears in `Authorization` header). Contains `Challenge` echo, `Payload` (method-specific proof), and optional `Source` (payer identity).
 - **`Receipt`** — Server-issued settlement confirmation (appears in `Payment-Receipt` header). Contains `Status`, `Method`, `Timestamp`, and `Reference`.
 
-Each type has one canonical Parse/Format pair. The few deprecated spellings
-left (`ToAuthenticate*`, `ToAuthorization`, `FormatAuthorizationStrict`,
-`ParsePaymentReceipt`) are kept only for outside callers (see "Deprecated
-APIs"); don't use them in new code:
+Each type has one canonical Parse/Format pair:
 
 | Type | Parse | Format |
 | --- | --- | --- |
@@ -66,8 +63,8 @@ APIs"); don't use them in new code:
 
 - Create challenges with `NewChallengeWithError` and check an echoed ID with
   `(*Challenge).VerifyID(secret)`, which binds `c.Realm`; also compare
-  `c.Realm` with the realm you expect, which VerifyID does not. `NewChallenge`
-  and `GenerateChallengeID` are deprecated.
+  `c.Realm` with the realm you expect, which VerifyID does not. Tests build
+  fixed Challenges with `mpptest.NewChallenge`, which panics on an error.
 - The Format functions reject what their Parse counterpart rejects (missing
   or invalid fields, a receipt status other than "success", oversized
   headers), so the SDK never emits a header its own parser refuses.
@@ -103,9 +100,7 @@ APIs"); don't use them in new code:
   stays empty: the realm is bound into every Challenge, so defaulting it would
   make upgraded and older replicas reject each other's Challenges; callers
   who want the environment's realm pass `server.DetectRealm()`.
-- Server-wide options: `WithRequiresAuth`, `WithChallengeNonce` (replaces the
-  deprecated per-call `ChargeParams.EnableChallengeNonce`, which still forces
-  it on) and `WithEvents` (mppx's onChallengeCreated/onPaymentSuccess/
+- Server-wide options: `WithRequiresAuth`, `WithChallengeNonce` and `WithEvents` (mppx's onChallengeCreated/onPaymentSuccess/
   onPaymentFailed). PaymentFailed fires once per distinct `Mpp` for every
   submitted Credential that is rejected, including one that cannot be parsed
   (nil Credential), whether it arrives through `Charge`, `ChargeRequest`,
@@ -156,8 +151,8 @@ Clients and Tempo methods:
   `client.OriginValidator`; the generic clients only keep a built-in Tempo proof
   check for methods that do not implement it (`pkg/internal/tempoproof`). Origins compare
   with lowercase hosts and default ports dropped (`tempoproof.Origin`).
-- Tempo server: construct with `charge.New(charge.Config{...})`; `MethodFromConfig`
-  is deprecated. Sponsor fees with `AllowedFeeTokens` and `FeePayerPolicy`; a
+- Tempo server: construct with `charge.New(charge.Config{...})` and list
+  accepted tokens in `Config.Currencies`. Sponsor fees with `AllowedFeeTokens` and `FeePayerPolicy`; a
   `FeeToken` must be in an explicit `AllowedFeeTokens` list.
 - Tempo client: build `Config.PaymentPolicy` from `charge.MaxAmount`,
   `MaxAtomicAmount` and `AllowChainIDs` combined with `AllPolicies`; trust proof realms
@@ -271,26 +266,14 @@ git worktree remove /tmp/mpp-go-base
 
 ### Deprecated APIs
 
-The deprecated APIs the SDK improvement plan replaced were removed in one
-minor release (see `.changelog/remove-deprecated-apis.md`). The ones left are
-kept on purpose; remove them only together with their outside callers:
-
-- Used by the mpp-tools Go conformance adapter
-  (`tempoxyz/mpp-tools/conformance/adapters/go`), which CI builds against this
-  SDK: `mpp.NewChallenge`, `mpp.GenerateChallengeID`,
-  `mpp.ParsePaymentReceipt`, `(*Challenge).ToAuthenticate`,
-  `(*Challenge).ToAuthenticateStrict`, `(*Credential).ToAuthorization` and
-  `Receipt.Extra`.
-- Shown in README.md or an example README (changing those needs a
-  maintainer's OK): `mpp.FormatAuthorizationStrict`,
-  `ChargeParams.EnableChallengeNonce`, `chargeserver.MethodFromConfig` and
-  `chargeserver.Config.Currency`.
-- Kept because a legacy store layout still needs it:
-  `tempo.ChargeSponsoredChallengeStoreKey`, the reservation key sponsored
-  charges used before #201, which verification still checks.
-
-Code and tests in this module don't call them (`staticcheck -checks SA1019
-./...` reports nothing); tests build Challenges and headers with
+No deprecated APIs remain: the ones the SDK improvement plan replaced were
+removed in one minor release (`.changelog/remove-deprecated-apis.md`) and the
+last ones, kept for the mpp-tools conformance adapter and the READMEs, in the
+next (`.changelog/remove-remaining-deprecated-apis.md`). Before removing an
+API marked `// Deprecated:`, check that the mpp-tools Go conformance adapter
+(`tempoxyz/mpp-tools/conformance/adapters/go`), which CI builds against this
+SDK, and the READMEs no longer use it. `staticcheck -checks SA1019 ./...`
+reports nothing; tests build Challenges and headers with
 `pkg/internal/mpptest`.
 
 ### Live integration tests

@@ -660,7 +660,7 @@ func (i *Intent) broadcastTransaction(
 
 	if request.MethodDetails.FeePayer {
 		// Preserve reservations from earlier versions while their credentials remain valid.
-		if err := i.rejectUsedCredential(ctx, tempo.ChargeSponsoredChallengeStoreKey(credential.Challenge.ID), "fee payer challenge already used"); err != nil {
+		if err := i.rejectUsedCredential(ctx, legacySponsoredChallengeStoreKey(credential.Challenge.ID), "fee payer challenge already used"); err != nil {
 			return nil, err
 		}
 		clientTxHash, err := sponsoredTransactionHash(tx, sender)
@@ -2133,4 +2133,12 @@ func asString(value any) string {
 	default:
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+// legacySponsoredChallengeStoreKey returns the reservation key sponsored
+// charges used before they were keyed by the payer-signed transaction
+// (tempo.ChargeSponsoredTransactionStoreKey). Verification still rejects a
+// Challenge reserved under it.
+func legacySponsoredChallengeStoreKey(challengeID string) string {
+	return tempo.ReplayKeyPrefix + "sponsor:" + challengeID
 }

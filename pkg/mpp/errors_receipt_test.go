@@ -297,8 +297,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		!assert.Equal(t, receipt.FundingCurrency, parsed.Extensions["fundingCurrency"]) {
 		return
 	}
-	if !assert.Equalf(t, true, parsed.Extra["settled"],
-		"parsed.Extra[settled] = %#v, want true", parsed.Extra["settled"]) {
+	if !assert.Equal(t, map[string]any{"settled": true}, parsed.Extensions["extra"]) {
 		return
 	}
 
@@ -308,7 +307,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 	}
 }
 
-func TestParsePaymentReceiptPreservesForeignSubscriptionID(t *testing.T) {
+func TestParseReceiptPreservesForeignSubscriptionID(t *testing.T) {
 	t.Parallel()
 
 	header := b64EncodeAny(map[string]any{
@@ -340,7 +339,7 @@ func TestParsePaymentReceiptPreservesForeignSubscriptionID(t *testing.T) {
 	}
 }
 
-func TestParsePaymentReceiptValidation(t *testing.T) {
+func TestParseReceiptValidation(t *testing.T) {
 	t.Parallel()
 
 	_, err := ParseReceipt(b64EncodeAny(map[string]any{
@@ -396,13 +395,13 @@ func TestParsePaymentReceiptValidation(t *testing.T) {
 
 }
 
-// TestParsePaymentReceiptRequiresMethodAndTimestamp asserts that method and
+// TestParseReceiptRequiresMethodAndTimestamp asserts that method and
 // timestamp are required receipt fields, matching draft-ietf-httpauth-payment
 // §5.3 and the canonical mppx Receipt schema. The wire values are the exact
 // error_missing_method and error_missing_timestamp scenarios from the shared
 // conformance suite (conformance/vectors/receipt.json), both of which require
 // parse rejection. Refs Agricola finding AGR-2026-048.
-func TestParsePaymentReceiptRequiresMethodAndTimestamp(t *testing.T) {
+func TestParseReceiptRequiresMethodAndTimestamp(t *testing.T) {
 	t.Parallel()
 
 	// conformance error_missing_method: valid receipt with "method" omitted.
@@ -423,13 +422,13 @@ func TestParsePaymentReceiptRequiresMethodAndTimestamp(t *testing.T) {
 	}
 }
 
-// TestParsePaymentReceiptPreservesMethodExtensionFields asserts that a
+// TestParseReceiptPreservesMethodExtensionFields asserts that a
 // method-defined top-level receipt field survives a parse -> format round trip.
 // draft-ietf-httpauth-payment §5.3 states "Payment method specifications MAY
 // define additional fields for receipts", and the canonical mppx schema keeps
 // unknown fields rather than dropping them. originTxHash is the extension named
 // in the issue's suggested test. Refs Agricola finding AGR-2026-047.
-func TestParsePaymentReceiptPreservesMethodExtensionFields(t *testing.T) {
+func TestParseReceiptPreservesMethodExtensionFields(t *testing.T) {
 	t.Parallel()
 
 	wire := b64EncodeAny(map[string]any{
@@ -480,7 +479,7 @@ func TestParsePaymentReceiptPreservesMethodExtensionFields(t *testing.T) {
 func TestChallengeVerifyAndToEcho(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
@@ -521,7 +520,7 @@ func TestChallengeVerifyAndToEcho(t *testing.T) {
 func TestChallengeNewCredential(t *testing.T) {
 	t.Parallel()
 
-	challenge := NewChallenge(
+	challenge := newChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",

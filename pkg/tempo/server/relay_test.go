@@ -208,10 +208,10 @@ func TestRelayIntentExposesCredentialHooks(t *testing.T) {
 		}
 	})
 	method, err := New(Config{Store: tempo.NewMemoryStore(),
-		ChainID:   42431,
-		Currency:  testCurrency,
-		Recipient: testRecipient,
-		Relay:     &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: server.URL},
+		ChainID:    42431,
+		Currencies: []string{testCurrency},
+		Recipient:  testRecipient,
+		Relay:      &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: server.URL},
 	})
 	require.NoError(t, err)
 	payment := newTestServer(t, method, "api.example.com", "test-secret-key-minimum-32-byte-secret")
@@ -441,10 +441,10 @@ func TestNewRejectsIntentWithRelay(t *testing.T) {
 func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
 	t.Parallel()
 	method, err := New(Config{Store: tempo.NewMemoryStore(),
-		ChainID:   999999,
-		Currency:  testCurrency,
-		Recipient: testRecipient,
-		Relay:     &RelayConfig{APIKey: relayTestAPIKey},
+		ChainID:    999999,
+		Currencies: []string{testCurrency},
+		Recipient:  testRecipient,
+		Relay:      &RelayConfig{APIKey: relayTestAPIKey},
 	})
 	require.NoError(t, err)
 
