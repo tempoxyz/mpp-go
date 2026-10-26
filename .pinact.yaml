@@ -1,13 +1,12 @@
 version: 3
 rules:
-  # tempoxyz/changelogs v0.10.0 (tempoxyz/changelogs#188, the `auto-merge`
-  # input) is younger than the 7-day cooldown. Allow this exact commit;
-  # remove after 2026-11-01. The exception also skips version-comment
-  # verification.
+  # tempoxyz/changelogs v0.11.0 is younger than the 7-day cooldown. Allow this
+  # exact commit; remove after 2026-11-02. The exception also skips
+  # version-comment verification.
   - ignore: true
     conditions:
       - expr: |
-          ActionName == "tempoxyz/changelogs" && ActionVersion == "7928d3260c48d9dbe72f9fa4d5fca968cbfa020d"
+          ActionName matches "^tempoxyz/changelogs(/check)?$" && ActionVersion == "35288d5b399317c9412f9dd4bfaf8cccf2d22215"
   # mpp-tools has no tags for these existing workflow commits, so pinact
   # cannot verify a version comment. Keep this exception limited to the
   # exact workflows and SHAs currently used here.
