@@ -1,0 +1,187 @@
+name: Cross-SDK Smoke Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  go-server:
+    name: mpp-go server × mppx CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Pull while the toolchains are set up; `docker compose up` reuses the image.
+      - name: Pull Tempo localnet image
+        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Cache Go modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-smoke-server-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-smoke-server-
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install pinned mppx
+        working-directory: .github/smoke-cross-sdk
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build basic server
+        run: go build -o "$RUNNER_TEMP/basic-server" ./examples/basic/server
+
+      - name: Start Tempo localnet
+        run: docker compose up -d --wait
+
+      - name: Start basic server
+        run: |
+          TEMPO_RPC_URL=http://localhost:8545 "$RUNNER_TEMP/basic-server" > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/api/health > /dev/null; then
+              echo "basic server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+
+      - name: Assert /api/ping returns 402 without payment
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/ping)
+          [ "$status" = "402" ] || { echo "Expected 402 but got $status"; exit 1; }
+
+      - name: Fund client account # well-known Hardhat dev account[1]
+        run: |
+          curl -sf http://localhost:8545 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"tempo_fundAddress","params":["0x70997970C51812dc3A010C7d01b50e0d17dc79C8"],"id":1}'
+
+      - name: mppx pays /api/ping
+        working-directory: .github/smoke-cross-sdk
+        run: |
+          response=$(npm exec --offline -- mppx http://localhost:3000/api/ping --rpc-url http://localhost:8545 --silent --fail)
+          echo "$response"
+          echo "$response" | grep -q '"pong"' || { echo "Response missing pong field"; exit 1; }
+        env:
+          MPPX_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" # well-known Hardhat dev account[1]
+
+      - name: Logs
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/server.log" || true
+          docker compose logs
+
+      - name: Stop Tempo localnet
+        if: always()
+        run: docker compose down
+
+  mppx-server:
+    name: mppx server × mpp-go client
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pull Tempo localnet image
+        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Cache Go modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-smoke-client-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-smoke-client-
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install pinned mppx
+        working-directory: .github/smoke-cross-sdk
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build Go client
+        run: go build -o "$RUNNER_TEMP/charge-client" ./examples/charge-basic/client
+
+      - name: Start Tempo localnet
+        run: docker compose up -d --wait
+
+      - name: Start mppx server
+        working-directory: .github/smoke-cross-sdk
+        run: |
+          TEMPO_RPC_URL=http://localhost:8545 PORT=3000 node server.mjs > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "mppx server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+
+      - name: Assert a malformed request target returns 400
+        run: |
+          status=$(printf 'GET http://[invalid/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc -q 5 127.0.0.1 3000 | head -n 1)
+          echo "$status"
+          echo "$status" | grep -q ' 400 ' || { echo "Expected 400"; exit 1; }
+          curl -sf http://localhost:3000/health > /dev/null || { echo "mppx server stopped"; exit 1; }
+
+      - name: Assert /paid returns 402 without payment
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/paid)
+          [ "$status" = "402" ] || { echo "Expected 402 but got $status"; exit 1; }
+
+      # The client funds the devnet payer account itself before paying.
+      - name: mpp-go client pays /paid
+        run: |
+          output=$(TEMPO_RPC_URL=http://localhost:8545 BASE_URL=http://localhost:3000 "$RUNNER_TEMP/charge-client")
+          echo "$output"
+          echo "$output" | grep -q 'paid request for "paid content"' || { echo "Unexpected client output"; exit 1; }
+
+      - name: Logs
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/server.log" || true
+          docker compose logs
+
+      - name: Stop Tempo localnet
+        if: always()
+        run: docker compose down

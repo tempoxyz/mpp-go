@@ -202,10 +202,13 @@ func WithRequiresAuth(enabled bool) Option {
 	}
 }
 
-// New creates an Mpp instance. It returns an error when secretKey is shorter
-// than minimumSecretKeyBytes, since a weak secret yields forgeable,
-// HMAC-bound challenge IDs.
+// New creates an Mpp instance. It returns an error when method is nil, or when
+// secretKey is shorter than minimumSecretKeyBytes, since a weak secret yields
+// forgeable, HMAC-bound challenge IDs.
 func New(method Method, realm, secretKey string, opts ...Option) (*Mpp, error) {
+	if method == nil {
+		return nil, fmt.Errorf("server: payment method is required")
+	}
 	if len(secretKey) < minimumSecretKeyBytes {
 		return nil, fmt.Errorf("server: secret key must be at least %d bytes", minimumSecretKeyBytes)
 	}

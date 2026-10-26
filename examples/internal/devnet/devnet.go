@@ -2,6 +2,7 @@ package devnet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 )
 
 const (
@@ -30,6 +32,7 @@ const (
 // TODO(tempo-go): move these local-devnet readiness and faucet helpers into a
 // shared tempo-go test support package once multiple Go SDKs depend on them.
 
+// RPCURL returns TEMPO_RPC_URL, or the local devnet URL when it is unset.
 func RPCURL() string {
 	if rpcURL := os.Getenv("TEMPO_RPC_URL"); rpcURL != "" {
 		return rpcURL
@@ -37,18 +40,32 @@ func RPCURL() string {
 	return defaultRPCURL
 }
 
+// WaitForRPC polls the node until it reports a chain ID, ctx ends, or the
+// readiness timeout passes, and returns the chain ID.
 func WaitForRPC(ctx context.Context, rpc tempo.RPCClient) (int64, error) {
-	deadline := time.Now().Add(rpcReadinessTimeout)
-	for time.Now().Before(deadline) {
+	ctx, cancel := context.WithTimeout(ctx, rpcReadinessTimeout)
+	defer cancel()
+	ticker := time.NewTicker(rpcReadinessPollPeriod)
+	defer ticker.Stop()
+	var lastErr error
+	for {
 		chainID, err := rpc.GetChainID(ctx)
 		if err == nil && chainID != 0 {
 			return int64(chainID), nil
 		}
-		time.Sleep(rpcReadinessPollPeriod)
+		if err != nil {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("tempo rpc at %s did not become ready; start the local devnet with `docker compose up -d` or set TEMPO_RPC_URL: %w", RPCURL(), lastErrOr(lastErr, ctx.Err()))
+		case <-ticker.C:
+		}
 	}
-	return 0, fmt.Errorf("tempo rpc at %s did not become ready; start the local devnet with `docker compose up -d` or set TEMPO_RPC_URL", RPCURL())
 }
 
+// FundAddress funds address from the devnet faucet and waits for the funding
+// transactions' receipts.
 func FundAddress(ctx context.Context, rpc tempo.RPCClient, address common.Address) error {
 	response, err := rpc.SendRequest(ctx, "tempo_fundAddress", address.Hex())
 	if err != nil {
@@ -81,19 +98,38 @@ func FundAddress(ctx context.Context, rpc tempo.RPCClient, address common.Addres
 }
 
 func waitForReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[string]any, error) {
-	deadline := time.Now().Add(receiptWaitTimeout)
-	for time.Now().Before(deadline) {
+	ctx, cancel := context.WithTimeout(ctx, receiptWaitTimeout)
+	defer cancel()
+	ticker := time.NewTicker(receiptWaitPollPeriod)
+	defer ticker.Stop()
+	var lastErr error
+	for {
 		response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash)
 		if err == nil {
-			if err := response.CheckError(); err == nil {
-				if receipt, ok := response.Result.(map[string]any); ok && len(receipt) > 0 {
-					return receipt, nil
-				}
-			}
+			err = response.CheckError()
 		}
-		time.Sleep(receiptWaitPollPeriod)
+		if err == nil {
+			if receipt, ok := response.Result.(map[string]any); ok && len(receipt) > 0 {
+				return receipt, nil
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("transaction receipt not found for %s: %w", hash, lastErrOr(lastErr, ctx.Err()))
+		case <-ticker.C:
+		}
 	}
-	return nil, fmt.Errorf("transaction receipt not found for %s", hash)
+}
+
+// lastErrOr returns lastErr when a poll failed, or fallback (the context's
+// error) when every poll succeeded without the expected result.
+func lastErrOr(lastErr, fallback error) error {
+	if lastErr != nil {
+		return errors.Join(fallback, lastErr)
+	}
+	return fallback
 }
 
 // PaymentPolicy permits at most one token per payment to the example payee on
@@ -110,4 +146,25 @@ func PaymentPolicy(chainID int64, recipient string) func(context.Context, tempo.
 		}
 		return nil
 	}
+}
+
+// Prepare waits for the node at RPCURL and funds the accounts of the given
+// private keys, returning the RPC URL and chain ID for an example run.
+func Prepare(ctx context.Context, privateKeys ...string) (string, int64, error) {
+	rpcURL := RPCURL()
+	rpc := tempo.NewRPCClient(rpcURL)
+	chainID, err := WaitForRPC(ctx, rpc)
+	if err != nil {
+		return "", 0, err
+	}
+	for _, key := range privateKeys {
+		signer, err := temposigner.NewSigner(key)
+		if err != nil {
+			return "", 0, err
+		}
+		if err := FundAddress(ctx, rpc, signer.Address()); err != nil {
+			return "", 0, fmt.Errorf("fund %s: %w", signer.Address().Hex(), err)
+		}
+	}
+	return rpcURL, chainID, nil
 }

@@ -37,7 +37,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 		chargeParams := params
 		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
 		chargeParams.PaymentAuthorization = c.Get(mpp.HeaderPaymentAuthorization)
-		chargeParams.MppxScope = fiberScope(c)
+		if len(chargeParams.MppxScope) == 0 {
+			chargeParams.MppxScope = fiberScope(c)
+		}
 		if encoding := strings.TrimSpace(c.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
 			WritePaymentError(c, &mpp.PaymentError{
 				Type:   "about:blank",
@@ -135,9 +137,15 @@ func WritePaymentErrorWithChallenges(c *fiberfw.Ctx, err error, challenges []*mp
 		WritePaymentError(c, err)
 		return
 	}
-	headers, challengeID, headerErr := authenticateHeaders(challenges, realm)
+	if server.IsPaymentOutcomeUnknown(err) {
+		// The credential may have settled: a fresh challenge would invite an
+		// automatic client to pay again.
+		WritePaymentError(c, err)
+		return
+	}
+	headers, headerErr := authenticateHeaders(challenges, realm)
 	if headerErr != nil {
-		WritePaymentError(c, mpp.ErrInvalidChallenge(challengeID, headerErr.Error()))
+		WritePaymentError(c, headerErr)
 		return
 	}
 
@@ -159,12 +167,12 @@ func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
 // This is the Fiber equivalent of [server.WriteChallenges].
 func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) {
 	if len(challenges) == 0 {
-		WritePaymentError(c, mpp.ErrBadRequest("no challenges could be generated"))
+		WritePaymentError(c, errors.New("fiberadapter: no challenges could be generated"))
 		return
 	}
-	headers, _, err := authenticateHeaders(challenges, realm)
+	headers, err := authenticateHeaders(challenges, realm)
 	if err != nil {
-		WritePaymentError(c, mpp.ErrBadRequest(err.Error()))
+		WritePaymentError(c, err)
 		return
 	}
 
@@ -179,18 +187,18 @@ func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) 
 }
 
 // authenticateHeaders serializes every challenge before any header is written
-// so a later failure cannot leave a partial set of offers. On failure it also
-// returns the ID of the challenge that could not be serialized.
-func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, string, error) {
+// so a later failure cannot leave a partial set of offers. A failure is
+// classified by server.ChallengeSerializationError.
+func authenticateHeaders(challenges []*mpp.Challenge, realm string) ([]string, error) {
 	headers := make([]string, 0, len(challenges))
 	for _, challenge := range challenges {
 		header, err := challenge.ToAuthenticateStrict(realm)
 		if err != nil {
-			return nil, challenge.ID, err
+			return nil, server.ChallengeSerializationError(challenge, realm, err)
 		}
 		headers = append(headers, header)
 	}
-	return headers, "", nil
+	return headers, nil
 }
 
 func setAuthenticateHeaders(c *fiberfw.Ctx, values []string) {

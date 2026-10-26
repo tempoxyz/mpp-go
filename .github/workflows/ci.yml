@@ -121,10 +121,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Start the containers in the background so pulling and booting them
-      # overlaps the setup below; a later step waits for `up --wait` to finish.
-      - name: Start Tempo localnet
-        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") > /dev/null 2>&1 &
+      # The tests start the docker-compose.yml localnet themselves with
+      # testcontainers, exactly as "make integration" does locally. Pull the
+      # image in the background so it overlaps the setup below.
+      - name: Pull Tempo localnet image
+        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -136,25 +137,19 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          # A new prefix since dropping -race: the old entry holds race-built
-          # packages, and an exact key hit never saves the new ones.
-          key: ${{ runner.os }}-go-integration-norace-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-integration-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-integration-norace-
+            ${{ runner.os }}-go-integration-
 
-      - name: Wait for Tempo localnet
-        run: |
-          for _ in {1..360}; do [[ -s "$RUNNER_TEMP/compose-up.status" ]] && break; sleep 0.5; done
-          cat "$RUNNER_TEMP/compose-up.log"
-          [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
+      - name: Vet integration tests
+        working-directory: tests
+        run: go vet -tags=integration ./...
 
-      # The unit tests already run with -race; these mostly wait on the localnet.
+      # The timeout also covers building the examples' smoke tests, which run
+      # as a child go test.
       - name: Run integration tests
-        run: go test -count=1 -tags=integration -timeout=120s ./tests/...
-
-      - name: Stop Tempo localnet
-        if: always()
-        run: docker compose down
+        working-directory: tests
+        run: go test -race -count=1 -tags=integration -timeout=300s ./...
 
   ci-gate:
     name: CI Gate

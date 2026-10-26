@@ -1,0 +1,9 @@
+{
+  "name": "smoke-cross-sdk",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "mppx": "0.15.0",
+    "viem": "2.57.11"
+  }
+}

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -36,7 +38,19 @@ type credentialKey struct {
 	method methodKey
 }
 
-type paymentOriginContextKey struct{}
+type paymentStateContextKey struct{}
+
+// paymentState is shared, through the request context, between one Client.Do
+// call, its CheckRedirect hook and the Transport rounds it drives.
+type paymentState struct {
+	// origin is the origin the caller asked Client.Do to fetch.
+	origin string
+
+	mu sync.Mutex
+	// unknown is the last PaymentOutcomeUnknownError the Transport returned,
+	// kept so Client.Do can restore it when net/http replaces the error.
+	unknown *PaymentOutcomeUnknownError
+}
 
 // TransportOption configures a Transport.
 type TransportOption func(*transportConfig)
@@ -125,6 +139,7 @@ func NewTransport(methods []Method, inner http.RoundTripper, opts ...TransportOp
 // RoundTrip implements http.RoundTripper with automatic 402 handling.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.configErr != nil {
+		closeRequestBody(req)
 		return nil, t.configErr
 	}
 
@@ -132,13 +147,38 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	credentials := make(map[credentialKey]*mpp.Credential)
 	request := baseRequest
 	var sentCredential credentialKey
+	// A credential the caller set on the request is sent with the first
+	// round, so its outcome is as unknown as one the Transport created.
+	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
 
 	for retries := 0; ; retries++ {
 		resp, err := t.inner.RoundTrip(request)
 		if err != nil {
+			if sent {
+				// The server may have settled the payment before the
+				// connection failed: retrying could pay twice.
+				unknown := &PaymentOutcomeUnknownError{
+					Challenge:  sentChallenge,
+					Credential: sentCred,
+					Err:        err,
+				}
+				if state := paymentStateFrom(req.Context()); state != nil {
+					state.mu.Lock()
+					state.unknown = unknown
+					state.mu.Unlock()
+				}
+				return nil, unknown
+			}
 			return nil, err
 		}
 		if resp.StatusCode != http.StatusPaymentRequired || retries >= defaultMaxPaymentRetries {
+			return resp, nil
+		}
+
+		problem := responseProblemType(resp)
+		if problem == mpp.ErrorTypePaymentOutcomeUnknown {
+			// The server cannot tell whether the credential settled. Paying
+			// again could pay twice: hand the response to the caller.
 			return resp, nil
 		}
 
@@ -163,7 +203,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
-		if isInvalidPayloadResponse(resp) {
+		if problem == mpp.ErrorTypeInvalidPayload {
 			delete(credentials, sentCredential)
 		}
 		drainAndClose(resp.Body)
@@ -173,6 +213,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// the server.
 		retry, err := t.cloneRequest(baseRequest)
 		if err != nil {
+			// The inner RoundTripper already received, and closed, the
+			// request body: closing it again here would double-close it.
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 		}
 
@@ -205,6 +247,108 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		retry.Header.Set(selected.challenge.CredentialHeader(), authorization)
 		request = retry
 		sentCredential = key
+		sent, sentChallenge, sentCred = true, selected.challenge, cred
+	}
+}
+
+// PaymentOutcomeUnknownError is returned by Transport.RoundTrip, and so by
+// Client.Do wrapped in a *url.Error, when the request carrying a payment
+// credential failed without a response. That includes a credential the caller
+// set on the request itself (any header whose value uses the Payment scheme).
+// The server may have settled the payment, so do not blindly retry: reconcile
+// it using Challenge and Credential. It matches mppx's
+// PaymentOutcomeUnknownError.
+//
+// When an http.Client with a Timeout times out, net/http replaces the
+// RoundTrip error with its own timeout error, so a bare Transport inside such
+// a client cannot preserve this type. client.Client restores it: its Do
+// returns a *url.Error whose Err is a PaymentOutcomeUnknownError wrapping the
+// timeout, and Timeout still reports true.
+type PaymentOutcomeUnknownError struct {
+	// Challenge is the challenge the credential paid for. For a credential
+	// the caller set on the request, it holds the challenge fields the
+	// credential echoes (the request in RequestB64), or is nil when the
+	// credential cannot be parsed.
+	Challenge *mpp.Challenge
+	// Credential is the credential sent with the failed request, or nil
+	// when a caller-set credential cannot be parsed.
+	Credential *mpp.Credential
+	// Err is the error the paid request failed with.
+	Err error
+}
+
+func (e *PaymentOutcomeUnknownError) Error() string {
+	id := ""
+	if e.Challenge != nil {
+		id = e.Challenge.ID
+	}
+	msg := fmt.Sprintf("mpp: payment outcome is unknown after sending a credential for challenge %q; do not blindly retry", id)
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
+}
+
+// Unwrap returns the error the paid request failed with.
+func (e *PaymentOutcomeUnknownError) Unwrap() error { return e.Err }
+
+// Timeout reports whether the paid request failed because it timed out.
+func (e *PaymentOutcomeUnknownError) Timeout() bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(e.Err, &timeout) && timeout.Timeout()
+}
+
+// callerCredential reports whether header carries a Payment credential the
+// caller set, in any field, and parses it when it can.
+func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential) {
+	value, ok := paymentCredentialValue(header)
+	if !ok {
+		return false, nil, nil
+	}
+	cred, err := mpp.ParseCredential(value)
+	if err != nil {
+		return true, nil, nil
+	}
+	echo := cred.Challenge
+	return true, &mpp.Challenge{
+		ID:         echo.ID,
+		Method:     echo.Method,
+		Intent:     echo.Intent,
+		Realm:      echo.Realm,
+		RequestB64: echo.Request,
+		Digest:     echo.Digest,
+		Expires:    echo.Expires,
+		Opaque:     echo.Opaque,
+		Header:     echo.Header,
+	}, cred
+}
+
+// paymentCredentialValue returns the first header element, in any field
+// regardless of its name's case, that uses the Payment auth scheme. A
+// challenge may name a custom credential field, so every field is checked.
+func paymentCredentialValue(header http.Header) (string, bool) {
+	for _, values := range header {
+		for _, value := range values {
+			for _, part := range strings.Split(value, ",") {
+				part = strings.TrimSpace(part)
+				scheme, token, _ := strings.Cut(part, " ")
+				token = strings.TrimSpace(token)
+				// A credential is the scheme and one token; this keeps
+				// prose such as "payment received" in other fields out.
+				if strings.EqualFold(scheme, mpp.SchemePayment) && token != "" && !strings.ContainsAny(token, " \t") {
+					return part, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// closeRequestBody closes req.Body, as http.RoundTripper requires even when
+// RoundTrip returns an error.
+func closeRequestBody(req *http.Request) {
+	if req.Body != nil {
+		_ = req.Body.Close()
 	}
 }
 
@@ -249,18 +393,34 @@ func (t *Transport) createCredential(ctx context.Context, selected challengeCand
 	return cred, nil
 }
 
-// isInvalidPayloadResponse inspects only responses that will be consumed for a
-// retry. Other 402 responses retain cached credentials to avoid paying twice.
-func isInvalidPayloadResponse(resp *http.Response) bool {
+// responseProblemType returns the problem type of a 402 response body, or ""
+// when it is not problem details. It restores the body it reads, so the
+// response can still be returned to the caller. An invalid-payload problem
+// drops the cached credential before a retry; other 402 responses retain it to
+// avoid paying twice.
+func responseProblemType(resp *http.Response) mpp.ErrorType {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/problem+json" || resp.Body == nil {
-		return false
+		return ""
+	}
+	prefix, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body = &peekedBody{Reader: io.MultiReader(bytes.NewReader(prefix), resp.Body), Closer: resp.Body}
+	if readErr != nil {
+		return ""
 	}
 	var problem struct {
 		Type mpp.ErrorType `json:"type"`
 	}
-	err = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&problem)
-	return err == nil && problem.Type == mpp.ErrorTypeInvalidPayload
+	if err := json.NewDecoder(bytes.NewReader(prefix)).Decode(&problem); err != nil {
+		return ""
+	}
+	return problem.Type
+}
+
+// peekedBody replays a response body prefix that was read for inspection.
+type peekedBody struct {
+	io.Reader
+	io.Closer
 }
 
 func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {
@@ -395,12 +555,23 @@ func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []erro
 }
 
 func withPaymentOrigin(ctx context.Context, origin string) context.Context {
-	return context.WithValue(ctx, paymentOriginContextKey{}, origin)
+	return withPaymentState(ctx, &paymentState{origin: origin})
+}
+
+func withPaymentState(ctx context.Context, state *paymentState) context.Context {
+	return context.WithValue(ctx, paymentStateContextKey{}, state)
+}
+
+func paymentStateFrom(ctx context.Context) *paymentState {
+	state, _ := ctx.Value(paymentStateContextKey{}).(*paymentState)
+	return state
 }
 
 func paymentOrigin(ctx context.Context) string {
-	origin, _ := ctx.Value(paymentOriginContextKey{}).(string)
-	return origin
+	if state := paymentStateFrom(ctx); state != nil {
+		return state.origin
+	}
+	return ""
 }
 
 func requestOrigin(requestURL *url.URL) string {

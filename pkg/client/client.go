@@ -3,9 +3,11 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -109,7 +111,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		inner = http.DefaultTransport
 	}
 	origin := requestOrigin(req.URL)
-	req = req.WithContext(withPaymentOrigin(req.Context(), origin))
+	state := &paymentState{origin: origin}
+	req = req.WithContext(withPaymentState(req.Context(), state))
 
 	options := []TransportOption{WithTransportPaymentPreferences(c.paymentPreferences)}
 	if c.onChallenge != nil {
@@ -125,16 +128,59 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	hc.Transport = transport
 	priorCheckRedirect := hc.CheckRedirect
 	hc.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
-		if len(via) > 0 && !sameOriginURL(redirectReq.URL, origin) {
-			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
-		}
+		// Run the caller's hook first: it may change the redirect's headers.
 		if priorCheckRedirect != nil {
-			return priorCheckRedirect(redirectReq, via)
+			if err := priorCheckRedirect(redirectReq, via); err != nil {
+				return err
+			}
+		} else if len(via) >= maxRedirects {
+			// Keep net/http's default limit of 10 redirects.
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		// Refuse every cross-origin redirect, as mppx does: the other origin
+		// would choose what this client fetches and may pay for.
+		if !sameOriginURL(redirectReq.URL, origin) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
 		}
 		return nil
 	}
-	return hc.Do(req)
+	resp, err := hc.Do(req)
+	if err != nil {
+		err = restorePaymentOutcomeUnknown(err, state)
+	}
+	return resp, err
 }
+
+// restorePaymentOutcomeUnknown puts back the PaymentOutcomeUnknownError the
+// Transport returned when net/http replaced it, as it does with its own
+// timeout error when the http.Client has a Timeout.
+func restorePaymentOutcomeUnknown(err error, state *paymentState) error {
+	state.mu.Lock()
+	recorded := state.unknown
+	state.mu.Unlock()
+	var unknown *PaymentOutcomeUnknownError
+	if recorded == nil || errors.As(err, &unknown) {
+		return err
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		restored := *urlErr
+		restored.Err = &PaymentOutcomeUnknownError{
+			Challenge:  recorded.Challenge,
+			Credential: recorded.Credential,
+			Err:        urlErr.Err,
+		}
+		return &restored
+	}
+	return &PaymentOutcomeUnknownError{
+		Challenge:  recorded.Challenge,
+		Credential: recorded.Credential,
+		Err:        err,
+	}
+}
+
+// maxRedirects matches net/http's default redirect limit.
+const maxRedirects = 10
 
 // Get is a convenience method for GET requests.
 func (c *Client) Get(ctx context.Context, url string) (*http.Response, error) {

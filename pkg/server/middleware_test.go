@@ -324,14 +324,14 @@ func TestChargeMiddlewareRejectsCRLFChallengeDescription(t *testing.T) {
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 
-	require.Equal(t, http.StatusBadRequest, resp.Code)
+	require.Equal(t, http.StatusInternalServerError, resp.Code)
 	assert.Empty(t, resp.Header().Get("WWW-Authenticate"))
 
 	var problem struct {
 		Type string `json:"type"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
-	assert.Equal(t, string(mpp.ErrorTypeBadRequest), problem.Type)
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
 }
 
 func TestServeVerified_PreservesResponseWriterOptionalInterfaces(t *testing.T) {
@@ -462,4 +462,72 @@ func TestChargeMiddleware_RequiresAuthReadsPaymentAuthorizationAndPreservesBeare
 	defer paidResponse.Body.Close()
 	require.Equal(t, http.StatusOK, paidResponse.StatusCode)
 	assert.NotEmpty(t, paidResponse.Header.Get("Payment-Receipt"))
+}
+
+func TestChargeMiddlewareCRLFChallengeDescriptionWithMalformedCredential(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	handler := ChargeMiddleware(payment, ChargeParams{
+		Amount:      "0.50",
+		Description: "Line one\r\nLine two",
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Fail(t, "handler should not be called")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
+	req.Header.Set(mpp.HeaderAuthorization, "Payment garbage")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	// The same misconfiguration answers 500 with or without a credential.
+	require.Equal(t, http.StatusInternalServerError, resp.Code)
+	assert.Empty(t, resp.Header().Get(mpp.HeaderWWWAuthenticate))
+	assert.NotContains(t, resp.Body.String(), "CR or LF")
+
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem.Type)
+}
+
+func TestChargeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Fail(t, "handler should not be called")
+	}))
+
+	for _, credential := range []string{"", "Payment garbage"} {
+		req := httptest.NewRequest(http.MethodGet, "/paid?q="+strings.Repeat("a", 13*1024), nil)
+		if credential != "" {
+			req.Header.Set(mpp.HeaderAuthorization, credential)
+		}
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+
+		// The request-derived scope made the challenge too large: a client
+		// error, not a 500.
+		assert.Equal(t, http.StatusRequestURITooLong, resp.Code, "credential %q", credential)
+		assert.Empty(t, resp.Header().Get(mpp.HeaderWWWAuthenticate))
+	}
+}
+
+func TestWritePaymentErrorWithChallengesOmitsChallengesForOutcomeUnknown(t *testing.T) {
+	challenge := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "1"})
+
+	resp := httptest.NewRecorder()
+	WritePaymentErrorWithChallenges(resp, mpp.ErrPaymentOutcomeUnknown(challenge.ID), []*mpp.Challenge{challenge}, "api.example.com")
+
+	assert.Equal(t, http.StatusPaymentRequired, resp.Code)
+	assert.Empty(t, resp.Header().Values(mpp.HeaderWWWAuthenticate),
+		"an outcome-unknown problem must not offer a challenge to pay again")
+	var problem struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
+	assert.Equal(t, string(mpp.ErrorTypePaymentOutcomeUnknown), problem.Type)
+
+	// Other errors still carry their retry challenge.
+	resp = httptest.NewRecorder()
+	WritePaymentErrorWithChallenges(resp, mpp.ErrVerificationFailed("bad proof"), []*mpp.Challenge{challenge}, "api.example.com")
+	assert.Len(t, resp.Header().Values(mpp.HeaderWWWAuthenticate), 1)
 }

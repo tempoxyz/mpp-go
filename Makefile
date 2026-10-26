@@ -78,9 +78,11 @@ fuzz:
 	done; \
 	if [ "$$found" -eq 0 ]; then echo "no Fuzz* targets found under ./pkg" >&2; exit 1; fi
 
-# Run integration tests against the local Tempo devnet by default
+# Run the live integration tests (nested module tests/). Without TEMPO_RPC_URL
+# they start the docker-compose.yml localnet with testcontainers (needs Docker);
+# set TEMPO_RPC_URL to use a running node instead.
 integration:
-	@TEMPO_RPC_URL=$${TEMPO_RPC_URL:-http://localhost:8545} go test -tags=integration -run TestIntegration -timeout=5m ./tests
+	cd tests && go test -race -count=1 -tags=integration -timeout=5m ./...
 
 # Start a local godoc server for this module
 docs:
@@ -103,5 +105,5 @@ help:
 	@echo "  vuln            Run govulncheck"
 	@echo "  mod-check       Check go.mod/go.sum are tidy and verified"
 	@echo "  fuzz            Run each fuzz target for FUZZTIME (default 20s)"
-	@echo "  integration     Run integration tests against TEMPO_RPC_URL"
+	@echo "  integration     Run live integration tests (Docker, or TEMPO_RPC_URL)"
 	@echo "  docs            Start a local godoc server"

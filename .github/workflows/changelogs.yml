@@ -5,6 +5,9 @@ on:
     types: [opened, synchronize]
     paths-ignore:
       - ".github/**"
+      # tests/ is a separate, unreleased module (live tests); its Dependabot
+      # bumps carry no release note.
+      - "tests/**"
 
 jobs:
   changelog:
