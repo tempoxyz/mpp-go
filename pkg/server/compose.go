@@ -27,6 +27,24 @@ type ComposeConfig struct {
 type composedEntry struct {
 	mpp    *Mpp
 	params ChargeParams
+	// requestHeaders reports that params carry the HTTP request's raw
+	// Authorization and Payment-Authorization values, as ChargeMiddleware
+	// passed them before the shared flow, so request builders also see an
+	// application credential such as a Bearer API key.
+	requestHeaders bool
+}
+
+// withRequestHeaders returns a copy of entries whose params carry the raw
+// Authorization and Payment-Authorization values of header.
+func withRequestHeaders(entries []composedEntry, header http.Header) []composedEntry {
+	bound := make([]composedEntry, len(entries))
+	for i, entry := range entries {
+		entry.params.Authorization = header.Get(mpp.HeaderAuthorization)
+		entry.params.PaymentAuthorization = header.Get(mpp.HeaderPaymentAuthorization)
+		entry.requestHeaders = true
+		bound[i] = entry
+	}
+	return bound
 }
 
 // ComposeMiddleware creates an http.Handler middleware that supports multiple
@@ -197,10 +215,19 @@ func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byt
 
 // requestParams returns the entry's ChargeParams bound to one request: the
 // Payment credential, the request scope unless the params set their own, and
-// a non-empty body.
+// a non-empty body. For an HTTP request the params keep the request's raw
+// Authorization and Payment-Authorization values; when issuing Challenges
+// (credential empty) a value carrying a Payment credential is left out, so
+// Charge issues a Challenge rather than verifying it.
 func (entry composedEntry) requestParams(credential string, source credentialSource, scope map[string]string, body []byte) ChargeParams {
 	params := entry.params
-	params.Authorization, params.PaymentAuthorization = credentialFields(credential, source)
+	switch {
+	case !entry.requestHeaders:
+		params.Authorization, params.PaymentAuthorization = credentialFields(credential, source)
+	case credential == "":
+		params.Authorization = withoutPaymentCredential(params.Authorization)
+		params.PaymentAuthorization = withoutPaymentCredential(params.PaymentAuthorization)
+	}
 	if len(scope) > 0 && len(params.MppxScope) == 0 {
 		params.MppxScope = scope
 	}
@@ -222,6 +249,16 @@ func credentialFields(credential string, source credentialSource) (authorization
 	default:
 		return credential, credential
 	}
+}
+
+// withoutPaymentCredential returns value, an Authorization or
+// Payment-Authorization header value, or empty when it carries a Payment
+// credential, readable or not.
+func withoutPaymentCredential(value string) string {
+	if credential, err := mpp.FindPaymentAuthorizationStrict(value); err != nil || credential != "" {
+		return ""
+	}
+	return value
 }
 
 // composeChallengeCollectionError reports that no challenge could be issued in

@@ -58,6 +58,10 @@ func (f paymentFlow) serveRequest(r *http.Request) (*ChargeResult, error) {
 		f.paymentFailed(r.Context(), nil, err)
 		return failedResult(err)
 	}
+	// Builders and Charge see the request's raw headers, including an
+	// application Authorization value on a WithRequiresAuth route, while
+	// source still decides which offers accept the credential.
+	f.entries = withRequestHeaders(f.entries, r.Header)
 	return f.run(r.Context(), credential, source, ScopeFromHTTPRequest(r, ""), body)
 }
 
