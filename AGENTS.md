@@ -106,7 +106,8 @@ Clients and Tempo methods:
   `client.New` and `NewHTTPTransport` take the same `Option`s. `NewTransport` and the
   `WithTransport*` options are deprecated. Options include `WithMaxRetries` and
   `WithOrderChallenges`; a declined payment matches `client.ErrPaymentDeclined`
-  (also `mcpclient.ErrPaymentDeclined`). Read receipts with `mpp.ReceiptFromResponse`.
+  (also `mcpclient.ErrPaymentDeclined`), but an `OnChallenge` error returned after
+  `createCredential` succeeded does not. Read receipts with `mpp.ReceiptFromResponse`.
 - Method-specific origin rules belong in the method, through
   `client.OriginValidator`; the generic clients only keep a built-in Tempo proof
   check for methods that do not implement it (`pkg/internal/tempoproof`). The

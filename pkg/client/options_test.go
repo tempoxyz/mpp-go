@@ -163,6 +163,23 @@ func TestOnChallengeDeclineMatchesErrPaymentDeclined(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrPaymentDeclined)
 }
 
+func TestOnChallengeErrorAfterCreatedCredentialIsNotDecline(t *testing.T) {
+	srv, paid := payingServer(t, paymentChallenge)
+	method := &mockMethod{name: "test", cred: newTestCredential("test")}
+	reason := errors.New("audit log unavailable")
+	hook := func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+		if _, err := create(ctx); err != nil {
+			return nil, err
+		}
+		return nil, reason
+	}
+	_, err := New([]Method{method}, WithOnChallenge(hook)).Get(context.Background(), srv.URL+"/paid")
+	require.ErrorIs(t, err, reason)
+	assert.NotErrorIs(t, err, ErrPaymentDeclined, "a credential was already created")
+	assert.Equal(t, 1, method.calls)
+	assert.Zero(t, paid.Load())
+}
+
 // originMethod is a mockMethod that validates origins.
 type originMethod struct {
 	mockMethod

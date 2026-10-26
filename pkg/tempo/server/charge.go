@@ -117,7 +117,8 @@ type IntentConfig struct {
 	AllowedFeeTokens []string
 	// FeePayerPolicy sets the sponsorship limits applied to every allowed fee
 	// token, as mppx's feePayerPolicy does. Nil fields keep the defaults
-	// (100 gwei max fee and priority fee per gas, 0.05 total fee).
+	// (100 gwei max fee and priority fee per gas, 0.05 total fee); a nil
+	// MaxPriorityFeePerGas is lowered to a MaxFeePerGas set below its default.
 	FeePayerPolicy *FeePayerPolicy
 	// FeeToken fixes the fee token a local fee payer pays gas in. When empty,
 	// the local fee payer uses the first allowed fee token it holds a balance
@@ -1881,6 +1882,10 @@ func resolveFeePayerPolicies(config IntentConfig) (map[string]FeePayerPolicy, []
 		}
 		if config.FeePayerPolicy.MaxPriorityFeePerGas != nil {
 			policy.MaxPriorityFeePerGas = config.FeePayerPolicy.MaxPriorityFeePerGas
+		} else if config.FeePayerPolicy.MaxFeePerGas != nil && policy.MaxPriorityFeePerGas.Cmp(config.FeePayerPolicy.MaxFeePerGas) > 0 {
+			// A priority fee can never exceed the max fee, so lower the
+			// default to a MaxFeePerGas set below it.
+			policy.MaxPriorityFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxFeePerGas)
 		}
 		if config.FeePayerPolicy.MaxTotalFee != nil {
 			policy.MaxTotalFee = config.FeePayerPolicy.MaxTotalFee

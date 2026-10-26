@@ -69,6 +69,28 @@ func TestFeePayerPolicyAloneAppliesToDefaultTokens(t *testing.T) {
 	}
 }
 
+func TestFeePayerPolicyMaxFeeClampsDefaultPriorityFee(t *testing.T) {
+	t.Parallel()
+	// Only MaxFeePerGas, below the 100 gwei default priority fee: the default
+	// priority fee is lowered to it instead of failing construction.
+	intent, err := NewIntent(IntentConfig{
+		Store:          tempo.NewMemoryStore(),
+		FeePayerPolicy: &FeePayerPolicy{MaxFeePerGas: big.NewInt(2_000_000_000)},
+	})
+	require.NoError(t, err)
+	policy, err := intent.feePayerPolicyFor(tempo.PathUSDAddress)
+	require.NoError(t, err)
+	assert.Zero(t, policy.MaxFeePerGas.Cmp(big.NewInt(2_000_000_000)))
+	assert.Zero(t, policy.MaxPriorityFeePerGas.Cmp(big.NewInt(2_000_000_000)))
+
+	// An explicit priority fee above the max fee is still rejected.
+	_, err = NewIntent(IntentConfig{
+		Store:          tempo.NewMemoryStore(),
+		FeePayerPolicy: &FeePayerPolicy{MaxFeePerGas: big.NewInt(1), MaxPriorityFeePerGas: big.NewInt(2)},
+	})
+	require.ErrorContains(t, err, "max priority fee per gas exceeds max fee per gas")
+}
+
 func TestFeePayerConfigConflicts(t *testing.T) {
 	t.Parallel()
 	legacy := map[string]FeePayerPolicy{tempo.PathUSDAddress: defaultFeePayerPolicy()}

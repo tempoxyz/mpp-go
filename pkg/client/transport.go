@@ -82,7 +82,9 @@ type transportConfig struct {
 //     to use the one createCredential already made,
 //   - return a credential, from createCredential or built another way, to send it,
 //   - return an error to decline the payment: RoundTrip returns that error,
-//     wrapped, and does not pay.
+//     wrapped, and does not pay. It matches ErrPaymentDeclined only when no
+//     credential was created: after createCredential succeeded the payment
+//     may already have been made, so the error is not reported as a decline.
 //
 // It runs once per challenge: a credential the transport already created for
 // the same challenge is reused without calling it again.
@@ -426,6 +428,11 @@ func (t *Transport) createCredential(ctx context.Context, selected challengeCand
 		// only errors the hook made itself are reported as a decline.
 		if created && createdErr != nil && errors.Is(err, createdErr) {
 			return nil, err
+		}
+		// A hook that failed after createCredential made a credential did not
+		// decline: the method may already have paid.
+		if created && createdErr == nil {
+			return nil, fmt.Errorf("mpp: onChallenge after creating credential: %w", err)
 		}
 		return nil, &declinedError{err: err}
 	}
