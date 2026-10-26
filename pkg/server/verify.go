@@ -16,7 +16,8 @@ import (
 // VerifyParams contains the parameters for VerifyOrChallenge.
 type VerifyParams struct {
 	// EnableChallengeNonce opts into unique issuance after every replica has
-	// nonce-aware verification. The default preserves legacy issuance for rollout.
+	// nonce-aware verification. The default preserves legacy issuance for
+	// rollout. Mpp.Charge sets it for a handler created WithChallengeNonce.
 	EnableChallengeNonce bool
 	// Authorization is the incoming Authorization header value.
 	Authorization string
@@ -56,6 +57,12 @@ type VerifyResult struct {
 	Credential *mpp.Credential
 	// Receipt acknowledges successful verification.
 	Receipt *mpp.Receipt
+}
+
+// IsChallenge reports whether the result is a Challenge the client must
+// satisfy, rather than a verified payment. A nil result is not a challenge.
+func (r *VerifyResult) IsChallenge() bool {
+	return r != nil && r.Challenge != nil
 }
 
 // VerifyOrChallenge checks for a valid payment credential or generates a new challenge.

@@ -39,10 +39,10 @@ func Charge(ctx context.Context, payment *server.Mpp, meta map[string]any, param
 	return outcome(result, err)
 }
 
-// Compose runs server.ComposeCharge with the Credential in meta.
+// Compose runs server.Compose with the Credential in meta.
 func Compose(ctx context.Context, meta map[string]any, configs ...server.ComposeConfig) (*Outcome, error) {
 	authorization, credentialErr := Authorization(meta)
-	result, err := server.ComposeCharge(ctx, authorization, configs...)
+	result, err := server.Compose(ctx, authorization, configs...)
 	if credentialErr != nil && err == nil {
 		return rejected(result, credentialErr), nil
 	}

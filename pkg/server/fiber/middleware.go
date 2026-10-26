@@ -1,13 +1,16 @@
 package fiberadapter
 
 import (
-	"encoding/json"
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 
 	fiberfw "github.com/gofiber/fiber/v2"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -31,84 +34,186 @@ func Receipt(c *fiberfw.Ctx) *mpp.Receipt {
 	return receipt
 }
 
-// ChargeMiddleware protects a Fiber route with the server charge flow.
+// ChargeMiddleware protects a Fiber route with the server charge flow. It
+// runs server.Mpp.ChargeRequest with the route's scope unless
+// params.MppxScope is set, writes the payment response when payment is
+// required or rejected, and on success stores the verified Credential and
+// Receipt in the Fiber locals and the user context.
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler {
 	return func(c *fiberfw.Ctx) error {
-		chargeParams := params
-		chargeParams.Authorization = c.Get(mpp.HeaderAuthorization)
-		chargeParams.PaymentAuthorization = c.Get(mpp.HeaderPaymentAuthorization)
-		if len(chargeParams.MppxScope) == 0 {
-			chargeParams.MppxScope = fiberScope(c)
+		params := params
+		if len(params.MppxScope) == 0 {
+			params.MppxScope = fiberScope(c)
 		}
-		if encoding := strings.TrimSpace(c.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
-			WritePaymentResponse(c, &mpp.PaymentError{
-				Type:   "about:blank",
-				Status: http.StatusUnsupportedMediaType,
-				Title:  http.StatusText(http.StatusUnsupportedMediaType),
-				Detail: "encoded request bodies are not supported by payment middleware",
-			})
-			return nil
-		}
-		var body []byte
-		if c.Request().IsBodyStream() {
-			var err error
-			body, err = io.ReadAll(io.LimitReader(c.Request().BodyStream(), server.MaxRequestBodyBytes+1))
-			_ = c.Request().CloseBodyStream()
-			if err != nil {
-				c.Response().Header.SetConnectionClose()
-				WritePaymentResponse(c, server.RequestBodyError(err))
-				return nil
-			}
-			if len(body) <= server.MaxRequestBodyBytes {
-				c.Request().SetBodyRaw(body)
-			}
-		} else {
-			body = c.BodyRaw()
-		}
-		if len(body) > server.MaxRequestBodyBytes {
-			c.Response().Header.SetConnectionClose()
-			WritePaymentResponse(c, server.RequestBodyError(&http.MaxBytesError{Limit: server.MaxRequestBodyBytes}))
-			return nil
-		}
-		if len(body) > 0 {
-			chargeParams.Body = append([]byte(nil), body...)
-		}
+		return handle(c, func(r *http.Request) (*server.ChargeResult, error) {
+			return m.ChargeRequest(r, params)
+		})
+	}
+}
 
-		result, err := m.Charge(c.UserContext(), chargeParams)
-		if err != nil {
-			if result != nil && result.Challenge != nil {
-				WritePaymentResponse(c, err, result.Challenges...)
-				return nil
-			}
-			WritePaymentResponse(c, err)
-			return nil
-		}
+// ComposeMiddleware protects a Fiber route with several payment offers, like
+// server.ComposeMiddleware: an unpaid request gets every offer, and a
+// Credential is verified against the offer it echoes. Offers without their
+// own Params.MppxScope bind the route's scope. ComposeMiddleware panics when
+// server.ComposeMiddleware would: offers is empty, an Mpp is nil, realms
+// differ, or an offer cannot be built.
+func ComposeMiddleware(offers ...server.Offer) fiberfw.Handler {
+	_ = server.ComposeMiddleware(offers...) // validate offers up front
+	offers = slices.Clone(offers)
+	return func(c *fiberfw.Ctx) error {
+		scoped := scopedOffers(offers, fiberScope(c))
+		return handle(c, func(r *http.Request) (*server.ChargeResult, error) {
+			return server.ComposeRequest(r, scoped...)
+		})
+	}
+}
 
-		if result.Challenge != nil {
-			WritePaymentResponse(c, nil, result.Challenges...)
-			return nil
+// scopedOffers returns offers with scope bound into every offer that sets
+// none of its own.
+func scopedOffers(offers []server.Offer, scope map[string]string) []server.Offer {
+	if len(scope) == 0 {
+		return offers
+	}
+	scoped := slices.Clone(offers)
+	for i := range scoped {
+		if len(scoped[i].Params.MppxScope) == 0 {
+			scoped[i].Params.MppxScope = scope
 		}
+	}
+	return scoped
+}
 
-		// The payment has settled: a receipt that cannot be formatted is left
-		// out rather than failing the request.
-		receipt, _ := mpp.FormatReceiptWithError(result.Receipt)
-		ctx := server.ContextWithPayment(c.UserContext(), result.Credential, result.Receipt)
-		c.SetUserContext(ctx)
-		c.Locals(credentialKey, result.Credential)
-		c.Locals(receiptKey, result.Receipt)
-		err = c.Next()
-		if err != nil || c.Response().StatusCode() < fiberfw.StatusOK || c.Response().StatusCode() >= fiberfw.StatusMultipleChoices {
-			c.Response().Header.Del(mpp.HeaderPaymentReceipt)
-			return err
-		}
-		c.Set("Cache-Control", "private")
-		if receipt == "" {
-			c.Response().Header.Del(mpp.HeaderPaymentReceipt)
-			return nil
-		}
-		c.Set(mpp.HeaderPaymentReceipt, receipt)
+// handle reads the request body, runs charge on an equivalent net/http
+// request, and writes the payment response or, for a verified payment, runs
+// the rest of the chain and adds the receipt to a 2xx response.
+func handle(c *fiberfw.Ctx, charge func(*http.Request) (*server.ChargeResult, error)) error {
+	if encoding := strings.TrimSpace(c.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		WritePaymentResponse(c, &mpp.PaymentError{
+			Type:   "about:blank",
+			Status: http.StatusUnsupportedMediaType,
+			Title:  http.StatusText(http.StatusUnsupportedMediaType),
+			Detail: "encoded request bodies are not supported by payment middleware",
+		})
 		return nil
 	}
+	body, err := readBody(c)
+	if err != nil {
+		c.Response().Header.SetConnectionClose()
+		WritePaymentResponse(c, server.RequestBodyError(err))
+		return nil
+	}
+
+	r := httpRequest(c, body)
+	result, err := charge(r)
+	if err != nil || result.IsChallenge() {
+		result.ServeHTTP(newResponseWriter(c), r)
+		return nil
+	}
+
+	// The payment has settled: a receipt that cannot be formatted is left
+	// out rather than failing the request.
+	receipt, _ := mpp.FormatReceiptWithError(result.Receipt)
+	ctx := server.ContextWithPayment(c.UserContext(), result.Credential, result.Receipt)
+	c.SetUserContext(ctx)
+	c.Locals(credentialKey, result.Credential)
+	c.Locals(receiptKey, result.Receipt)
+	err = c.Next()
+	if err != nil || c.Response().StatusCode() < fiberfw.StatusOK || c.Response().StatusCode() >= fiberfw.StatusMultipleChoices {
+		c.Response().Header.Del(mpp.HeaderPaymentReceipt)
+		return err
+	}
+	c.Set("Cache-Control", "private")
+	if receipt == "" {
+		c.Response().Header.Del(mpp.HeaderPaymentReceipt)
+		return nil
+	}
+	c.Set(mpp.HeaderPaymentReceipt, receipt)
+	return nil
+}
+
+// readBody reads the request body, at most server.MaxRequestBodyBytes,
+// keeping it available to the protected handler.
+func readBody(c *fiberfw.Ctx) ([]byte, error) {
+	var body []byte
+	if c.Request().IsBodyStream() {
+		var err error
+		body, err = io.ReadAll(io.LimitReader(c.Request().BodyStream(), server.MaxRequestBodyBytes+1))
+		_ = c.Request().CloseBodyStream()
+		if err != nil {
+			return nil, err
+		}
+		if len(body) <= server.MaxRequestBodyBytes {
+			c.Request().SetBodyRaw(body)
+		}
+	} else {
+		body = c.BodyRaw()
+	}
+	if len(body) > server.MaxRequestBodyBytes {
+		return nil, &http.MaxBytesError{Limit: server.MaxRequestBodyBytes}
+	}
+	return append([]byte(nil), body...), nil
+}
+
+// httpRequest returns the net/http request the charge flow reads: the Fiber
+// request's method, path, query, headers, body and user context.
+func httpRequest(c *fiberfw.Ctx, body []byte) *http.Request {
+	r := &http.Request{
+		Method:        c.Method(),
+		URL:           &url.URL{Path: c.Path(), RawQuery: string(c.Request().URI().QueryString())},
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Host:          string(c.Request().Host()),
+		RequestURI:    string(c.Request().RequestURI()),
+	}
+	c.Request().Header.VisitAll(func(key, value []byte) {
+		r.Header.Add(string(key), string(value))
+	})
+	return r.WithContext(c.UserContext())
+}
+
+// responseWriter writes a net/http response, such as ChargeResult.ServeHTTP
+// writes, to the Fiber response.
+type responseWriter struct {
+	c           *fiberfw.Ctx
+	header      http.Header
+	wroteHeader bool
+}
+
+func newResponseWriter(c *fiberfw.Ctx) *responseWriter {
+	return &responseWriter{c: c, header: http.Header{}}
+}
+
+func (w *responseWriter) Header() http.Header { return w.header }
+
+func (w *responseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.c.Response().ResetBody()
+	for key, values := range w.header {
+		w.c.Response().Header.Del(key)
+		for i, value := range values {
+			if i == 0 {
+				w.c.Response().Header.Set(key, value)
+				continue
+			}
+			w.c.Response().Header.Add(key, value)
+		}
+	}
+	w.c.Status(status)
+}
+
+func (w *responseWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.c.Response().AppendBody(body)
+	return len(body), nil
 }
 
 func fiberScope(c *fiberfw.Ctx) map[string]string {
@@ -139,52 +244,29 @@ func fiberScope(c *fiberfw.Ctx) map[string]string {
 //     as a 500 internal payment error. Challenges are retry offers, omitted
 //     for mpp.ErrPaymentOutcomeUnknown.
 //
-// This is the Fiber equivalent of [server.WritePaymentResponse]. Fiber is
-// built on fasthttp and cannot use http.ResponseWriter directly.
+// This is the Fiber equivalent of [server.WritePaymentResponse], except that
+// an initial 402 carries a problem body. Fiber is built on fasthttp and cannot
+// use http.ResponseWriter directly.
 func WritePaymentResponse(c *fiberfw.Ctx, err error, challenges ...*mpp.Challenge) {
-	writePaymentResponse(c, err, challenges, func(ch *mpp.Challenge) string { return ch.Realm })
+	challenges = slices.DeleteFunc(slices.Clone(challenges), func(ch *mpp.Challenge) bool { return ch == nil })
+	if err == nil && len(challenges) > 0 {
+		err = mpp.ErrPaymentRequired(challenges[0].Realm, challenges[0].Description)
+	}
+	server.WritePaymentResponse(newResponseWriter(c), err, challenges...)
 }
 
-func fixedRealm(realm string) func(*mpp.Challenge) string {
-	return func(*mpp.Challenge) string { return realm }
-}
-
-func writePaymentResponse(c *fiberfw.Ctx, err error, challenges []*mpp.Challenge, realmOf func(*mpp.Challenge) string) {
-	kept := make([]*mpp.Challenge, 0, len(challenges))
+// withRealm returns copies of challenges written with realm.
+func withRealm(challenges []*mpp.Challenge, realm string) []*mpp.Challenge {
+	copied := make([]*mpp.Challenge, 0, len(challenges))
 	for _, challenge := range challenges {
-		if challenge != nil {
-			kept = append(kept, challenge)
+		if challenge == nil {
+			continue
 		}
+		c := *challenge
+		c.Realm = realm
+		copied = append(copied, &c)
 	}
-	challenges = kept
-	if err == nil {
-		if len(challenges) == 0 {
-			writeProblem(c, errors.New("fiberadapter: no challenges could be generated"))
-			return
-		}
-		headers, headerErr := authenticateHeaders(challenges, realmOf)
-		if headerErr != nil {
-			writeProblem(c, headerErr)
-			return
-		}
-		setAuthenticateHeaders(c, headers)
-		c.Set("Content-Type", "application/problem+json")
-		c.Set("Cache-Control", "no-store")
-
-		problem := mpp.ErrPaymentRequired(realmOf(challenges[0]), challenges[0].Description)
-		body, _ := json.Marshal(problem.ProblemDetails(""))
-		_ = c.Status(fiberfw.StatusPaymentRequired).Send(body)
-		return
-	}
-	if len(challenges) > 0 && !server.IsPaymentOutcomeUnknown(err) {
-		headers, headerErr := authenticateHeaders(challenges, realmOf)
-		if headerErr != nil {
-			writeProblem(c, headerErr)
-			return
-		}
-		setAuthenticateHeaders(c, headers)
-	}
-	writeProblem(c, err)
+	return copied
 }
 
 // WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry
@@ -193,7 +275,7 @@ func writePaymentResponse(c *fiberfw.Ctx, err error, challenges []*mpp.Challenge
 // Deprecated: Use WritePaymentResponse(c, err, challenge) instead, which
 // writes the challenge's own Realm.
 func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Challenge, realm string) {
-	writePaymentResponse(c, err, []*mpp.Challenge{challenge}, fixedRealm(realm))
+	WritePaymentResponse(c, err, withRealm([]*mpp.Challenge{challenge}, realm)...)
 }
 
 // WritePaymentErrorWithChallenges serializes an MPP error with fresh retry
@@ -203,7 +285,7 @@ func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Ch
 // Deprecated: Use WritePaymentResponse(c, err, challenges...) instead, which
 // writes each challenge's own Realm.
 func WritePaymentErrorWithChallenges(c *fiberfw.Ctx, err error, challenges []*mpp.Challenge, realm string) {
-	writePaymentResponse(c, err, challenges, fixedRealm(realm))
+	WritePaymentResponse(c, err, withRealm(challenges, realm)...)
 }
 
 // WriteChallenge serializes a 402 challenge response using RFC 9457 problem
@@ -212,7 +294,7 @@ func WritePaymentErrorWithChallenges(c *fiberfw.Ctx, err error, challenges []*mp
 // Deprecated: Use WritePaymentResponse(c, nil, challenge) instead, which
 // writes the challenge's own Realm.
 func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
-	writePaymentResponse(c, nil, []*mpp.Challenge{challenge}, fixedRealm(realm))
+	WritePaymentResponse(c, nil, withRealm([]*mpp.Challenge{challenge}, realm)...)
 }
 
 // WriteChallenges serializes a 402 response offering every challenge, one
@@ -222,36 +304,7 @@ func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
 // Deprecated: Use WritePaymentResponse(c, nil, challenges...) instead, which
 // writes each challenge's own Realm.
 func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) {
-	writePaymentResponse(c, nil, challenges, fixedRealm(realm))
-}
-
-// authenticateHeaders serializes every challenge before any header is written
-// so a later failure cannot leave a partial set of offers. A failure is
-// classified by server.ChallengeSerializationError.
-func authenticateHeaders(challenges []*mpp.Challenge, realmOf func(*mpp.Challenge) string) ([]string, error) {
-	headers := make([]string, 0, len(challenges))
-	for _, challenge := range challenges {
-		realm := realmOf(challenge)
-		formatted := challenge
-		if challenge.Realm != realm {
-			copied := *challenge
-			copied.Realm = realm
-			formatted = &copied
-		}
-		header, err := mpp.FormatChallenge(formatted)
-		if err != nil {
-			return nil, server.ChallengeSerializationError(challenge, realm, err)
-		}
-		headers = append(headers, header)
-	}
-	return headers, nil
-}
-
-func setAuthenticateHeaders(c *fiberfw.Ctx, values []string) {
-	c.Response().Header.Del(mpp.HeaderWWWAuthenticate)
-	for _, value := range values {
-		c.Response().Header.Add(mpp.HeaderWWWAuthenticate, value)
-	}
+	WritePaymentResponse(c, nil, withRealm(challenges, realm)...)
 }
 
 // WritePaymentError serializes MPP verification errors as problem details.
@@ -259,23 +312,8 @@ func setAuthenticateHeaders(c *fiberfw.Ctx, values []string) {
 // Deprecated: Use WritePaymentResponse instead, which also writes initial and
 // retry challenges.
 func WritePaymentError(c *fiberfw.Ctx, err error) {
-	writeProblem(c, err)
-}
-
-func writeProblem(c *fiberfw.Ctx, err error) {
-	c.Set("Content-Type", "application/problem+json")
-	c.Set("Cache-Control", "no-store")
-
-	var pe *mpp.PaymentError
-	if errors.As(err, &pe) {
-		body, _ := json.Marshal(pe.ProblemDetails(""))
-		_ = c.Status(pe.Status).Send(body)
-		return
+	if err == nil {
+		err = errors.New("fiberadapter: nil payment error")
 	}
-
-	// See server.WritePaymentResponse: never echo an unexpected error's text.
-	problem := mpp.ErrInternalPayment().WithCause(err)
-	body, _ := json.Marshal(problem.ProblemDetails(""))
-
-	_ = c.Status(problem.Status).Send(body)
+	server.WritePaymentResponse(newResponseWriter(c), err)
 }

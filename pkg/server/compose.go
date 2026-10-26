@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -11,9 +9,15 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
+// Offer pairs an Mpp instance with the ChargeParams of one payment option.
+// Pass several to Compose, ComposeRequest or ComposeMiddleware to offer
+// multiple payment options for one resource. It is the preferred name for
+// ComposeConfig.
+type Offer = ComposeConfig
+
 // ComposeConfig pairs an Mpp instance with the ChargeParams for one payment
 // method. Pass one or more of these to ComposeMiddleware to advertise multiple
-// payment options on a single route.
+// payment options on a single route. New code can use its alias Offer.
 type ComposeConfig struct {
 	Mpp    *Mpp
 	Params ChargeParams
@@ -39,79 +43,24 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 	if len(configs) == 0 {
 		panic("server: ComposeMiddleware requires at least one ComposeConfig")
 	}
-	entries, realm, err := newComposedEntries(configs, true)
+	entries, _, err := newComposedEntries(configs, true)
 	if err != nil {
 		panic(err.Error())
 	}
+	return paymentFlow{entries: entries}.middleware()
+}
 
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			paymentAuth, err := composePaymentCredential(entries, r)
-			if err != nil {
-				WritePaymentResponse(w, mpp.ErrBadRequest(err.Error()))
-				return
-			}
-			body, err := ReadRequestBody(r)
-			if err != nil {
-				WritePaymentResponse(w, RequestBodyError(err))
-				return
-			}
-			scope := ScopeFromHTTPRequest(r, "")
-
-			// No credential — fan out and merge all challenges.
-			if paymentAuth == "" {
-				composeChallenges(w, r, entries, realm, body, scope)
-				return
-			}
-
-			// Credential present — find the matching entry.
-			cred, err := mpp.ParseCredential(paymentAuth)
-			if err != nil {
-				writeComposeMalformedCredentialError(w, r, entries, realm, body, scope, nil, mpp.ErrMalformedCredential(err.Error()))
-				return
-			}
-
-			entry, ok, err := findMatchingEntry(entries, cred, paymentAuth, scope)
-			if err != nil {
-				if isMalformedCredential(err) {
-					writeComposeMalformedCredentialError(w, r, entries, realm, body, scope, cred, err)
-					return
-				}
-				WritePaymentResponse(w, err)
-				return
-			}
-			if !ok {
-				WritePaymentResponse(w, mpp.ErrMethodUnsupported(cred.Challenge.Method+"/"+cred.Challenge.Intent))
-				return
-			}
-
-			params := entry.params
-			params.Authorization = r.Header.Get(mpp.HeaderAuthorization)
-			params.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
-			if len(scope) > 0 && len(params.MppxScope) == 0 {
-				params.MppxScope = scope
-			}
-			if len(body) > 0 {
-				params.Body = body
-			}
-
-			result, err := entry.mpp.Charge(r.Context(), params)
-			if err != nil {
-				if result != nil && result.Challenge != nil {
-					WritePaymentResponse(w, err, result.Challenges...)
-					return
-				}
-				WritePaymentResponse(w, err)
-				return
-			}
-			if result.Challenge != nil {
-				WritePaymentResponse(w, nil, result.Challenges...)
-				return
-			}
-
-			serveVerified(next, w, r, result.Credential, result.Receipt)
-		})
-	}
+// ComposeRequest runs a composed charge for an HTTP request, like
+// ComposeMiddleware does for each request, reading the Payment credential,
+// body and route scope from r (see Mpp.ChargeRequest). An offer whose
+// Params.MppxScope is set keeps that scope.
+//
+// It always returns a non-nil result: when err is non-nil or the result
+// IsChallenge, write it with its ServeHTTP method. Otherwise the payment is
+// verified and the result carries its Credential and Receipt.
+func ComposeRequest(r *http.Request, offers ...Offer) (*ChargeResult, error) {
+	entries, _, err := newComposedEntries(offers, false)
+	return paymentFlow{entries: entries, err: err}.serveRequest(r)
 }
 
 // newComposedEntries validates configs and freezes them into entries that
@@ -147,64 +96,54 @@ func newComposedEntries(configs []ComposeConfig, buildRequests bool) ([]composed
 	return entries, realm, nil
 }
 
-// ComposeCharge runs a composed charge for transports other than HTTP, such as
+// Compose runs a composed charge for transports other than HTTP, such as
 // MCP, that carry the Payment credential themselves. authorization is the
 // credential formatted as an Authorization value ("Payment <base64url>"), or
 // empty when the client sent none.
 //
-// Without a credential it returns every configured Challenge in config order.
-// With one it verifies it against the config whose method, intent and request
+// Without a credential it returns every offered Challenge in offer order.
+// With one it verifies it against the offer whose method, intent and request
 // it echoes, like ComposeMiddleware. A malformed credential returns every
 // Challenge its method and intent offer (or every Challenge) with a
-// malformed-credential error. Each config's ChargeParams are used as given:
-// set Body or MppxScope there to bind them.
-func ComposeCharge(ctx context.Context, authorization string, configs ...ComposeConfig) (*ChargeResult, error) {
+// malformed-credential error. Each offer's ChargeParams are used as given:
+// set Body or MppxScope there to bind them. The result is nil only when err
+// is non-nil and no Challenge could be issued.
+func Compose(ctx context.Context, authorization string, offers ...Offer) (*ChargeResult, error) {
 	// Offers are not built up front: an offer that can no longer be issued,
 	// such as a sponsored one close to its fixed Expires, must not reject a
 	// Credential for another offer.
-	entries, _, err := newComposedEntries(configs, false)
+	entries, _, err := newComposedEntries(offers, false)
 	if err != nil {
 		return nil, err
 	}
-	if authorization == "" {
-		challenges, err := collectComposeChallenges(ctx, entries, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return &ChargeResult{Challenge: challenges[0], Challenges: challenges}, nil
-	}
-
-	cred, err := mpp.ParseCredential(authorization)
-	if err != nil {
-		return composeMalformedCredentialResult(ctx, entries, nil, mpp.ErrMalformedCredential(err.Error()))
-	}
-	entry, ok, err := findMatchingEntry(entries, cred, authorization, nil)
-	if err != nil {
-		if isMalformedCredential(err) {
-			return composeMalformedCredentialResult(ctx, entries, cred, err)
-		}
+	result, err := paymentFlow{entries: entries}.run(ctx, authorization, nil, nil)
+	if err != nil && !result.IsChallenge() {
 		return nil, err
 	}
-	if !ok {
-		return nil, mpp.ErrMethodUnsupported(cred.Challenge.Method + "/" + cred.Challenge.Intent)
-	}
-
-	params := entry.params
-	params.Authorization = authorization
-	params.PaymentAuthorization = authorization
-	return entry.mpp.Charge(ctx, params)
+	return result, err
 }
 
+// ComposeCharge runs a composed charge for transports other than HTTP.
+//
+// Deprecated: Use Compose instead, which takes the same arguments.
+func ComposeCharge(ctx context.Context, authorization string, configs ...ComposeConfig) (*ChargeResult, error) {
+	return Compose(ctx, authorization, configs...)
+}
+
+// composeMalformedCredentialResult answers a malformed credential with every
+// Challenge its method and intent offer, or every Challenge when none match.
 func composeMalformedCredentialResult(
 	ctx context.Context,
 	entries []composedEntry,
 	cred *mpp.Credential,
+	body []byte,
+	scope map[string]string,
 	err error,
 ) (*ChargeResult, error) {
 	var challenges []*mpp.Challenge
 	if cred != nil {
 		for _, entry := range findEntriesByMethodIntent(entries, cred) {
-			offered, chErr := freshComposeChallenges(ctx, entry, nil, nil)
+			offered, chErr := freshComposeChallenges(ctx, entry, body, scope)
 			if chErr != nil {
 				continue
 			}
@@ -213,23 +152,12 @@ func composeMalformedCredentialResult(
 	}
 	if len(challenges) == 0 {
 		var collectErr error
-		challenges, collectErr = collectComposeChallenges(ctx, entries, nil, nil)
+		challenges, collectErr = collectComposeChallenges(ctx, entries, body, scope)
 		if collectErr != nil {
-			return nil, composeChallengeCollectionError(err, collectErr)
+			return failedResult(composeChallengeCollectionError(err, collectErr))
 		}
 	}
-	return &ChargeResult{Challenge: challenges[0], Challenges: challenges}, err
-}
-
-// composeChallenges issues a 402 with all configured challenges merged into
-// separate WWW-Authenticate header values.
-func composeChallenges(w http.ResponseWriter, r *http.Request, entries []composedEntry, realm string, body []byte, scope map[string]string) {
-	challenges, err := collectComposeChallenges(r.Context(), entries, body, scope)
-	if err != nil {
-		WritePaymentResponse(w, err)
-		return
-	}
-	writeComposeChallengeResponse(w, challenges, realm, nil)
+	return challengeResult(challenges, err)
 }
 
 func collectComposeChallenges(ctx context.Context, entries []composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
@@ -249,15 +177,7 @@ func collectComposeChallenges(ctx context.Context, entries []composedEntry, body
 
 // freshComposeChallenges issues every Challenge offered by one compose entry.
 func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
-	params := entry.params
-	params.Authorization = ""
-	if len(scope) > 0 && len(params.MppxScope) == 0 {
-		params.MppxScope = scope
-	}
-	if len(body) > 0 {
-		params.Body = body
-	}
-
+	params := entry.requestParams("", scope, body)
 	result, err := entry.mpp.Charge(ctx, params)
 	if err != nil {
 		return nil, err
@@ -265,35 +185,20 @@ func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byt
 	return result.Challenges, nil
 }
 
-func writeComposeMalformedCredentialError(
-	w http.ResponseWriter,
-	r *http.Request,
-	entries []composedEntry,
-	realm string,
-	body []byte,
-	scope map[string]string,
-	cred *mpp.Credential,
-	err error,
-) {
-	var challenges []*mpp.Challenge
-	if cred != nil {
-		for _, entry := range findEntriesByMethodIntent(entries, cred) {
-			offered, chErr := freshComposeChallenges(r.Context(), entry, body, scope)
-			if chErr != nil {
-				continue
-			}
-			challenges = append(challenges, offered...)
-		}
+// requestParams returns the entry's ChargeParams bound to one request: the
+// Payment credential, the request scope unless the params set their own, and
+// a non-empty body.
+func (entry composedEntry) requestParams(credential string, scope map[string]string, body []byte) ChargeParams {
+	params := entry.params
+	params.Authorization = credential
+	params.PaymentAuthorization = credential
+	if len(scope) > 0 && len(params.MppxScope) == 0 {
+		params.MppxScope = scope
 	}
-	if len(challenges) == 0 {
-		var collectErr error
-		challenges, collectErr = collectComposeChallenges(r.Context(), entries, body, scope)
-		if collectErr != nil {
-			WritePaymentResponse(w, composeChallengeCollectionError(err, collectErr))
-			return
-		}
+	if len(body) > 0 {
+		params.Body = body
 	}
-	writeComposeChallengeResponse(w, challenges, realm, err)
+	return params
 }
 
 // composeChallengeCollectionError reports that no challenge could be issued in
@@ -302,35 +207,6 @@ func writeComposeMalformedCredentialError(
 // so the response is the server failure, not a client error with no offer.
 func composeChallengeCollectionError(malformed, collectErr error) error {
 	return fmt.Errorf("server: issuing challenges after malformed credential (%v): %w", malformed, collectErr)
-}
-
-// writeComposeChallengeResponse writes challenges with err as
-// WritePaymentResponse does, except that an initial 402 (err nil) also
-// carries a payment-required problem body.
-func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Challenge, realm string, err error) {
-	if err != nil {
-		WritePaymentResponse(w, err, challenges...)
-		return
-	}
-	// Serialize every challenge before writing headers so a later failure
-	// cannot leave a partial usable set.
-	headers, headerErr := authenticateHeaders(nonNilChallenges(challenges), challengeRealm)
-	if headerErr != nil {
-		writeProblem(w, headerErr)
-		return
-	}
-	setAuthenticateHeaders(w.Header(), headers)
-
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusPaymentRequired)
-
-	problem := mpp.ErrPaymentRequired(realm, "")
-	json.NewEncoder(w).Encode(problem.ProblemDetails(""))
-}
-
-func isMalformedCredential(err error) bool {
-	return errors.Is(err, mpp.ErrorTypeMalformedCredential)
 }
 
 // findEntriesByMethodIntent returns every compose entry whose method and intent
@@ -418,7 +294,10 @@ func (entry composedEntry) scopedRequests(scope map[string]string, authorization
 	return entry.mpp.buildChargeRequests(params)
 }
 
-func composePaymentCredential(entries []composedEntry, r *http.Request) (string, error) {
+// composePaymentCredential returns the one Payment credential header carries
+// in the fields the entries read it from: Authorization, and
+// Payment-Authorization for entries created WithRequiresAuth.
+func composePaymentCredential(entries []composedEntry, header http.Header) (string, error) {
 	needsDefault := false
 	needsAuth := false
 	for _, entry := range entries {
@@ -432,13 +311,13 @@ func composePaymentCredential(entries []composedEntry, r *http.Request) (string,
 	var authorization, paymentAuthorization string
 	var err error
 	if needsDefault {
-		authorization, err = mpp.FindPaymentAuthorizationStrict(r.Header.Get(mpp.HeaderAuthorization))
+		authorization, err = mpp.FindPaymentAuthorizationStrict(header.Get(mpp.HeaderAuthorization))
 		if err != nil {
 			return "", err
 		}
 	}
 	if needsAuth {
-		paymentAuthorization, err = mpp.FindPaymentAuthorizationStrict(r.Header.Get(mpp.HeaderPaymentAuthorization))
+		paymentAuthorization, err = mpp.FindPaymentAuthorizationStrict(header.Get(mpp.HeaderPaymentAuthorization))
 		if err != nil {
 			return "", err
 		}

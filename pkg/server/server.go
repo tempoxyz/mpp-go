@@ -9,6 +9,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -186,10 +188,13 @@ const minimumSecretKeyBytes = 32
 
 // Mpp is the server-side payment handler.
 type Mpp struct {
-	method       Method
-	realm        string
-	secretKey    string
-	requiresAuth bool
+	method         Method
+	realm          string
+	secretKey      string
+	requiresAuth   bool
+	challengeNonce bool
+	// events is a pointer so Mpp stays comparable.
+	events *Events
 }
 
 // Option configures an Mpp instance.
@@ -203,12 +208,36 @@ func WithRequiresAuth(enabled bool) Option {
 	}
 }
 
-// New creates an Mpp instance. It returns an error when method is nil, or when
-// secretKey is shorter than minimumSecretKeyBytes, since a weak secret yields
-// forgeable, HMAC-bound challenge IDs.
+// WithChallengeNonce makes every Challenge this handler issues unique by
+// binding a random _mpp_nonce into its opaque metadata, so identical charges
+// never share a Challenge ID. Enable it only after every replica verifies
+// nonce-bearing Challenges; verification accepts Challenges with and without
+// a nonce either way. A ChargeParams.EnableChallengeNonce of true still
+// enables it for that call.
+func WithChallengeNonce(enabled bool) Option {
+	return func(m *Mpp) {
+		m.challengeNonce = enabled
+	}
+}
+
+// New creates an Mpp instance.
+//
+// An empty realm defaults to DetectRealm, and an empty secretKey to
+// DetectSecretKey (MPP_SECRET_KEY). New returns an error when method is nil,
+// when secretKey is empty and MPP_SECRET_KEY is unset, or when the secret key
+// is shorter than 32 bytes, since a weak secret yields forgeable, HMAC-bound
+// challenge IDs.
 func New(method Method, realm, secretKey string, opts ...Option) (*Mpp, error) {
-	if method == nil {
+	if isNilMethod(method) {
 		return nil, fmt.Errorf("server: payment method is required")
+	}
+	if realm == "" {
+		realm = DetectRealm()
+	}
+	if secretKey == "" {
+		// An unset MPP_SECRET_KEY leaves the key empty, which the length
+		// check below rejects.
+		secretKey, _ = DetectSecretKey()
 	}
 	if len(secretKey) < minimumSecretKeyBytes {
 		return nil, fmt.Errorf("server: secret key must be at least %d bytes", minimumSecretKeyBytes)
@@ -222,6 +251,20 @@ func New(method Method, realm, secretKey string, opts ...Option) (*Mpp, error) {
 		opt(m)
 	}
 	return m, nil
+}
+
+// isNilMethod reports whether method is nil or a typed nil pointer, map,
+// slice, func or channel, whose Name or Intents call would panic.
+func isNilMethod(method Method) bool {
+	if method == nil {
+		return true
+	}
+	v := reflect.ValueOf(method)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }
 
 // Realm returns the WWW-Authenticate realm used by this payment handler.
@@ -280,14 +323,25 @@ func (m *Mpp) VerifyCredential(ctx context.Context, credential *mpp.Credential) 
 }
 
 // ChargeParams contains the parameters for a charge operation.
+//
+// Authorization, PaymentAuthorization, Body and MppxScope describe the
+// incoming request rather than the price. ChargeRequest, ChargeMiddleware and
+// the framework adapters set them from the HTTP request; set them yourself
+// only when calling Charge for another transport.
 type ChargeParams struct {
 	// EnableChallengeNonce opts into unique issuance after every replica has
 	// nonce-aware verification. Leave false during the initial rolling upgrade.
+	// True enables it for this call even when the handler's default is off.
+	//
+	// Deprecated: Use WithChallengeNonce instead, which sets it for every
+	// Challenge the handler issues.
 	EnableChallengeNonce bool
-	// Authorization is the incoming Authorization header value.
+	// Authorization is the incoming Authorization header value. ChargeRequest
+	// sets it from the request.
 	Authorization string
 	// PaymentAuthorization is the incoming Payment-Authorization header value.
 	// Used when the handler was created with WithRequiresAuth(true).
+	// ChargeRequest sets it from the request.
 	PaymentAuthorization string
 	// Amount is the human-readable charge amount.
 	Amount string
@@ -298,7 +352,8 @@ type ChargeParams struct {
 	// ExternalID is copied into the request and echoed back in the Receipt.
 	ExternalID string
 	// Body is the actual request body to bind via the challenge digest. It is
-	// digested as VerifyParams.Body is.
+	// digested as VerifyParams.Body is. ChargeRequest sets it from a
+	// non-empty request body.
 	Body any
 	// Expires overrides the default Challenge expiry.
 	Expires string
@@ -316,7 +371,9 @@ type ChargeParams struct {
 	ChainID int
 	// Meta stores opaque Challenge metadata.
 	Meta map[string]string
-	// MppxScope binds framework route/resource/query context into the request.
+	// MppxScope binds framework route/resource/query context into the
+	// request. When empty, ChargeRequest and the middlewares set it from the
+	// request (see ScopeFromHTTPRequest); a non-empty value is kept as is.
 	MppxScope map[string]string
 }
 
@@ -333,11 +390,52 @@ type ChargeResult struct {
 	Credential *mpp.Credential
 	// Receipt acknowledges a successfully verified payment.
 	Receipt *mpp.Receipt
+
+	// err is the error returned with this result, written by ServeHTTP.
+	err error
 }
 
-// IsChallenge returns true if the result is a 402 challenge.
+// IsChallenge returns true if the result is a 402 challenge. A nil result is
+// not a challenge.
 func (r *ChargeResult) IsChallenge() bool {
-	return r.Challenge != nil
+	return r != nil && r.Challenge != nil
+}
+
+// ServeHTTP writes the payment response for the result, so a handler can
+// answer an unpaid request with:
+//
+//	res, err := payment.ChargeRequest(r, params)
+//	if err != nil || res.IsChallenge() {
+//		res.ServeHTTP(w, r)
+//		return
+//	}
+//
+// For a Challenge, or an error returned with the result, it writes them as
+// WritePaymentResponse does: the 402 offering every Challenge, or the
+// problem details with retry Challenges. For a verified payment it only sets
+// the Payment-Receipt and Cache-Control: private headers, leaving the status
+// and body to the caller. A nil result writes a 500 internal payment error.
+func (r *ChargeResult) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	switch {
+	case r == nil:
+		WritePaymentResponse(w, errNoChargeResult)
+	case r.err != nil || r.Challenge != nil:
+		WritePaymentResponse(w, r.err, r.offers()...)
+	default:
+		receipt, _ := mpp.FormatReceiptWithError(r.Receipt)
+		setPaymentReceiptForStatus(w.Header(), http.StatusOK, receipt)
+	}
+}
+
+// offers returns every Challenge the result offers.
+func (r *ChargeResult) offers() []*mpp.Challenge {
+	if len(r.Challenges) > 0 {
+		return r.Challenges
+	}
+	if r.Challenge != nil {
+		return []*mpp.Challenge{r.Challenge}
+	}
+	return nil
 }
 
 // buildChargeRequest produces the canonical request map for a charge operation.
@@ -428,12 +526,26 @@ func applyMppxScope(request map[string]any, scope map[string]string) {
 	request["_mppx_scope"] = scope
 }
 
-// Charge handles a charge intent with human-readable amounts.
+// Charge handles a charge intent with human-readable amounts, for any
+// transport: params carries the Credential (Authorization or
+// PaymentAuthorization) and the request Body and MppxScope to bind. For an
+// HTTP request, ChargeRequest reads those from the request instead.
 //
 // Methods implementing ChargeOffersBuilder may offer several requests; Charge
 // then returns one Challenge per offer and verifies a Credential against the
-// offer it echoes.
+// offer it echoes. The result is nil only when err is non-nil and no
+// Challenge could be issued.
 func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, error) {
+	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
+	result, err := m.charge(ctx, params)
+	if result != nil {
+		result.err = err
+	}
+	m.emitCharge(ctx, authorization, result, err)
+	return result, err
+}
+
+func (m *Mpp) charge(ctx context.Context, params ChargeParams) (*ChargeResult, error) {
 	intent, ok := m.method.Intents()[mpp.IntentCharge]
 	if !ok {
 		return nil, fmt.Errorf("method %q does not support charge intent", m.method.Name())
@@ -452,7 +564,7 @@ func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
 	selected := selectChargeOffer(authorization, requests)
 	verifyParams := VerifyParams{
-		EnableChallengeNonce: params.EnableChallengeNonce,
+		EnableChallengeNonce: params.EnableChallengeNonce || m.challengeNonce,
 		Authorization:        authorization,
 		Intent:               intent,
 		Request:              requests[selected],

@@ -83,6 +83,30 @@ Each type has one canonical Parse/Format pair; the other spellings
   `WritePaymentError`, `WritePaymentErrorWithChallenge(s)` and
   `WriteChallenge(s)` are deprecated.
 
+### Server charge flow
+
+- One unexported, framework-neutral flow (`pkg/server/flow.go`) runs every
+  charge: `ChargeMiddleware` is `ComposeMiddleware` with one offer, and the
+  Gin, Echo and Fiber adapters call `(*Mpp).ChargeRequest` or
+  `ComposeRequest` with their route scope, then write the result with
+  `(*ChargeResult).ServeHTTP` (Fiber through a fasthttp-backed
+  `http.ResponseWriter`). Only serving a verified payment (receipt
+  deferral, context values) is framework-specific.
+- HTTP handlers: `res, err := payment.ChargeRequest(r, params)`; when
+  `err != nil || res.IsChallenge()`, `res.ServeHTTP(w, r)`. Other transports
+  (MCP) use `Charge(ctx, params)` with the Credential in `params`, or
+  `server.Compose(ctx, authorization, offers...)` (`Offer` is an alias of
+  `ComposeConfig`; `ComposeCharge` is deprecated).
+- `server.New` defaults an empty realm to `DetectRealm()` and an empty secret
+  to `MPP_SECRET_KEY`. Server-wide options: `WithRequiresAuth`,
+  `WithChallengeNonce` (replaces the deprecated per-call
+  `ChargeParams.EnableChallengeNonce`, which still forces it on) and
+  `WithEvents` (mppx's onChallengeCreated/onPaymentSuccess/onPaymentFailed).
+- `_mppx_scope` stays a `{route, resource, query}` map inside the challenge
+  request. mppx binds a `"GET /route"` string in the opaque metadata instead;
+  aligning them is a wire change older Go verifiers reject, so it needs a
+  product decision first.
+
 ### Package Layout
 
 ```

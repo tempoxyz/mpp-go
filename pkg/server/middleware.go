@@ -69,46 +69,14 @@ func ReceiptFromContext(ctx context.Context) *mpp.Receipt {
 
 // ChargeMiddleware creates an http.Handler middleware for the charge intent.
 //
-// It calls Mpp.Charge with the provided ChargeParams, injects the incoming
-// Authorization and Payment-Authorization headers automatically, returns a 402
-// challenge when payment is required, and stores the verified Credential and
-// Receipt in the request context on success.
+// It runs Mpp.ChargeRequest for each request with the provided ChargeParams,
+// which reads the incoming Authorization or Payment-Authorization header, body
+// and route scope, writes the 402 challenge or problem response when payment
+// is required or rejected, and stores the verified Credential and Receipt in
+// the request context on success. It behaves as ComposeMiddleware with a
+// single offer.
 func ChargeMiddleware(m *Mpp, params ChargeParams) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			chargeParams := params
-			chargeParams.Authorization = r.Header.Get(mpp.HeaderAuthorization)
-			chargeParams.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
-			if len(chargeParams.MppxScope) == 0 {
-				chargeParams.MppxScope = ScopeFromHTTPRequest(r, "")
-			}
-			body, err := ReadRequestBody(r)
-			if err != nil {
-				WritePaymentResponse(w, RequestBodyError(err))
-				return
-			}
-			if len(body) > 0 {
-				chargeParams.Body = body
-			}
-
-			result, err := m.Charge(r.Context(), chargeParams)
-			if err != nil {
-				if result != nil && result.Challenge != nil {
-					WritePaymentResponse(w, err, result.Challenges...)
-					return
-				}
-				WritePaymentResponse(w, err)
-				return
-			}
-
-			if result.Challenge != nil {
-				WritePaymentResponse(w, nil, result.Challenges...)
-				return
-			}
-
-			serveVerified(next, w, r, result.Credential, result.Receipt)
-		})
-	}
+	return m.flow(params).middleware()
 }
 
 // errNoChallenges reports a server configuration that issued no offers. It is

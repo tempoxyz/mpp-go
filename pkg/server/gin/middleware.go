@@ -2,8 +2,10 @@ package ginadapter
 
 import (
 	"net/http"
+	"slices"
 
 	ginfw "github.com/gin-gonic/gin"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -27,59 +29,78 @@ func Receipt(c *ginfw.Context) *mpp.Receipt {
 	return receipt
 }
 
-// ChargeMiddleware protects a Gin route with the server charge flow.
+// ChargeMiddleware protects a Gin route with the server charge flow. It runs
+// server.Mpp.ChargeRequest with the route's scope (its FullPath) unless
+// params.MppxScope is set, writes the payment response when payment is
+// required or rejected, and on success stores the verified Credential and
+// Receipt on the Gin context and the request context.
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFunc {
 	return func(c *ginfw.Context) {
-		chargeParams := params
-		chargeParams.Authorization = c.GetHeader(mpp.HeaderAuthorization)
-		chargeParams.PaymentAuthorization = c.GetHeader(mpp.HeaderPaymentAuthorization)
-		if len(chargeParams.MppxScope) == 0 {
-			chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
+		params := params
+		if len(params.MppxScope) == 0 {
+			params.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
 		}
-		body, err := server.ReadRequestBody(c.Request)
-		if err != nil {
-			server.WritePaymentResponse(c.Writer, server.RequestBodyError(err))
-			c.Abort()
-			return
-		}
-		if len(body) > 0 {
-			chargeParams.Body = body
-		}
+		result, err := m.ChargeRequest(c.Request, params)
+		serve(c, result, err)
+	}
+}
 
-		result, err := m.Charge(c.Request.Context(), chargeParams)
-		if err != nil {
-			if result != nil && result.Challenge != nil {
-				server.WritePaymentResponse(c.Writer, err, result.Challenges...)
-				c.Abort()
-				return
-			}
-			server.WritePaymentResponse(c.Writer, err)
-			c.Abort()
-			return
-		}
+// ComposeMiddleware protects a Gin route with several payment offers, like
+// server.ComposeMiddleware: an unpaid request gets every offer, and a
+// Credential is verified against the offer it echoes. Offers without their
+// own Params.MppxScope bind the route's scope. ComposeMiddleware panics when
+// server.ComposeMiddleware would: offers is empty, an Mpp is nil, realms
+// differ, or an offer cannot be built.
+func ComposeMiddleware(offers ...server.Offer) ginfw.HandlerFunc {
+	_ = server.ComposeMiddleware(offers...) // validate offers up front
+	offers = slices.Clone(offers)
+	return func(c *ginfw.Context) {
+		scope := server.ScopeFromHTTPRequest(c.Request, c.FullPath())
+		result, err := server.ComposeRequest(c.Request, scopedOffers(offers, scope)...)
+		serve(c, result, err)
+	}
+}
 
-		if result.Challenge != nil {
-			server.WritePaymentResponse(c.Writer, nil, result.Challenges...)
-			c.Abort()
-			return
+// scopedOffers returns offers with scope bound into every offer that sets
+// none of its own.
+func scopedOffers(offers []server.Offer, scope map[string]string) []server.Offer {
+	if len(scope) == 0 {
+		return offers
+	}
+	scoped := slices.Clone(offers)
+	for i := range scoped {
+		if len(scoped[i].Params.MppxScope) == 0 {
+			scoped[i].Params.MppxScope = scope
 		}
+	}
+	return scoped
+}
 
-		// The payment has settled: a receipt that cannot be formatted is left
-		// out rather than failing the request.
-		receipt, _ := mpp.FormatReceiptWithError(result.Receipt)
-		ctx := server.ContextWithPayment(c.Request.Context(), result.Credential, result.Receipt)
-		c.Request = c.Request.WithContext(ctx)
-		c.Set(credentialKey, result.Credential)
-		c.Set(receiptKey, result.Receipt)
-		writer := &paymentReceiptWriter{
-			ResponseWriter: c.Writer,
-			receipt:        receipt,
-		}
-		c.Writer = writer
-		c.Next()
-		if !writer.Written() {
-			writer.WriteHeaderNow()
-		}
+// serve writes the payment response for an unpaid or rejected request, or
+// runs the rest of the chain for a verified payment, adding its receipt to a
+// 2xx response.
+func serve(c *ginfw.Context, result *server.ChargeResult, err error) {
+	if err != nil || result.IsChallenge() {
+		result.ServeHTTP(c.Writer, c.Request)
+		c.Abort()
+		return
+	}
+
+	// The payment has settled: a receipt that cannot be formatted is left
+	// out rather than failing the request.
+	receipt, _ := mpp.FormatReceiptWithError(result.Receipt)
+	ctx := server.ContextWithPayment(c.Request.Context(), result.Credential, result.Receipt)
+	c.Request = c.Request.WithContext(ctx)
+	c.Set(credentialKey, result.Credential)
+	c.Set(receiptKey, result.Receipt)
+	writer := &paymentReceiptWriter{
+		ResponseWriter: c.Writer,
+		receipt:        receipt,
+	}
+	c.Writer = writer
+	c.Next()
+	if !writer.Written() {
+		writer.WriteHeaderNow()
 	}
 }
 
