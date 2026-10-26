@@ -138,8 +138,32 @@ go test ./...                                        # Run unit tests
 go build ./...                                       # Build all packages
 docker compose up -d                                 # Start local Tempo devnet
 go run ./examples/charge-basic                       # Run charge-basic example
-TEMPO_RPC_URL=http://localhost:8545 make integration  # Run integration tests
+make integration                                     # Run live integration tests (needs Docker)
 ```
+
+### Live integration tests
+
+The live tests are a nested module, `tests/` (`github.com/tempoxyz/mpp-go/tests`,
+with `replace` to the library), so testcontainers-go stays out of the library's
+`go.mod`. They use the `integration` build tag:
+
+```bash
+cd tests && go test -race -tags integration ./...                    # Docker only
+TEMPO_RPC_URL=http://localhost:8545 go test -tags integration ./...  # running node (compose, Moderato)
+```
+
+- Without `TEMPO_RPC_URL`, `TestMain` starts the image and command of the
+  `tempo-node` service in `docker-compose.yml` (the single source of truth for
+  the pinned image; `TEMPO_LOCALNET_IMAGE` overrides it) and terminates it at
+  the end. It funds one shared payer once; tests using it run sequentially.
+- They cover the HTTP charge flows, each framework adapter (net/http, chi, gin,
+  echo, fiber), a paid MCP tool call, `tempo.RedisStore` replay protection
+  against a real Redis container, and the examples: `examples/*/smoke_test.go`
+  (also tagged `integration`) run each example's server and client, driven by
+  `TestIntegrationExamples` as a child `go test ./examples/...`.
+- `.github/workflows/smoke-cross-sdk.yml` pays the Go example server with the
+  pinned mppx CLI and a small mppx server (`.github/smoke-cross-sdk/`) with the
+  Go client.
 
 ## READMEs
 

@@ -1,0 +1,7 @@
+# GO-2026-5932: golang.org/x/crypto/openpgp is deprecated and unmaintained, and
+# no fixed version exists. golang.org/x/crypto is only an indirect requirement
+# of this live-test module, and nothing here imports its openpgp packages
+# (go list -deps -test -tags integration ./... | grep openpgp is empty).
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "golang.org/x/crypto/openpgp is not imported by the tests module (indirect dependency only), and the advisory has no fixed version."
