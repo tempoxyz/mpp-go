@@ -1,7 +1,6 @@
 package ginadapter
 
 import (
-	"fmt"
 	"net/http"
 
 	ginfw "github.com/gin-gonic/gin"
@@ -65,12 +64,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFu
 			return
 		}
 
-		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
-		if err != nil {
-			server.WritePaymentResponse(c.Writer, fmt.Errorf("ginadapter: formatting receipt: %w", err))
-			c.Abort()
-			return
-		}
+		// The payment has settled: a receipt that cannot be formatted is left
+		// out rather than failing the request.
+		receipt, _ := mpp.FormatReceiptWithError(result.Receipt)
 		ctx := server.ContextWithPayment(c.Request.Context(), result.Credential, result.Receipt)
 		c.Request = c.Request.WithContext(ctx)
 		c.Set(credentialKey, result.Credential)
@@ -121,5 +117,9 @@ func (w *paymentReceiptWriter) prepare(status int) {
 		return
 	}
 	w.Header().Set("Cache-Control", "private")
+	if w.receipt == "" {
+		w.Header().Del(mpp.HeaderPaymentReceipt)
+		return
+	}
 	w.Header().Set(mpp.HeaderPaymentReceipt, w.receipt)
 }

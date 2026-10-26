@@ -65,8 +65,12 @@ Each type has one canonical Parse/Format pair; the other spellings
 | `Receipt` | `ParseReceipt` | `FormatReceiptWithError(r) (string, error)` |
 
 - Create challenges with `NewChallengeWithError` and check an echoed ID with
-  `(*Challenge).VerifyID(secret)`, which binds `c.Realm`. `NewChallenge`,
+  `(*Challenge).VerifyID(secret)`, which binds `c.Realm`; also compare
+  `c.Realm` with the realm you expect, which VerifyID does not. `NewChallenge`,
   `GenerateChallengeID` and `Verify(secret, realm)` are deprecated.
+- The Format functions reject what their Parse counterpart rejects (missing
+  or invalid fields, a receipt status other than "success", oversized
+  headers), so the SDK never emits a header its own parser refuses.
 - Responses: `ChallengesFromResponse` and `ReceiptFromResponse`. Expiry:
   `ExpiresIn`, `ParseExpires`, `CheckExpires`. Body digests:
   `ComputeBodyDigest`, `VerifyBodyDigest`. Amounts: `ParseAmount` (`*big.Int`).

@@ -71,7 +71,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 				return
 			}
 
-			entry, ok, err := findMatchingEntry(entries, cred, scope)
+			entry, ok, err := findMatchingEntry(entries, cred, paymentAuth, scope)
 			if err != nil {
 				if isMalformedCredential(err) {
 					writeComposeMalformedCredentialError(w, r, entries, realm, body, scope, cred, err)
@@ -178,7 +178,7 @@ func ComposeCharge(ctx context.Context, authorization string, configs ...Compose
 	if err != nil {
 		return composeMalformedCredentialResult(ctx, entries, nil, mpp.ErrMalformedCredential(err.Error()))
 	}
-	entry, ok, err := findMatchingEntry(entries, cred, nil)
+	entry, ok, err := findMatchingEntry(entries, cred, authorization, nil)
 	if err != nil {
 		if isMalformedCredential(err) {
 			return composeMalformedCredentialResult(ctx, entries, cred, err)
@@ -355,7 +355,10 @@ func findEntriesByMethodIntent(entries []composedEntry, cred *mpp.Credential) []
 // findMatchingEntry selects the entry whose method, intent, and canonical
 // request match the credential. This allows multiple entries with the same
 // method+intent but different amounts, currencies, or opaque metadata.
-func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[string]string) (composedEntry, bool, error) {
+// authorization is the Payment credential cred was parsed from; offers are
+// built against it as received, not a re-encoding of cred, which can grow
+// past the header size limit.
+func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorization string, scope map[string]string) (composedEntry, bool, error) {
 	echoedRequest, err := echoedRequestMap(cred)
 	if err != nil {
 		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err)).WithCause(err)
@@ -370,7 +373,7 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
 			continue
 		}
-		requests, err := entry.scopedRequests(scope, cred)
+		requests, err := entry.scopedRequests(scope, authorization)
 		if err != nil {
 			return composedEntry{}, false, err
 		}
@@ -399,19 +402,16 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 	return composedEntry{}, false, nil
 }
 
-// scopedRequests builds an entry's offers to match against cred. Building
-// them with the Credential present skips issuance-only checks, such as the
-// sponsored-expiry floor, that do not apply to verifying a Credential.
-func (entry composedEntry) scopedRequests(scope map[string]string, cred *mpp.Credential) ([]map[string]any, error) {
+// scopedRequests builds an entry's offers to match against the Payment
+// credential in authorization. Building them with the Credential present
+// skips issuance-only checks, such as the sponsored-expiry floor, that do not
+// apply to verifying a Credential.
+func (entry composedEntry) scopedRequests(scope map[string]string, authorization string) ([]map[string]any, error) {
 	params := entry.params
 	if len(scope) > 0 && len(params.MppxScope) == 0 {
 		params.MppxScope = scope
 	}
-	if cred != nil {
-		authorization, err := mpp.FormatCredential(cred)
-		if err != nil {
-			return nil, err
-		}
+	if authorization != "" {
 		params.Authorization = authorization
 		params.PaymentAuthorization = authorization
 	}

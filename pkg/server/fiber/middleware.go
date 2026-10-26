@@ -3,7 +3,6 @@ package fiberadapter
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -90,11 +89,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 			return nil
 		}
 
-		receipt, err := mpp.FormatReceiptWithError(result.Receipt)
-		if err != nil {
-			WritePaymentResponse(c, fmt.Errorf("fiberadapter: formatting receipt: %w", err))
-			return nil
-		}
+		// The payment has settled: a receipt that cannot be formatted is left
+		// out rather than failing the request.
+		receipt, _ := mpp.FormatReceiptWithError(result.Receipt)
 		ctx := server.ContextWithPayment(c.UserContext(), result.Credential, result.Receipt)
 		c.SetUserContext(ctx)
 		c.Locals(credentialKey, result.Credential)
@@ -105,6 +102,10 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler
 			return err
 		}
 		c.Set("Cache-Control", "private")
+		if receipt == "" {
+			c.Response().Header.Del(mpp.HeaderPaymentReceipt)
+			return nil
+		}
 		c.Set(mpp.HeaderPaymentReceipt, receipt)
 		return nil
 	}

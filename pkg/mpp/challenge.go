@@ -101,7 +101,8 @@ func NewChallenge(secretKey, realm, method, intent string, request map[string]an
 // computed from secretKey over realm and the other challenge parameters (see
 // GenerateChallengeIDWithError). It rejects invalid advertised credential
 // headers and request values that JCS cannot represent without changing their
-// numeric value. Check the ID of an echoed challenge with Challenge.VerifyID.
+// numeric value. Check the ID of an echoed challenge with Challenge.VerifyID,
+// and its Realm against the realm you expect.
 func NewChallengeWithError(secretKey, realm, method, intent string, request map[string]any, opts ...ChallengeOption) (*Challenge, error) {
 	cfg := &challengeConfig{}
 	for _, o := range opts {
@@ -256,6 +257,11 @@ func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
 // to the challenge's parameters, including c.Realm. It uses constant-time
 // comparison. A parsed challenge whose issuer encoded opaque non-canonically
 // is verified against that encoding, as it is echoed.
+//
+// VerifyID only proves that the holder of secretKey issued the ID for c.Realm;
+// it does not check that c.Realm is a realm you serve. A server that shares
+// secretKey across realms must also compare c.Realm with its own expected
+// realm, or a challenge issued for another realm verifies here.
 func (c *Challenge) VerifyID(secretKey string) bool {
 	return c.verify(secretKey, c.Realm)
 }
@@ -263,7 +269,9 @@ func (c *Challenge) VerifyID(secretKey string) bool {
 // Verify checks whether the challenge ID matches the expected HMAC for the
 // given secretKey and realm. Uses constant-time comparison.
 //
-// Deprecated: Use VerifyID instead, which checks the challenge's own Realm.
+// Deprecated: Use VerifyID together with a c.Realm == realm check. VerifyID
+// binds the ID to the challenge's own Realm and does not compare it with the
+// realm you expect, so the check is still the caller's.
 func (c *Challenge) Verify(secretKey, realm string) bool {
 	return c.verify(secretKey, realm)
 }

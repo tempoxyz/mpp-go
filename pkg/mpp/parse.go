@@ -316,7 +316,9 @@ func ParseChallenge(header string) (*Challenge, error) {
 // challenge, values that cannot be safely represented in quoted auth-params,
 // an invalid advertised credential header, empty required auth-params (id,
 // realm, method, intent, request), which would otherwise be omitted and yield
-// a challenge ParseChallenge rejects, and a header over the size limit.
+// a challenge ParseChallenge rejects, a method that is not a valid method name
+// (lowercase ASCII letters), a RequestB64 that is not base64url-encoded JSON,
+// and a header over the size limit.
 func FormatChallenge(c *Challenge) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("mpp: challenge is nil")
@@ -384,7 +386,16 @@ func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error)
 		}
 	}
 
+	if strict && c.Method != "" && !isMethodName(c.Method) {
+		return "", fmt.Errorf("mpp: invalid challenge method %q", c.Method)
+	}
+
 	reqB64 := c.RequestB64
+	if strict && reqB64 != "" {
+		if _, err := B64Decode(reqB64); err != nil {
+			return "", fmt.Errorf("mpp: invalid challenge request: %w", err)
+		}
+	}
 	if reqB64 == "" {
 		var err error
 		reqB64, err = b64EncodeRequestWithError(c.Request)
@@ -584,9 +595,16 @@ func ParseCredential(header string) (*Credential, error) {
 //
 //	Payment <base64url-json>
 //
-// It returns an error for a nil credential, values JSON cannot encode, and a
-// header over the size limit.
+// It returns an error for a nil credential, for a credential ParseCredential
+// would reject because its challenge echo lacks id, method, intent or request,
+// its method is not a valid method name, its advertised credential header is
+// not a valid header name or its payload is nil (payload must be a JSON
+// object), for values JSON cannot encode, and for a header over the size
+// limit.
 func FormatCredential(c *Credential) (string, error) {
+	if err := validateCredential(c); err != nil {
+		return "", err
+	}
 	header, err := formatAuthorization(c)
 	if err != nil {
 		return "", err
@@ -595,6 +613,32 @@ func FormatCredential(c *Credential) (string, error) {
 		return "", fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 	return header, nil
+}
+
+// validateCredential rejects a credential ParseCredential would reject.
+func validateCredential(c *Credential) error {
+	if c == nil {
+		return fmt.Errorf("mpp: credential is nil")
+	}
+	switch echo := c.Challenge; {
+	case echo.ID == "":
+		return fmt.Errorf("mpp: credential challenge missing required field: id")
+	case echo.Method == "":
+		return fmt.Errorf("mpp: credential challenge missing required field: method")
+	case !isMethodName(echo.Method):
+		return fmt.Errorf("mpp: invalid credential challenge method %q", echo.Method)
+	case echo.Intent == "":
+		return fmt.Errorf("mpp: credential challenge missing required field: intent")
+	case echo.Request == "":
+		return fmt.Errorf("mpp: credential challenge missing required field: request")
+	}
+	if _, err := parseAdvertisedCredentialHeader(c.Challenge.Header); err != nil {
+		return err
+	}
+	if c.Payload == nil {
+		return fmt.Errorf("mpp: credential payload must be an object")
+	}
+	return nil
 }
 
 // FormatAuthorization formats a Credential as an Authorization header value.
@@ -809,8 +853,9 @@ func FormatPaymentReceipt(r *Receipt) string {
 //	<base64url-json>
 //
 // It returns an error for a nil receipt, for a receipt ParseReceipt would
-// reject because its status, reference or method is missing or its method is
-// not a valid method name, and for Extensions values JSON cannot encode.
+// reject because its status is not "success", its reference or method is
+// missing, its method is not a valid method name or the encoded header exceeds
+// the size limit, and for Extensions values JSON cannot encode.
 func FormatReceiptWithError(r *Receipt) (string, error) {
 	if r == nil {
 		return "", fmt.Errorf("mpp: receipt is nil")
@@ -818,6 +863,8 @@ func FormatReceiptWithError(r *Receipt) (string, error) {
 	switch {
 	case r.Status == "":
 		return "", fmt.Errorf("mpp: receipt missing status")
+	case r.Status != "success":
+		return "", fmt.Errorf("mpp: invalid receipt status: %q", r.Status)
 	case r.Reference == "":
 		return "", fmt.Errorf("mpp: receipt missing reference")
 	case r.Method == "":
@@ -829,7 +876,11 @@ func FormatReceiptWithError(r *Receipt) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("mpp: encoding receipt: %w", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(encoded), nil
+	header := base64.RawURLEncoding.EncodeToString(encoded)
+	if len(header) > maxHeaderPayload {
+		return "", fmt.Errorf("mpp: Payment-Receipt header exceeds maximum size")
+	}
+	return header, nil
 }
 
 // receiptFields returns the canonical Payment-Receipt JSON fields of r.

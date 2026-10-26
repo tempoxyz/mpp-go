@@ -44,11 +44,13 @@ func (m *mockMethod) CreateCredential(_ context.Context, ch *mpp.Challenge) (*mp
 func newTestCredential(method string) *mpp.Credential {
 	return &mpp.Credential{
 		Challenge: mpp.ChallengeEcho{
-			ID:     "test-id",
-			Method: method,
-			Intent: "payment",
+			ID:      "test-id",
+			Method:  method,
+			Intent:  "payment",
+			Request: "e30",
 		},
-		Source: "test",
+		Payload: map[string]any{},
+		Source:  "test",
 	}
 }
 

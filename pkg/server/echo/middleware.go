@@ -1,8 +1,6 @@
 package echoadapter
 
 import (
-	"fmt"
-
 	echofw "github.com/labstack/echo/v4"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -61,10 +59,8 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 				return nil
 			}
 
-			if _, err := mpp.FormatReceiptWithError(result.Receipt); err != nil {
-				server.WritePaymentResponse(c.Response(), fmt.Errorf("echoadapter: formatting receipt: %w", err))
-				return nil
-			}
+			// The payment has settled: DeferPaymentReceipt leaves out a
+			// receipt that cannot be formatted rather than failing the request.
 			ctx := server.ContextWithPayment(c.Request().Context(), result.Credential, result.Receipt)
 			c.SetRequest(c.Request().WithContext(ctx))
 			c.Set(credentialKey, result.Credential)

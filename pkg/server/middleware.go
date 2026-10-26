@@ -156,12 +156,10 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 }
 
 func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, credential *mpp.Credential, receipt *mpp.Receipt) {
-	header, err := mpp.FormatReceiptWithError(receipt)
-	if err != nil {
-		// The payment method returned a receipt clients would reject.
-		WritePaymentResponse(w, fmt.Errorf("server: formatting receipt: %w", err))
-		return
-	}
+	// The payment has settled, so the payer gets the resource even when the
+	// receipt cannot be formatted: the Payment-Receipt header is left out
+	// rather than failing the request.
+	header, _ := mpp.FormatReceiptWithError(receipt)
 	ctx := ContextWithPayment(r.Context(), credential, receipt)
 	wrapped, complete := deferPaymentReceiptHeader(w, header)
 	next.ServeHTTP(wrapped, r.WithContext(ctx))
