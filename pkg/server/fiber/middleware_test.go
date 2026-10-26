@@ -12,9 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	fiberfw "github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -89,7 +92,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 
 	paidRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse, err := app.Test(paidRequest)
 	if !assert.NoErrorf(t, err,
 		"app.Test() error = %v", err) {
@@ -125,7 +128,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 
 	failedRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	failedRequest.Header.Set("Authorization", credential.ToAuthorization())
+	failedRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	failedRequest.Header.Set("X-Downstream-Error", "true")
 	failedResponse, err := app.Test(failedRequest)
 	require.NoError(t, err)
@@ -134,7 +137,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	assert.Empty(t, failedResponse.Header.Get(mpp.HeaderPaymentReceipt))
 
 	redirectRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	redirectRequest.Header.Set("Authorization", credential.ToAuthorization())
+	redirectRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	redirectRequest.Header.Set("X-Downstream-Redirect", "true")
 	redirectResponse, err := app.Test(redirectRequest)
 	require.NoError(t, err)
@@ -173,7 +176,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodGet, "/paid/two?view=full", nil)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse, err := app.Test(paidRequest)
 	require.NoError(t, err)
 	defer paidResponse.Body.Close()
@@ -201,7 +204,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
 	require.NoError(t, err)
-	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+	assert.Equal(t, mpp.ComputeBodyDigest([]byte(originalBody)), challenge.Digest)
 
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -209,7 +212,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(`{"query":"tampered"}`))
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse, err := app.Test(paidRequest)
 	require.NoError(t, err)
 	defer paidResponse.Body.Close()
@@ -242,7 +245,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse, err := app.Test(paidRequest)
 	require.NoError(t, err)
 	defer paidResponse.Body.Close()
@@ -362,7 +365,7 @@ func TestWritePaymentErrorHidesUnexpectedErrorText(t *testing.T) {
 
 	app := fiberfw.New()
 	app.Get("/", func(c *fiberfw.Ctx) error {
-		WritePaymentError(c, fmt.Errorf("dial https://rpc.example/secret-key: connection refused"))
+		WritePaymentResponse(c, fmt.Errorf("dial https://rpc.example/secret-key: connection refused"))
 		return nil
 	})
 	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
@@ -439,13 +442,13 @@ func TestChargeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
 	assert.Empty(t, resp.Header.Get(mpp.HeaderWWWAuthenticate))
 }
 
-func TestWritePaymentErrorWithChallengesOmitsChallengesForOutcomeUnknown(t *testing.T) {
+func TestWritePaymentResponseOmitsRetryChallengesForOutcomeUnknown(t *testing.T) {
 	t.Parallel()
 
-	challenge := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "1"})
+	challenge := mpptest.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "1"})
 	app := fiberfw.New()
 	app.Get("/", func(c *fiberfw.Ctx) error {
-		WritePaymentErrorWithChallenges(c, mpp.ErrPaymentOutcomeUnknown(challenge.ID), []*mpp.Challenge{challenge}, "api.example.com")
+		WritePaymentResponse(c, mpp.ErrPaymentOutcomeUnknown(challenge.ID), challenge)
 		return nil
 	})
 

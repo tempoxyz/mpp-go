@@ -1,9 +1,10 @@
 package mpp
 
 import (
-	"github.com/stretchr/testify/require"
 	"math"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatAuthorizationStrictRejectsSerializationErrors(t *testing.T) {

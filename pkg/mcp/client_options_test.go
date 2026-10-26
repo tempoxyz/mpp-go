@@ -2,13 +2,10 @@ package mcp_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/url"
 	"testing"
 
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -76,31 +73,4 @@ func TestMCPClientDefersToOriginValidator(t *testing.T) {
 	require.ErrorContains(t, err, "validator refused realm")
 	assert.Empty(t, refused.credentials())
 
-	// The deprecated realm list still overrides the validator.
-	legacy := &validatingProofMethod{trusted: "other.example"}
-	session = connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{
-		Methods:                 []client.Method{legacy},
-		TrustedTempoProofRealms: []string{"VICTIM.example"}, //nolint:staticcheck // deprecated field under test
-	}))
-	_, err = callPremium(context.Background(), session, nil)
-	require.Error(t, err)
-	assert.Len(t, legacy.credentials(), 1)
-}
-
-func TestMCPLegacyProofRealmsOnlyOverrideProofChallenges(t *testing.T) {
-	challenge, err := mpp.NewChallengeWithError(secretKey, "victim.example", "tempo", "charge", map[string]any{"amount": "1", "currency": "0x20c0"})
-	require.NoError(t, err)
-	data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}})
-	require.NoError(t, err)
-	server := newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return nil, &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "Payment Required", Data: data}
-	})
-	method := &validatingProofMethod{trusted: "other.example"}
-	session := connect(t, server, mcpclient.Wrap(newClient(), mcpclient.Config{
-		Methods:                 []client.Method{method},
-		TrustedTempoProofRealms: []string{"victim.example"}, //nolint:staticcheck // deprecated field under test
-	}))
-	_, err = callPremium(context.Background(), session, nil)
-	require.ErrorContains(t, err, "validator refused realm")
-	assert.Empty(t, method.credentials())
 }

@@ -30,7 +30,6 @@ func TestChainIDConstantsMatchTempoGo(t *testing.T) {
 	t.Parallel()
 	assert.EqualValues(t, tempotx.ChainIdMainnet, tempo.ChainIDMainnet)
 	assert.EqualValues(t, tempotx.ChainIdModerato, tempo.ChainIDModerato)
-	assert.Equal(t, tempo.USDCEAddress, tempo.MainnetUSDCAddress) //nolint:staticcheck // deprecated alias under test
 }
 
 func TestAllowedFeeTokensWithSinglePolicy(t *testing.T) {
@@ -93,23 +92,12 @@ func TestFeePayerPolicyMaxFeeClampsDefaultPriorityFee(t *testing.T) {
 
 func TestFeePayerConfigConflicts(t *testing.T) {
 	t.Parallel()
-	legacy := map[string]FeePayerPolicy{tempo.PathUSDAddress: defaultFeePayerPolicy()}
-	for name, config := range map[string]IntentConfig{
-		"policies and tokens": {FeePayerPolicies: legacy, AllowedFeeTokens: []string{tempo.PathUSDAddress}},
-		"policies and policy": {FeePayerPolicies: legacy, FeePayerPolicy: &FeePayerPolicy{}},
-	} {
-		config.Store = tempo.NewMemoryStore()
-		_, err := NewIntent(config)
-		require.ErrorContainsf(t, err, "cannot be combined", name)
-	}
 	_, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), AllowedFeeTokens: []string{}})
 	require.ErrorContains(t, err, "at least one fee token")
 	_, err = NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), AllowedFeeTokens: []string{"0x1234"}})
 	require.ErrorContains(t, err, "invalid allowed fee token")
 	_, err = NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerPolicy: &FeePayerPolicy{MaxTotalFee: big.NewInt(0)}})
 	require.ErrorContains(t, err, "invalid max total fee")
-	_, err = New(Config{Store: tempo.NewMemoryStore(), FeePayerPolicies: legacy, AllowedFeeTokens: []string{tempo.PathUSDAddress}})
-	require.ErrorContains(t, err, "cannot be combined")
 }
 
 func TestIntentReusesRPCClients(t *testing.T) {

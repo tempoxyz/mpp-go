@@ -670,7 +670,6 @@ func TestParseChallenge(t *testing.T) {
 				fn   func(string) (*Challenge, error)
 			}{
 				{name: "ParseChallenge", fn: ParseChallenge},
-				{name: "FromAuthenticate", fn: FromAuthenticate},
 			} {
 				got, err := parse.fn(tt.header)
 				if tt.wantErr != "" {
@@ -813,7 +812,6 @@ func TestParseCredential(t *testing.T) {
 				fn   func(string) (*Credential, error)
 			}{
 				{name: "ParseCredential", fn: ParseCredential},
-				{name: "FromAuthorization", fn: FromAuthorization},
 			} {
 				got, err := parse.fn(tt.header)
 				if tt.wantErr != "" {
@@ -937,7 +935,7 @@ func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
 
 		parsed, err := ParseChallenge(issued.ToAuthenticate(realm))
 		require.NoError(t, err)
-		assert.True(t, parsed.Verify(secret, realm),
+		assert.True(t, parsed.verify(secret, realm),
 			"challenge for amount %d was issued by this server and must verify", amount)
 	}
 }

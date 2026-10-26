@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -26,7 +29,7 @@ type relayCall struct {
 }
 
 func relayTestCredential(payload map[string]any) *mpp.Credential {
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"test-secret-key-minimum-32-byte-secret",
 		"api.example.com",
 		tempo.MethodName,
@@ -36,7 +39,7 @@ func relayTestCredential(payload map[string]any) *mpp.Credential {
 			"currency":  "0x20c0000000000000000000000000000000000001",
 			"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 		},
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	return challenge.NewCredential(payload, mpp.WithCredentialSource(
 		"did:pkh:eip155:42431:0x1234567890123456789012345678901234567890",
@@ -204,7 +207,7 @@ func TestRelayIntentExposesCredentialHooks(t *testing.T) {
 			},
 		}
 	})
-	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+	method, err := New(Config{Store: tempo.NewMemoryStore(),
 		ChainID:   42431,
 		Currency:  testCurrency,
 		Recipient: testRecipient,
@@ -430,14 +433,14 @@ func TestNewRejectsIntentWithRelay(t *testing.T) {
 	method, err := New(config)
 	require.ErrorContains(t, err, "Config.Intent cannot be combined with Relay")
 	require.Nil(t, method)
-	method, err = MethodFromConfig(config)
+	method, err = New(config)
 	require.ErrorContains(t, err, "Config.Intent cannot be combined with Relay")
 	require.Nil(t, method)
 }
 
 func TestRelayMethodAllowsRelayResolvedChain(t *testing.T) {
 	t.Parallel()
-	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+	method, err := New(Config{Store: tempo.NewMemoryStore(),
 		ChainID:   999999,
 		Currency:  testCurrency,
 		Recipient: testRecipient,

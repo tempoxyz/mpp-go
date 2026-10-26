@@ -7,9 +7,13 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -31,13 +35,13 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 			"supportedModes": []string{"pull", "push"},
 		},
 	}
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -45,7 +49,7 @@ func TestVerifyOrChallenge_UsesCanonicalRequestMatching(t *testing.T) {
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request: map[string]any{
 			"amount":    "100",
@@ -92,7 +96,7 @@ func TestVerifyOrChallenge_VerifiesLargeIntegerStringRequest(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 
-	params.Authorization = credential.ToAuthorization()
+	params.Authorization = mpptest.FormatCredential(credential)
 	result, err := VerifyOrChallenge(context.Background(), params)
 	if !assert.NoError(t, err) || !assert.NotNil(t, result.Receipt) {
 		return
@@ -126,13 +130,13 @@ func TestVerifyOrChallengeRejectsLossyEchoedJCSRequest(t *testing.T) {
 			Method:  "tempo",
 			Intent:  "charge",
 			Request: base64.RawURLEncoding.EncodeToString([]byte(`{"amount":1234567890123456789}`)),
-			Expires: mpp.Expires.Minutes(5),
+			Expires: mpp.ExpiresIn(5 * time.Minute),
 		},
 		Payload: map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       map[string]any{"amount": "100"},
 		Realm:         "api.example.com",
@@ -150,13 +154,13 @@ func TestVerifyOrChallengeRejectsLossyEchoedJCSRequest(t *testing.T) {
 
 func TestVerifyOrChallenge_UsesPublicBroadcastingIntent(t *testing.T) {
 	request := map[string]any{"amount": "100", "currency": "0xabc", "recipient": "0xdef"}
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -165,7 +169,7 @@ func TestVerifyOrChallenge_UsesPublicBroadcastingIntent(t *testing.T) {
 	intent := &publicSplitTestIntent{}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        intent,
 		Request:       request,
 		Realm:         "api.example.com",
@@ -190,14 +194,14 @@ func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
 		"currency":  "0xabc",
 		"recipient": "0xdef",
 	}
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
 		mpp.WithMeta(map[string]string{}),
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -224,7 +228,7 @@ func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
@@ -247,15 +251,15 @@ func TestVerifyOrChallenge_PreservesEmptyOpaqueMaps(t *testing.T) {
 func TestVerifyOrChallenge_VerifiesBodyDigest(t *testing.T) {
 	request := map[string]any{"amount": "100"}
 	body := []byte(`{"query":"paid"}`)
-	digest := mpp.BodyDigest.Compute(body)
-	challenge := mpp.NewChallenge(
+	digest := mpp.ComputeBodyDigest(body)
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
 		mpp.WithDigest(digest),
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -263,7 +267,7 @@ func TestVerifyOrChallenge_VerifiesBodyDigest(t *testing.T) {
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Body:          body,
@@ -284,14 +288,14 @@ func TestVerifyOrChallenge_VerifiesBodyDigest(t *testing.T) {
 
 func TestVerifyOrChallenge_RejectsMismatchedBodyDigest(t *testing.T) {
 	request := map[string]any{"amount": "100"}
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
-		mpp.WithDigest(mpp.BodyDigest.Compute([]byte(`{"query":"paid"}`))),
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithDigest(mpp.ComputeBodyDigest([]byte(`{"query":"paid"}`))),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -299,7 +303,7 @@ func TestVerifyOrChallenge_RejectsMismatchedBodyDigest(t *testing.T) {
 	}
 
 	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Body:          []byte(`{"query":"tampered"}`),
@@ -317,13 +321,13 @@ func TestVerifyOrChallenge_RejectsMismatchedBodyDigest(t *testing.T) {
 func TestVerifyOrChallenge_ReissuesChallengeForLegacyCredentialOnBodyRequest(t *testing.T) {
 	request := map[string]any{"amount": "100"}
 	body := []byte(`{"query":"paid"}`)
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -331,7 +335,7 @@ func TestVerifyOrChallenge_ReissuesChallengeForLegacyCredentialOnBodyRequest(t *
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Body:          body,
@@ -349,18 +353,18 @@ func TestVerifyOrChallenge_ReissuesChallengeForLegacyCredentialOnBodyRequest(t *
 		return
 	}
 	assert.Nil(t, result.Receipt)
-	assert.Equal(t, mpp.BodyDigest.Compute(body), result.Challenge.Digest)
+	assert.Equal(t, mpp.ComputeBodyDigest(body), result.Challenge.Digest)
 }
 
 func TestVerifyOrChallenge_ExpiredDigestCredentialReturnsPaymentExpired(t *testing.T) {
 	request := map[string]any{"amount": "100"}
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
-		mpp.WithDigest(mpp.BodyDigest.Compute([]byte(`{"query":"paid"}`))),
+		mpp.WithDigest(mpp.ComputeBodyDigest([]byte(`{"query":"paid"}`))),
 		mpp.WithExpires("2020-01-01T00:00:00Z"),
 	)
 	credential := &mpp.Credential{
@@ -369,7 +373,7 @@ func TestVerifyOrChallenge_ExpiredDigestCredentialReturnsPaymentExpired(t *testi
 	}
 
 	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Body:          []byte(`{"query":"tampered"}`),
@@ -393,7 +397,7 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 		"currency":  "0xabc",
 		"recipient": "0xdef",
 	}
-	tampered := mpp.NewChallenge(
+	tampered := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
@@ -406,7 +410,7 @@ func TestVerifyOrChallenge_RejectsMissingExpires(t *testing.T) {
 	}
 
 	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
@@ -426,7 +430,7 @@ func TestVerifyOrChallenge_RejectsMissingDefaultExpires(t *testing.T) {
 		"currency":  "0xabc",
 		"recipient": "0xdef",
 	}
-	tampered := mpp.NewChallenge(
+	tampered := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
@@ -439,7 +443,7 @@ func TestVerifyOrChallenge_RejectsMissingDefaultExpires(t *testing.T) {
 	}
 
 	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
@@ -457,8 +461,8 @@ func TestVerifyOrChallenge_AllowsDynamicExpiresOverrides(t *testing.T) {
 		"currency":  "0xabc",
 		"recipient": "0xdef",
 	}
-	issuedExpires := mpp.Expires.Minutes(5)
-	challenge := mpp.NewChallenge(
+	issuedExpires := mpp.ExpiresIn(5 * time.Minute)
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
@@ -472,13 +476,13 @@ func TestVerifyOrChallenge_AllowsDynamicExpiresOverrides(t *testing.T) {
 	}
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
 		SecretKey:     "secret-key",
 		Method:        "tempo",
-		Expires:       mpp.Expires.Minutes(5),
+		Expires:       mpp.ExpiresIn(5 * time.Minute),
 	})
 	if !assert.NoErrorf(t, err,
 		"VerifyOrChallenge() error = %v", err) {
@@ -497,14 +501,14 @@ func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 		"currency":  "0xabc",
 		"recipient": "0xdef",
 	}
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		"secret-key",
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
 		mpp.WithMeta(map[string]string{"trace": "issued"}),
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -512,7 +516,7 @@ func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 	}
 
 	_, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
@@ -529,7 +533,7 @@ func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 }
 
 func TestChallengeIssuanceNonce(t *testing.T) {
-	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.Expires.Minutes(5), Meta: map[string]string{"order": "one"}, EnableChallengeNonce: true}
+	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.ExpiresIn(5 * time.Minute), Meta: map[string]string{"order": "one"}, EnableChallengeNonce: true}
 	first, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	second, err := VerifyOrChallenge(context.Background(), params)
@@ -538,12 +542,12 @@ func TestChallengeIssuanceNonce(t *testing.T) {
 	require.Len(t, first.Challenge.Opaque["_mpp_nonce"], 64)
 	require.Equal(t, map[string]string{"order": "one"}, params.Meta)
 	cred := &mpp.Credential{Challenge: first.Challenge.ToEcho(), Payload: map[string]any{}}
-	params.Authorization = cred.ToAuthorization()
+	params.Authorization = mpptest.FormatCredential(cred)
 	result, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.NotNil(t, result.Receipt)
 	cred.Challenge.Opaque["_mpp_nonce"] = second.Challenge.Opaque["_mpp_nonce"]
-	params.Authorization = cred.ToAuthorization()
+	params.Authorization = mpptest.FormatCredential(cred)
 	_, err = VerifyOrChallenge(context.Background(), params)
 	require.Error(t, err)
 	params.Authorization = ""
@@ -553,18 +557,18 @@ func TestChallengeIssuanceNonce(t *testing.T) {
 }
 
 func TestChallengeNonceStagedRollout(t *testing.T) {
-	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.Expires.Minutes(5)}
+	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.ExpiresIn(5 * time.Minute)}
 	legacy, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.Empty(t, legacy.Challenge.Opaque)
-	want := mpp.NewChallenge(params.SecretKey, params.Realm, params.Method, params.Intent.Name(), params.Request, mpp.WithExpires(params.Expires))
+	want := mpptest.NewChallenge(params.SecretKey, params.Realm, params.Method, params.Intent.Name(), params.Request, mpp.WithExpires(params.Expires))
 	require.Equal(t, want.ID, legacy.Challenge.ID, "default issuance must match pre-upgrade challenge construction")
 	params.EnableChallengeNonce = true
 	fresh, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.NotEmpty(t, fresh.Challenge.Opaque["_mpp_nonce"])
 	params.EnableChallengeNonce = false
-	params.Authorization = fresh.Challenge.NewCredential(map[string]any{}).ToAuthorization()
+	params.Authorization = mpptest.FormatCredential(fresh.Challenge.NewCredential(map[string]any{}))
 	result, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.NotNil(t, result.Receipt)

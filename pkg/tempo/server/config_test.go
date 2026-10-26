@@ -10,15 +10,15 @@ import (
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
-func TestMethodFromConfigBuildsMethod(t *testing.T) {
+func TestNewBuildsMethod(t *testing.T) {
 	t.Parallel()
 
-	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+	method, err := New(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 	})
 	if !assert.NoErrorf(t, err,
-		"MethodFromConfig() error = %v", err) {
+		"New() error = %v", err) {
 		return
 	}
 
@@ -40,20 +40,6 @@ func TestMethodFromConfigBuildsMethod(t *testing.T) {
 	// Moderato's first default offer is OUSD (followed by pathUSD).
 	if !assert.Equalf(t, tempo.OUSDAddress, request.Currency,
 		"request.Currency = %q, want %q", request.Currency, tempo.OUSDAddress) {
-		return
-	}
-
-}
-
-func TestNewIntentLoadsFeePayerPrivateKeyFromEnv(t *testing.T) {
-	t.Setenv("FEE_PAYER_KEY", feePayerKey)
-	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerPrivateKeyEnv: "FEE_PAYER_KEY"})
-	if !assert.NoErrorf(t, err,
-		"NewIntent() error = %v", err) {
-		return
-	}
-	if !assert.NotNil(t, intent.feePayerSigner,
-		"intent.feePayerSigner = nil, want signer") {
 		return
 	}
 
@@ -104,17 +90,12 @@ func TestNewIntent_DefaultFeePayerPoliciesIncludeKnownTokens(t *testing.T) {
 
 func TestNewIntentRejectsInvalidFeePayerPolicy(t *testing.T) {
 	_, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
-		FeePayerPolicies: map[string]FeePayerPolicy{
-			testCurrency: {
-				MaxFeePerGas:         big.NewInt(1),
-				MaxPriorityFeePerGas: big.NewInt(2),
-				MaxTotalFee:          big.NewInt(10),
-			},
+		AllowedFeeTokens: []string{testCurrency},
+		FeePayerPolicy: &FeePayerPolicy{
+			MaxFeePerGas:         big.NewInt(1),
+			MaxPriorityFeePerGas: big.NewInt(2),
+			MaxTotalFee:          big.NewInt(10),
 		},
 	})
-	if !assert.Falsef(t, err == nil || err.Error() != "tempo server: max priority fee per gas exceeds max fee per gas for 0x20c0000000000000000000000000000000000001",
-		"NewIntent() error = %v, want max priority fee validation error", err) {
-		return
-	}
-
+	assert.ErrorContains(t, err, "max priority fee per gas exceeds max fee per gas")
 }

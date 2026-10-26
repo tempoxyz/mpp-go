@@ -53,10 +53,10 @@ Low-level data structures in `pkg/mpp` that compose into the core abstractions:
 - **`Credential`** — Client-submitted payment proof (appears in `Authorization` header). Contains `Challenge` echo, `Payload` (method-specific proof), and optional `Source` (payer identity).
 - **`Receipt`** — Server-issued settlement confirmation (appears in `Payment-Receipt` header). Contains `Status`, `Method`, `Timestamp`, and `Reference`.
 
-Each type has one canonical Parse/Format pair; the other spellings
-(`FormatAuthenticate*`, `ToAuthenticate*`, `FromAuthenticate`,
-`FormatAuthorization*`, `ToAuthorization`, `FromAuthorization`,
-`*PaymentReceipt`, `FormatReceipt`) are deprecated wrappers:
+Each type has one canonical Parse/Format pair. The few deprecated spellings
+left (`ToAuthenticate*`, `ToAuthorization`, `FormatAuthorizationStrict`,
+`ParsePaymentReceipt`) are kept only for outside callers (see "Deprecated
+APIs"); don't use them in new code:
 
 | Type | Parse | Format |
 | --- | --- | --- |
@@ -66,8 +66,8 @@ Each type has one canonical Parse/Format pair; the other spellings
 
 - Create challenges with `NewChallengeWithError` and check an echoed ID with
   `(*Challenge).VerifyID(secret)`, which binds `c.Realm`; also compare
-  `c.Realm` with the realm you expect, which VerifyID does not. `NewChallenge`,
-  `GenerateChallengeID` and `Verify(secret, realm)` are deprecated.
+  `c.Realm` with the realm you expect, which VerifyID does not. `NewChallenge`
+  and `GenerateChallengeID` are deprecated.
 - The Format functions reject what their Parse counterpart rejects (missing
   or invalid fields, a receipt status other than "success", oversized
   headers), so the SDK never emits a header its own parser refuses.
@@ -79,9 +79,8 @@ Each type has one canonical Parse/Format pair; the other spellings
   implements `Is` for `ErrorType` targets.
 - Servers write every 402 and problem response with
   `server.WritePaymentResponse(w, err, challenges...)` (Fiber:
-  `fiberadapter.WritePaymentResponse(c, err, challenges...)`).
-  `WritePaymentError`, `WritePaymentErrorWithChallenge(s)` and
-  `WriteChallenge(s)` are deprecated.
+  `fiberadapter.WritePaymentResponse(c, err, challenges...)`); it is the only
+  writer.
 
 ### Server charge flow
 
@@ -99,7 +98,7 @@ Each type has one canonical Parse/Format pair; the other spellings
   resource the handler then writes. Other transports
   (MCP) use `Charge(ctx, params)` with the Credential in `params`, or
   `server.Compose(ctx, authorization, offers...)` (`Offer` is an alias of
-  `ComposeConfig`; `ComposeCharge` is deprecated).
+  `ComposeConfig`).
 - `server.New` defaults an empty secret to `MPP_SECRET_KEY`. An empty realm
   stays empty: the realm is bound into every Challenge, so defaulting it would
   make upgraded and older replicas reject each other's Challenges; callers
@@ -149,21 +148,17 @@ Clients and Tempo methods:
 
 - HTTP clients: `client.NewHTTPClient(methods, opts...)` returns a standard
   `*http.Client` (same-origin redirects only, config errors at construction);
-  `client.New` and `NewHTTPTransport` take the same `Option`s. `NewTransport` and the
-  `WithTransport*` options are deprecated. Options include `WithMaxRetries` and
+  `client.New` and `NewHTTPTransport` take the same `Option`s. Options include `WithMaxRetries` and
   `WithOrderChallenges`; a declined payment matches `client.ErrPaymentDeclined`
   (also `mcpclient.ErrPaymentDeclined`), but an `OnChallenge` error returned after
   `createCredential` succeeded does not. Read receipts with `mpp.ReceiptFromResponse`.
 - Method-specific origin rules belong in the method, through
   `client.OriginValidator`; the generic clients only keep a built-in Tempo proof
-  check for methods that do not implement it (`pkg/internal/tempoproof`). The
-  deprecated realm pins (`WithTrustedTempoProofRealm`, `TrustedTempoProofRealms`)
-  override a validator only for zero-amount `tempo/charge` proofs. Origins compare
+  check for methods that do not implement it (`pkg/internal/tempoproof`). Origins compare
   with lowercase hosts and default ports dropped (`tempoproof.Origin`).
 - Tempo server: construct with `charge.New(charge.Config{...})`; `MethodFromConfig`
-  and `NewMethod` are deprecated. Sponsor fees with `AllowedFeeTokens` and
-  `FeePayerPolicy` (not the deprecated `FeePayerPolicies` map); a `FeeToken` must
-  be in an explicit `AllowedFeeTokens` list.
+  is deprecated. Sponsor fees with `AllowedFeeTokens` and `FeePayerPolicy`; a
+  `FeeToken` must be in an explicit `AllowedFeeTokens` list.
 - Tempo client: build `Config.PaymentPolicy` from `charge.MaxAmount`,
   `MaxAtomicAmount` and `AllowChainIDs` combined with `AllPolicies`; trust proof realms
   with `Config.TrustedProofRealms`. Use `tempo.ChainIDMainnet`/`ChainIDModerato`,
@@ -273,6 +268,30 @@ apidiff -m -w /tmp/head.api github.com/tempoxyz/mpp-go
 apidiff -m -incompatible /tmp/base.api /tmp/head.api   # lines under ./pkg/ are breaking
 git worktree remove /tmp/mpp-go-base
 ```
+
+### Deprecated APIs
+
+The deprecated APIs the SDK improvement plan replaced were removed in one
+minor release (see `.changelog/remove-deprecated-apis.md`). The ones left are
+kept on purpose; remove them only together with their outside callers:
+
+- Used by the mpp-tools Go conformance adapter
+  (`tempoxyz/mpp-tools/conformance/adapters/go`), which CI builds against this
+  SDK: `mpp.NewChallenge`, `mpp.GenerateChallengeID`,
+  `mpp.ParsePaymentReceipt`, `(*Challenge).ToAuthenticate`,
+  `(*Challenge).ToAuthenticateStrict`, `(*Credential).ToAuthorization` and
+  `Receipt.Extra`.
+- Shown in README.md or an example README (changing those needs a
+  maintainer's OK): `mpp.FormatAuthorizationStrict`,
+  `ChargeParams.EnableChallengeNonce`, `chargeserver.MethodFromConfig` and
+  `chargeserver.Config.Currency`.
+- Kept because a legacy store layout still needs it:
+  `tempo.ChargeSponsoredChallengeStoreKey`, the reservation key sponsored
+  charges used before #201, which verification still checks.
+
+Code and tests in this module don't call them (`staticcheck -checks SA1019
+./...` reports nothing); tests build Challenges and headers with
+`pkg/internal/mpptest`.
 
 ### Live integration tests
 

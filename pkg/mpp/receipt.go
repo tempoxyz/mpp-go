@@ -57,13 +57,6 @@ func WithExtensions(extensions map[string]any) ReceiptOption {
 	return func(r *Receipt) { r.Extensions = extensions }
 }
 
-// WithExtra sets extra metadata on a Receipt.
-//
-// Deprecated: Use WithExtensions instead.
-func WithExtra(extra map[string]any) ReceiptOption {
-	return func(r *Receipt) { r.Extra = extra }
-}
-
 // Success creates a new successful Receipt with the given method, reference,
 // and options.
 func Success(method, reference string, opts ...ReceiptOption) *Receipt {
@@ -77,27 +70,4 @@ func Success(method, reference string, opts ...ReceiptOption) *Receipt {
 		o(r)
 	}
 	return r
-}
-
-// FormatReceipt formats a Receipt as a receipt header value. It neither
-// validates r nor reports encoding errors.
-//
-// Deprecated: Use FormatReceiptWithError instead, which returns an error for
-// a receipt ParseReceipt would reject.
-func FormatReceipt(r *Receipt) string {
-	return b64EncodeAny(receiptFields(r))
-}
-
-// FromPaymentReceipt parses a Payment-Receipt header value into a Receipt.
-//
-// Deprecated: Use ParseReceipt instead.
-func FromPaymentReceipt(header string) (*Receipt, error) {
-	return ParseReceipt(header)
-}
-
-// ToPaymentReceipt formats this Receipt as a Payment-Receipt header value.
-//
-// Deprecated: Use FormatReceiptWithError instead.
-func (r *Receipt) ToPaymentReceipt() string {
-	return b64EncodeAny(receiptFields(r))
 }

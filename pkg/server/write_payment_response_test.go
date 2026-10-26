@@ -107,18 +107,3 @@ func TestWritePaymentResponseSerializationFailure(t *testing.T) {
 	server.WritePaymentResponse(rec, nil, scoped)
 	assert.Equal(t, http.StatusRequestURITooLong, rec.Code)
 }
-
-func TestDeprecatedWritersStillUseRealmArgument(t *testing.T) {
-	t.Parallel()
-
-	challenge := writerTestChallenge(t, "api.example.com", "tempo")
-	rec := httptest.NewRecorder()
-	server.WriteChallenges(rec, []*mpp.Challenge{challenge}, "legacy.example.com") //nolint:staticcheck // deprecated wrapper under test
-	assert.Equal(t, http.StatusPaymentRequired, rec.Code)
-	assert.Contains(t, rec.Header().Get(mpp.HeaderWWWAuthenticate), "realm=\"legacy.example.com\"")
-
-	rec = httptest.NewRecorder()
-	server.WritePaymentErrorWithChallenge(rec, mpp.ErrVerificationFailed("x"), nil, "legacy.example.com") //nolint:staticcheck // deprecated wrapper under test
-	assert.Equal(t, http.StatusPaymentRequired, rec.Code)
-	assert.Empty(t, rec.Header().Values(mpp.HeaderWWWAuthenticate))
-}

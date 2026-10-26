@@ -6,7 +6,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -14,7 +17,7 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 	t.Parallel()
 
 	paymentErrorResponse := httptest.NewRecorder()
-	WritePaymentError(paymentErrorResponse, mpp.ErrBadRequest("bad request"))
+	WritePaymentResponse(paymentErrorResponse, mpp.ErrBadRequest("bad request"))
 	if !assert.Equalf(t, http.StatusBadRequest, paymentErrorResponse.Code,
 		"paymentErrorResponse.Code = %d, want %d", paymentErrorResponse.Code, http.StatusBadRequest) {
 		return
@@ -26,7 +29,7 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 	}
 
 	genericErrorResponse := httptest.NewRecorder()
-	WritePaymentError(genericErrorResponse, errors.New("dial https://rpc.example/secret-key: connection refused"))
+	WritePaymentResponse(genericErrorResponse, errors.New("dial https://rpc.example/secret-key: connection refused"))
 	if !assert.Equalf(t, http.StatusInternalServerError, genericErrorResponse.Code,
 		"genericErrorResponse.Code = %d, want %d", genericErrorResponse.Code, http.StatusInternalServerError) {
 		return
@@ -39,9 +42,9 @@ func TestWritePaymentError_FormatsProblemResponses(t *testing.T) {
 func TestWriteChallenge_FormatsBodylessPaymentRequired(t *testing.T) {
 	t.Parallel()
 
-	challenge := mpp.NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+	challenge := mpptest.NewChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
 	response := httptest.NewRecorder()
-	WriteChallenge(response, challenge, challenge.Realm)
+	WritePaymentResponse(response, nil, challenge)
 
 	assert.Equal(t, http.StatusPaymentRequired, response.Code)
 	assert.NotEmpty(t, response.Header().Get("WWW-Authenticate"))

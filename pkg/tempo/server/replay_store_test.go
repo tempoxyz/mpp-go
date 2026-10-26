@@ -2,9 +2,10 @@ package chargeserver
 
 import (
 	"context"
+	"testing"
+
 	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	"testing"
 )
 
 func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
@@ -16,12 +17,11 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 	intent, err := NewIntent(IntentConfig{RPC: rpc})
 	require.ErrorContains(t, err, "replay Store is required")
 	require.Nil(t, intent)
-	method, err := MethodFromConfig(Config{RPC: rpc})
+	method, err := New(Config{RPC: rpc})
 	require.ErrorContains(t, err, "replay Store is required")
 	require.Nil(t, method)
 	for _, unconfigured := range []*Intent{nil, {}} {
-		require.Panics(t, func() { NewMethod(MethodConfig{Intent: unconfigured}) })
-		method, err := MethodFromConfig(Config{Intent: unconfigured})
+		method, err := New(Config{Intent: unconfigured})
 		require.ErrorContains(t, err, "replay Store is required")
 		require.Nil(t, method)
 	}
@@ -44,11 +44,10 @@ func TestTypedNilReplayStoresRejectedBeforeChallenge(t *testing.T) {
 		require.ErrorContains(t, err, "replay Store is required")
 		require.Nil(t, intent)
 		for _, config := range []Config{{Store: store}, {Intent: &Intent{store: store}}} {
-			method, err := MethodFromConfig(config)
+			method, err := New(config)
 			require.ErrorContains(t, err, "replay Store is required")
 			require.Nil(t, method)
 		}
-		require.Panics(t, func() { NewMethod(MethodConfig{Intent: &Intent{store: store}}) })
 	}
 }
 

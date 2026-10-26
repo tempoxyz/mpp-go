@@ -7,10 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/require"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 func TestSponsoredValidBefore(t *testing.T) {
@@ -71,7 +74,7 @@ func sponsoredChallenge(t *testing.T, expires string) *mpp.Challenge {
 		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: true,
 	})
 	require.NoError(t, err)
-	return mpp.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(expires))
+	return mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(expires))
 }
 
 func TestCreateCredentialSponsoredValidityWindow(t *testing.T) {
@@ -82,8 +85,8 @@ func TestCreateCredentialSponsoredValidityWindow(t *testing.T) {
 		expires string
 		window  time.Duration
 	}{
-		{name: "five minute challenge gets the 60 second window", expires: mpp.Expires.Minutes(5), window: tempo.SponsoredValidBeforeWindow},
-		{name: "short challenge is capped 15s past its expiry", expires: mpp.Expires.Seconds(30), window: 30*time.Second + time.Second + tempo.FeePayerMinRemainingValidity},
+		{name: "five minute challenge gets the 60 second window", expires: mpp.ExpiresIn(5 * time.Minute), window: tempo.SponsoredValidBeforeWindow},
+		{name: "short challenge is capped 15s past its expiry", expires: mpp.ExpiresIn(30 * time.Second), window: 30*time.Second + time.Second + tempo.FeePayerMinRemainingValidity},
 	} {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,7 +129,7 @@ func TestCreateCredentialRefusesSponsoredChallengeExpiringWithin15Seconds(t *tes
 		})
 		require.NoError(t, err)
 
-		credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.Expires.Seconds(10)))
+		credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.ExpiresIn(10*time.Second)))
 		require.ErrorIs(t, err, ErrSponsoredChallengeExpiresTooSoon)
 		require.True(t, strings.Contains(err.Error(), "need at least 15s"), err.Error())
 		require.Nil(t, credential)
@@ -148,7 +151,7 @@ func TestCreateCredentialUnsponsoredShortChallengeStillSigns(t *testing.T) {
 		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431,
 	})
 	require.NoError(t, err)
-	challenge := mpp.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(mpp.Expires.Seconds(10)))
+	challenge := mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(mpp.ExpiresIn(10*time.Second)))
 
 	credential, err := method.CreateCredential(context.Background(), challenge)
 	require.NoError(t, err)
@@ -192,7 +195,7 @@ func TestCreateCredentialComputesSponsoredValidBeforeAfterPaymentPolicy(t *testi
 	require.NoError(t, err)
 	method.now = clock.Now
 
-	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.Expires.Minutes(5)))
+	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.ExpiresIn(5*time.Minute)))
 	require.NoError(t, err)
 	signature, _ := credential.Payload["signature"].(string)
 	tx, err := tempotx.Deserialize(signature)
@@ -215,7 +218,7 @@ func TestCreateCredentialRechecksSponsoredFloorBeforeSigning(t *testing.T) {
 	require.NoError(t, err)
 	method.now = clock.Now
 
-	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.Expires.Seconds(30)))
+	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.ExpiresIn(30*time.Second)))
 	require.ErrorIs(t, err, ErrSponsoredChallengeExpiresTooSoon)
 	require.Nil(t, credential)
 	require.Empty(t, rpc.sentRawTxs)
@@ -231,11 +234,11 @@ func TestCanHandleChallengeSkipsSponsoredChallengeExpiringTooSoon(t *testing.T) 
 			Amount: amount, Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: feePayer,
 		})
 		require.NoError(t, err)
-		return mpp.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(expires))
+		return mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(), mpp.WithExpires(expires))
 	}
 
-	require.False(t, method.CanHandleChallenge(challenge("0.50", true, mpp.Expires.Seconds(10))))
-	require.True(t, method.CanHandleChallenge(challenge("0.50", true, mpp.Expires.Minutes(5))))
-	require.True(t, method.CanHandleChallenge(challenge("0.50", false, mpp.Expires.Seconds(10))))
-	require.True(t, method.CanHandleChallenge(challenge("0", true, mpp.Expires.Seconds(10))))
+	require.False(t, method.CanHandleChallenge(challenge("0.50", true, mpp.ExpiresIn(10*time.Second))))
+	require.True(t, method.CanHandleChallenge(challenge("0.50", true, mpp.ExpiresIn(5*time.Minute))))
+	require.True(t, method.CanHandleChallenge(challenge("0.50", false, mpp.ExpiresIn(10*time.Second))))
+	require.True(t, method.CanHandleChallenge(challenge("0", true, mpp.ExpiresIn(10*time.Second))))
 }

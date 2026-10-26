@@ -209,12 +209,6 @@ func TestTransportDefersToOriginValidator(t *testing.T) {
 	method.err = errors.New("untrusted realm")
 	_, err = New([]Method{method}).Get(context.Background(), srv.URL+"/paid")
 	require.ErrorIs(t, err, method.err)
-
-	// The deprecated origin pin still overrides the validator.
-	resp, err = New([]Method{method}, WithTrustedTempoProofRealm(srv.URL, "target.example")).Get(context.Background(), srv.URL+"/paid")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 func mustChallenge(realm, method, intent string, request map[string]any) *mpp.Challenge {
@@ -232,21 +226,6 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-func TestLegacyProofRealmPinOnlyOverridesProofChallenges(t *testing.T) {
-	// A charged (non-proof) tempo challenge: the pinned realm must not
-	// override the method's own origin policy.
-	srv, paid := payingServer(t, func(string) []*mpp.Challenge {
-		return []*mpp.Challenge{mustChallenge("target.example", "tempo", "charge", map[string]any{"amount": "1"})}
-	})
-	method := &originMethod{
-		mockMethod: mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")},
-		err:        errors.New("method origin policy"),
-	}
-	_, err := New([]Method{method}, WithTrustedTempoProofRealm(srv.URL, "target.example")).Get(context.Background(), srv.URL+"/paid")
-	require.ErrorIs(t, err, method.err)
-	assert.Equal(t, int32(0), paid.Load())
-}
-
 func TestOriginsIgnoreDefaultPorts(t *testing.T) {
 	t.Parallel()
 	for raw, want := range map[string]string{
@@ -261,8 +240,4 @@ func TestOriginsIgnoreDefaultPorts(t *testing.T) {
 	first := &http.Request{URL: mustParseURL(t, "https://api.example.com/start")}
 	require.NoError(t, check(&http.Request{URL: mustParseURL(t, "https://API.example.com:443/next")}, []*http.Request{first}))
 	require.Error(t, check(&http.Request{URL: mustParseURL(t, "https://api.example.com:8443/next")}, []*http.Request{first}))
-
-	transport := &Transport{trustedProofRealms: map[string]string{"https://API.example.com:443": "realm.example"}}
-	assert.True(t, transport.pinnedProofRealm(mustParseURL(t, "https://api.example.com/paid"), "realm.example"))
-	assert.False(t, transport.pinnedProofRealm(mustParseURL(t, "https://api.example.com:8443/paid"), "realm.example"))
 }

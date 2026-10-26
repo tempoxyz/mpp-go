@@ -78,7 +78,6 @@ type Client struct {
 	methods            []Method
 	httpClient         *http.Client
 	paymentPreferences PaymentPreferences
-	trustedProofRealms map[string]string
 	onChallenge        OnChallengeFunc
 	maxRetries         *int
 	orderChallenges    OrderChallenges
@@ -101,21 +100,6 @@ func WithHTTPClient(c *http.Client) Option {
 func WithPaymentPreferences(preferences PaymentPreferences) Option {
 	return func(c *Client) {
 		c.paymentPreferences = clonePaymentPreferences(preferences)
-	}
-}
-
-// WithTrustedTempoProofRealm pins the proof realm of a server at a known origin.
-// Use this when the server's configured realm differs from its public hostname.
-//
-// Deprecated: Use the Tempo charge client's Config.TrustedProofRealms
-// (package github.com/tempoxyz/mpp-go/pkg/tempo/client) instead, which keeps
-// Tempo rules in the Tempo method.
-func WithTrustedTempoProofRealm(origin, realm string) Option {
-	return func(c *Client) {
-		if c.trustedProofRealms == nil {
-			c.trustedProofRealms = make(map[string]string)
-		}
-		c.trustedProofRealms[origin] = realm
 	}
 }
 
@@ -244,7 +228,6 @@ func sameOriginCheckRedirect(prior func(*http.Request, []*http.Request) error) f
 func (c *Client) transportConfig() *transportConfig {
 	return &transportConfig{
 		paymentPreferences: c.paymentPreferences,
-		trustedProofRealms: c.trustedProofRealms,
 		onChallenge:        c.onChallenge,
 		maxRetries:         c.maxRetries,
 		orderChallenges:    c.orderChallenges,
@@ -284,7 +267,7 @@ func NewHTTPClient(methods []Method, opts ...Option) (*http.Client, error) {
 // NewHTTPTransport returns a payment-aware http.RoundTripper that sends
 // requests with inner (http.DefaultTransport when nil). It takes the same
 // options as New, except WithHTTPClient, which it ignores, and returns
-// configuration errors that NewTransport only reports from RoundTrip.
+// configuration errors here rather than from RoundTrip.
 //
 // A bare Transport refuses to pay after a redirect, since it cannot tell
 // whether the caller chose that origin: use NewHTTPClient or Client for

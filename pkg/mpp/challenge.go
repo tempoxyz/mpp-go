@@ -227,13 +227,6 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// FromAuthenticate parses an authentication header value into a Challenge.
-//
-// Deprecated: Use ParseChallenge instead.
-func FromAuthenticate(header string) (*Challenge, error) {
-	return ParseChallenge(header)
-}
-
 // ToAuthenticate formats this Challenge as an authentication header value
 // with the given realm, which the challenge ID does not bind unless it equals
 // c.Realm. It returns an empty string when c cannot be formatted.
@@ -264,16 +257,6 @@ func (c *Challenge) ToAuthenticateStrict(realm string) (string, error) {
 // realm, or a challenge issued for another realm verifies here.
 func (c *Challenge) VerifyID(secretKey string) bool {
 	return c.verify(secretKey, c.Realm)
-}
-
-// Verify checks whether the challenge ID matches the expected HMAC for the
-// given secretKey and realm. Uses constant-time comparison.
-//
-// Deprecated: Use VerifyID together with a c.Realm == realm check. VerifyID
-// binds the ID to the challenge's own Realm and does not compare it with the
-// realm you expect, so the check is still the caller's.
-func (c *Challenge) Verify(secretKey, realm string) bool {
-	return c.verify(secretKey, realm)
 }
 
 func (c *Challenge) verify(secretKey, realm string) bool {

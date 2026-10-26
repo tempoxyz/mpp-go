@@ -8,14 +8,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 const (
@@ -33,7 +36,7 @@ func TestCurrencyConstants(t *testing.T) {
 
 	assert.Equal(t, ousdAddress, tempo.OUSDAddress)
 	assert.Equal(t, pathUSDAddress, tempo.PathUSDAddress)
-	assert.Equal(t, usdceAddress, tempo.MainnetUSDCAddress)
+	assert.Equal(t, usdceAddress, tempo.USDCEAddress)
 }
 
 func TestNewMethodDefaultCurrencies(t *testing.T) {
@@ -48,55 +51,55 @@ func TestNewMethodDefaultCurrencies(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		config      MethodConfig
+		config      methodConfig
 		wantChainID int64
 		want        []string
 	}{
 		{
 			name:        "mainnet chain id offers OUSD then USDC.e",
-			config:      MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet},
+			config:      methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet},
 			wantChainID: tempotx.ChainIdMainnet,
 			want:        []string{ousdAddress, usdceAddress},
 		},
 		{
 			name:        "moderato chain id offers OUSD then pathUSD",
-			config:      MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato},
+			config:      methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato},
 			wantChainID: tempotx.ChainIdModerato,
 			want:        []string{ousdAddress, pathUSDAddress},
 		},
 		{
 			name:        "chain inferred from moderato rpc url",
-			config:      MethodConfig{Intent: moderatoIntent},
+			config:      methodConfig{Intent: moderatoIntent},
 			wantChainID: tempotx.ChainIdModerato,
 			want:        []string{ousdAddress, pathUSDAddress},
 		},
 		{
 			name:        "chain inferred from mainnet rpc url",
-			config:      MethodConfig{Intent: mainnetIntent},
+			config:      methodConfig{Intent: mainnetIntent},
 			wantChainID: tempotx.ChainIdMainnet,
 			want:        []string{ousdAddress, usdceAddress},
 		},
 		{
 			name:        "explicit chain id beats rpc url inference",
-			config:      MethodConfig{Intent: moderatoIntent, ChainID: tempotx.ChainIdMainnet},
+			config:      methodConfig{Intent: moderatoIntent, ChainID: tempotx.ChainIdMainnet},
 			wantChainID: tempotx.ChainIdMainnet,
 			want:        []string{ousdAddress, usdceAddress},
 		},
 		{
 			name:        "unknown chain keeps legacy single default",
-			config:      MethodConfig{Intent: customIntent, ChainID: 999999},
+			config:      methodConfig{Intent: customIntent, ChainID: 999999},
 			wantChainID: 999999,
 			want:        []string{tempotx.AlphaUSDAddress.Hex()},
 		},
 		{
 			name:        "unrecognized rpc url without chain id keeps legacy single default",
-			config:      MethodConfig{Intent: customIntent},
+			config:      methodConfig{Intent: customIntent},
 			wantChainID: 0,
 			want:        []string{tempotx.AlphaUSDAddress.Hex()},
 		},
 		{
 			name:        "zero config offers mainnet defaults",
-			config:      MethodConfig{Intent: testStoredIntent()},
+			config:      methodConfig{Intent: testStoredIntent()},
 			wantChainID: tempotx.ChainIdMainnet,
 			want:        []string{ousdAddress, usdceAddress},
 		},
@@ -108,7 +111,7 @@ func TestNewMethodDefaultCurrencies(t *testing.T) {
 
 			config := tt.config
 			config.Recipient = testRecipient
-			method := NewMethod(config)
+			method := newMethod(config)
 			assert.Equal(t, tt.want, method.currencies)
 			assert.Equal(t, tt.wantChainID, method.chainID)
 			assert.Equal(t, checksummed(tt.want...), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tt.wantChainID))
@@ -126,32 +129,32 @@ func TestNewMethodExplicitCurrencies(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		config MethodConfig
+		config methodConfig
 		want   []string
 	}{
 		{
 			name:   "explicit list replaces defaults and preserves order",
-			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress, ousdAddress}},
+			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress, ousdAddress}},
 			want:   []string{usdceAddress, ousdAddress},
 		},
 		{
 			name:   "explicit list may add tokens outside the defaults",
-			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currencies: []string{testCurrency, pathUSDAddress, ousdAddress}},
+			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currencies: []string{testCurrency, pathUSDAddress, ousdAddress}},
 			want:   []string{testCurrency, pathUSDAddress, ousdAddress},
 		},
 		{
 			name:   "single element list",
-			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}},
+			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}},
 			want:   []string{usdceAddress},
 		},
 		{
 			name:   "explicit list applies on unknown chain",
-			config: MethodConfig{Intent: testStoredIntent(), Currencies: []string{ousdAddress, testCurrency}},
+			config: methodConfig{Intent: testStoredIntent(), Currencies: []string{ousdAddress, testCurrency}},
 			want:   []string{ousdAddress, testCurrency},
 		},
 		{
 			name: "mixed-case duplicates are removed keeping first spelling and order",
-			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{
+			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{
 				ousdAddress,
 				strings.ToLower(ousdAddress),
 				usdceAddress,
@@ -162,12 +165,12 @@ func TestNewMethodExplicitCurrencies(t *testing.T) {
 		},
 		{
 			name:   "legacy currency restricts acceptance to one token",
-			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress},
+			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress},
 			want:   []string{usdceAddress},
 		},
 		{
 			name:   "legacy currency is kept verbatim",
-			config: MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currency: strings.ToLower(ousdAddress)},
+			config: methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, Currency: strings.ToLower(ousdAddress)},
 			want:   []string{strings.ToLower(ousdAddress)},
 		},
 	}
@@ -178,7 +181,7 @@ func TestNewMethodExplicitCurrencies(t *testing.T) {
 
 			config := tt.config
 			config.Recipient = testRecipient
-			method := NewMethod(config)
+			method := newMethod(config)
 			assert.Equal(t, tt.want, method.currencies)
 			assert.Equal(t, checksummed(tt.want...), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, method.chainID))
 		})
@@ -189,7 +192,7 @@ func TestNewMethodExplicitCurrenciesAreCopied(t *testing.T) {
 	t.Parallel()
 
 	currencies := []string{ousdAddress, usdceAddress}
-	method := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient, Currencies: currencies})
+	method := newMethod(methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient, Currencies: currencies})
 	currencies[0] = testCurrency
 	assert.Equal(t, []string{ousdAddress, usdceAddress}, method.currencies)
 }
@@ -250,7 +253,7 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 			require.EqualError(t, err, tt.wantErr)
 
 			assert.PanicsWithValue(t, tt.wantErr, func() {
-				NewMethod(MethodConfig{Intent: testStoredIntent(),
+				newMethod(methodConfig{Intent: testStoredIntent(),
 					ChainID:    tempotx.ChainIdMainnet,
 					Recipient:  testRecipient,
 					Currency:   tt.currency,
@@ -258,7 +261,7 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 				})
 			})
 
-			method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+			method, err := New(Config{Store: tempo.NewMemoryStore(),
 				ChainID:    tempotx.ChainIdMainnet,
 				Recipient:  testRecipient,
 				Currency:   tt.currency,
@@ -273,11 +276,11 @@ func TestInvalidCurrencyConfiguration(t *testing.T) {
 func TestMethodFromConfigCurrencies(t *testing.T) {
 	t.Parallel()
 
-	defaults, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato, Recipient: testRecipient})
+	defaults, err := New(Config{Store: tempo.NewMemoryStore(), RPCURL: tempotx.RpcUrlModerato, Recipient: testRecipient})
 	require.NoError(t, err)
 	assert.Equal(t, []string{ousdAddress, pathUSDAddress}, defaults.currencies)
 
-	explicit, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+	explicit, err := New(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:     tempotx.RpcUrlModerato,
 		Recipient:  testRecipient,
 		Currencies: []string{pathUSDAddress},
@@ -285,7 +288,7 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{pathUSDAddress}, explicit.currencies)
 
-	legacy, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+	legacy, err := New(Config{Store: tempo.NewMemoryStore(),
 		RPCURL:    tempotx.RpcUrlModerato,
 		Recipient: testRecipient,
 		Currency:  testCurrency,
@@ -293,7 +296,7 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{testCurrency}, legacy.currencies)
 
-	relayed, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(),
+	relayed, err := New(Config{Store: tempo.NewMemoryStore(),
 		ChainID:    tempotx.ChainIdMainnet,
 		Recipient:  testRecipient,
 		Currencies: []string{usdceAddress, ousdAddress},
@@ -306,7 +309,7 @@ func TestMethodFromConfigCurrencies(t *testing.T) {
 func TestMethodBuildChargeRequestsPerRequestCurrencyOverride(t *testing.T) {
 	t.Parallel()
 
-	method := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient})
+	method := newMethod(methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient})
 	got := offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1", Currency: testCurrency}, tempotx.ChainIdMainnet)
 	assert.Equal(t, checksummed(testCurrency), got)
 
@@ -318,7 +321,7 @@ func TestMethodBuildChargeRequestsPerRequestCurrencyOverride(t *testing.T) {
 func TestMethodBuildChargeRequestsSharesRequestFieldsAcrossOffers(t *testing.T) {
 	t.Parallel()
 
-	method := NewMethod(MethodConfig{Intent: testStoredIntent(),
+	method := newMethod(methodConfig{Intent: testStoredIntent(),
 		ChainID:     tempotx.ChainIdMainnet,
 		Recipient:   testRecipient,
 		FeePayerURL: "https://fee-payer.example.com",
@@ -346,7 +349,7 @@ func TestMethodBuildChargeRequestsSharesRequestFieldsAcrossOffers(t *testing.T) 
 func TestMethodBuildChargeRequestsPropagatesErrors(t *testing.T) {
 	t.Parallel()
 
-	method := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	method := newMethod(methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 	_, err := method.BuildChargeRequests(mppserver.ChargeParams{Amount: "1"})
 	require.EqualError(t, err, "tempo server: recipient must be configured on the method or the request")
 }
@@ -390,7 +393,7 @@ func TestChargeOffers_HashCredentialForEachOfferVerifies(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			rpc := newOffersRPC(tempotx.ChainIdMainnet)
-			payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+			payment := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 
 			challenges := issueOffers(t, payment, mppserver.ChargeParams{Amount: "0.50"})
 			require.Equal(t, checksummed(ousdAddress, usdceAddress), challengeCurrencies(challenges))
@@ -398,7 +401,7 @@ func TestChargeOffers_HashCredentialForEachOfferVerifies(t *testing.T) {
 			credential := payWithHash(t, rpc, challenges[index])
 			result, err := payment.Charge(ctx, mppserver.ChargeParams{
 				Amount:        "0.50",
-				Authorization: credential.ToAuthorization(),
+				Authorization: mpptest.FormatCredential(credential),
 			})
 			require.NoError(t, err)
 			require.False(t, result.IsChallenge())
@@ -416,7 +419,7 @@ func TestChargeOffers_ModeratoDefaultsVerifyPathUSD(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdModerato)
-	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato})
+	payment := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato})
 
 	challenges := issueOffers(t, payment, mppserver.ChargeParams{Amount: "0.50"})
 	require.Equal(t, checksummed(ousdAddress, pathUSDAddress), challengeCurrencies(challenges))
@@ -428,7 +431,7 @@ func TestChargeOffers_ModeratoDefaultsVerifyPathUSD(t *testing.T) {
 	}
 
 	credential := payWithHash(t, rpc, challenges[1])
-	result, err := payment.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: credential.ToAuthorization()})
+	result, err := payment.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(credential)})
 	require.NoError(t, err)
 	require.False(t, result.IsChallenge())
 	assert.Equal(t, "success", result.Receipt.Status)
@@ -439,7 +442,7 @@ func TestChargeOffers_RejectsCredentialForUnofferedCurrency(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	payment := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 
 	// The same server signs a challenge for another token through a
 	// per-request override, e.g. on a different route.
@@ -447,7 +450,7 @@ func TestChargeOffers_RejectsCredentialForUnofferedCurrency(t *testing.T) {
 	require.Equal(t, checksummed(testCurrency), challengeCurrencies(other))
 	credential := other[0].NewCredential(map[string]any{"type": "hash", "hash": testReceiptHash})
 
-	result, err := payment.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: credential.ToAuthorization()})
+	result, err := payment.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(credential)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential request does not match this route's requirements")
 	require.NotNil(t, result)
@@ -462,8 +465,8 @@ func TestChargeOffers_LegacyCurrencyRejectsOtherDefaultOffer(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	defaults := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
-	legacy := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress})
+	defaults := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	legacy := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currency: usdceAddress})
 
 	legacyOffers := issueOffers(t, legacy, mppserver.ChargeParams{Amount: "0.50"})
 	require.Equal(t, checksummed(usdceAddress), challengeCurrencies(legacyOffers))
@@ -473,12 +476,12 @@ func TestChargeOffers_LegacyCurrencyRejectsOtherDefaultOffer(t *testing.T) {
 	ousdOffer := issueOffers(t, defaults, mppserver.ChargeParams{Amount: "0.50"})[0]
 	require.Equal(t, checksummed(ousdAddress), []string{ousdOffer.Request["currency"].(string)})
 	credential := ousdOffer.NewCredential(map[string]any{"type": "hash", "hash": testReceiptHash})
-	_, err := legacy.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: credential.ToAuthorization()})
+	_, err := legacy.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(credential)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential request does not match this route's requirements")
 
 	paid := payWithHash(t, rpc, legacyOffers[0])
-	result, err := legacy.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: paid.ToAuthorization()})
+	result, err := legacy.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(paid)})
 	require.NoError(t, err)
 	assert.Equal(t, "success", result.Receipt.Status)
 }
@@ -488,13 +491,13 @@ func TestChargeOffers_ExplicitCurrenciesRejectDroppedDefault(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	defaults := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
-	usdcOnly := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}})
+	defaults := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	usdcOnly := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet, Currencies: []string{usdceAddress}})
 
 	require.Equal(t, checksummed(usdceAddress), challengeCurrencies(issueOffers(t, usdcOnly, mppserver.ChargeParams{Amount: "0.50"})))
 	ousdOffer := issueOffers(t, defaults, mppserver.ChargeParams{Amount: "0.50"})[0]
 	credential := ousdOffer.NewCredential(map[string]any{"type": "hash", "hash": testReceiptHash})
-	_, err := usdcOnly.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: credential.ToAuthorization()})
+	_, err := usdcOnly.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(credential)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential request does not match this route's requirements")
 }
@@ -504,14 +507,14 @@ func TestChargeOffers_PerRequestCurrencyOverrideVerifies(t *testing.T) {
 
 	ctx := context.Background()
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	payment := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 	params := mppserver.ChargeParams{Amount: "0.50", Currency: testCurrency}
 
 	challenges := issueOffers(t, payment, params)
 	require.Equal(t, checksummed(testCurrency), challengeCurrencies(challenges))
 
 	credential := payWithHash(t, rpc, challenges[0])
-	params.Authorization = credential.ToAuthorization()
+	params.Authorization = mpptest.FormatCredential(credential)
 	result, err := payment.Charge(ctx, params)
 	require.NoError(t, err)
 	require.False(t, result.IsChallenge())
@@ -522,7 +525,7 @@ func TestChargeOffers_ChargeMiddlewareAdvertisesOffersInOrder(t *testing.T) {
 	t.Parallel()
 
 	rpc := newOffersRPC(tempotx.ChainIdMainnet)
-	payment := newOffersServer(t, rpc, MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
+	payment := newOffersServer(t, rpc, methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdMainnet})
 	recorder := serveOffersMiddleware(payment, "")
 
 	require.Equal(t, 402, recorder.Code)
@@ -537,7 +540,7 @@ func TestChargeOffers_ChargeMiddlewareAdvertisesOffersInOrder(t *testing.T) {
 	assert.Equal(t, checksummed(ousdAddress, usdceAddress), challengeCurrencies(challenges))
 
 	credential := payWithHash(t, rpc, challenges[1])
-	paid := serveOffersMiddleware(payment, credential.ToAuthorization())
+	paid := serveOffersMiddleware(payment, mpptest.FormatCredential(credential))
 	require.Equal(t, 200, paid.Code)
 	assert.NotEmpty(t, paid.Header().Get(mpp.HeaderPaymentReceipt))
 }
@@ -604,13 +607,13 @@ func newOffersRPC(chainID int64) *mockRPC {
 	return rpc
 }
 
-func newOffersServer(t *testing.T, rpc *mockRPC, config MethodConfig) *mppserver.Mpp {
+func newOffersServer(t *testing.T, rpc *mockRPC, config methodConfig) *mppserver.Mpp {
 	t.Helper()
 	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	require.NoError(t, err)
 	config.Intent = intent
 	config.Recipient = testRecipient
-	return newTestServer(t, NewMethod(config), testRealm, offersSecret)
+	return newTestServer(t, newMethod(config), testRealm, offersSecret)
 }
 
 func issueOffers(t *testing.T, payment *mppserver.Mpp, params mppserver.ChargeParams) []*mpp.Challenge {
@@ -674,7 +677,7 @@ func checksummed(values ...string) []string {
 }
 
 func TestMethodFromConfigDefaultOffers(t *testing.T) {
-	method, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(), Recipient: testRecipient})
+	method, err := New(Config{Store: tempo.NewMemoryStore(), Recipient: testRecipient})
 	require.NoError(t, err)
 	assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))
 }

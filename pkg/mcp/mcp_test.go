@@ -6,6 +6,9 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -470,7 +473,7 @@ func TestInvalidPayloadRecreatesCredential(t *testing.T) {
 // challengeRealm on every call, like a server relaying another realm's proof.
 func zeroTempoChallengeServer(t *testing.T, challengeRealm string) *mcp.Server {
 	t.Helper()
-	challenge := mpp.NewChallenge(secretKey, challengeRealm, "tempo", "charge", map[string]any{"amount": "0", "currency": "0x20c0"}, mpp.WithExpires(mpp.Expires.Minutes(5)))
+	challenge := mpptest.NewChallenge(secretKey, challengeRealm, "tempo", "charge", map[string]any{"amount": "0", "currency": "0x20c0"}, mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)))
 	data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}})
 	require.NoError(t, err)
 	return newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -482,22 +485,13 @@ type tempoProofMethod struct{ testClientMethod }
 
 func (m *tempoProofMethod) Name() string { return "tempo" }
 
-func TestZeroAmountTempoProofRequiresTrustedRealm(t *testing.T) {
+func TestZeroAmountTempoProofRefusedWithoutOriginValidator(t *testing.T) {
 	refused := &tempoProofMethod{}
 	session := connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{refused}}))
 	_, err := callPremium(context.Background(), session, nil)
 	require.ErrorContains(t, err, "refusing to sign Tempo proof")
 	assert.Empty(t, refused.credentials())
 
-	trusted := &tempoProofMethod{}
-	session = connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{
-		Methods:                 []client.Method{trusted},
-		TrustedTempoProofRealms: []string{"victim.example"},
-	}))
-	_, err = callPremium(context.Background(), session, nil)
-	require.Error(t, err)
-	// The proof is created once and resent on the server's repeated offer.
-	assert.Len(t, trusted.credentials(), 1)
 }
 
 type otherClientMethod struct{}

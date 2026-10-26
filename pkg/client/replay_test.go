@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -20,7 +23,7 @@ func newPaymentRequiredServer(t *testing.T, calls *int) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*calls++
 		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	challenge = challengeForURL(t, srv.URL, "tempo", nil)
@@ -44,7 +47,7 @@ func TestTransport_RoundTrip_DoesNotPayForUnreplayableBody(t *testing.T) {
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader("request-body"))
 	req.GetBody = nil // a streamed body: once sent, it cannot be sent again
 
@@ -65,7 +68,7 @@ func TestTransport_RoundTrip_DoesNotPayWhenGetBodyFails(t *testing.T) {
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader("request-body"))
 	req.GetBody = func() (io.ReadCloser, error) {
 		return nil, errors.New("body source is gone")
@@ -87,7 +90,7 @@ func TestTransport_RoundTrip_ClosesReplayBodyWhenCredentialFails(t *testing.T) {
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", err: errors.New("wallet locked")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	var opened []*trackedBody
 	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader("request-body"))
 	req.GetBody = func() (io.ReadCloser, error) {

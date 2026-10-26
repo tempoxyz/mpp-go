@@ -13,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -82,7 +85,7 @@ func TestClient_Do_NeverSendsPaymentCredentialCrossOrigin(t *testing.T) {
 	var challenge *mpp.Challenge
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -133,7 +136,7 @@ func (c *closeTracker) Close() error {
 
 func TestTransport_RoundTrip_ClosesBodyOnConfigError(t *testing.T) {
 	method := &mockMethod{name: "tempo"}
-	tr := NewTransport([]Method{method}, http.DefaultTransport, WithTransportPaymentPreferences(PaymentPreferences{"unknown/charge": 1}))
+	tr := newTestTransport([]Method{method}, http.DefaultTransport, WithPaymentPreferences(PaymentPreferences{"unknown/charge": 1}))
 	body := &closeTracker{Reader: strings.NewReader("x")}
 	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:1", body)
 	require.NoError(t, err)
@@ -154,7 +157,7 @@ func TestTransport_RoundTrip_ClosesBodyOnceWhenRetryCannotBeBuilt(t *testing.T) 
 		// the request body.
 		_ = req.Body.Close()
 		header := http.Header{}
-		header.Set(mpp.HeaderWWWAuthenticate, challenge.ToAuthenticate(challenge.Realm))
+		header.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(challenge))
 		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
 	})
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
@@ -163,7 +166,7 @@ func TestTransport_RoundTrip_ClosesBodyOnceWhenRetryCannotBeBuilt(t *testing.T) 
 	require.NoError(t, err)
 	req.GetBody = nil
 
-	_, err = NewTransport([]Method{method}, inner).RoundTrip(req)
+	_, err = newTestTransport([]Method{method}, inner).RoundTrip(req)
 	require.ErrorContains(t, err, "cloning request for retry")
 	assert.Equal(t, int32(1), body.closes.Load())
 	assert.Zero(t, method.calls)
@@ -177,7 +180,7 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeAfterSendingCredential(t *test
 		calls++
 		if calls == 1 {
 			header := http.Header{}
-			header.Set(mpp.HeaderWWWAuthenticate, challenge.ToAuthenticate(challenge.Realm))
+			header.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(challenge))
 			return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
 		}
 		return nil, networkErr
@@ -187,7 +190,7 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeAfterSendingCredential(t *test
 	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
 	require.NoError(t, err)
 
-	_, err = (&http.Client{Transport: NewTransport([]Method{method}, inner)}).Do(req)
+	_, err = (&http.Client{Transport: newTestTransport([]Method{method}, inner)}).Do(req)
 	var unknown *PaymentOutcomeUnknownError
 	require.ErrorAs(t, err, &unknown)
 	assert.Equal(t, challenge.ID, unknown.Challenge.ID)
@@ -202,14 +205,14 @@ func TestTransport_RoundTrip_PlainErrorBeforeCredentialSent(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
 	require.NoError(t, err)
 
-	_, err = NewTransport(nil, inner).RoundTrip(req)
+	_, err = newTestTransport(nil, inner).RoundTrip(req)
 	assert.Same(t, networkErr, err)
 }
 
 func callerAuthorization(t *testing.T, challenge *mpp.Challenge) (*mpp.Credential, string) {
 	t.Helper()
 	cred := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"hash": "0xabc"}}
-	authorization, err := mpp.FormatAuthorizationStrict(cred)
+	authorization, err := mpp.FormatCredential(cred)
 	require.NoError(t, err)
 	return cred, authorization
 }
@@ -226,7 +229,7 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeForCallerCredential(t *testing
 			require.NoError(t, err)
 			req.Header[header] = []string{authorization}
 
-			_, err = NewTransport(nil, inner).RoundTrip(req)
+			_, err = newTestTransport(nil, inner).RoundTrip(req)
 			var unknown *PaymentOutcomeUnknownError
 			require.ErrorAs(t, err, &unknown)
 			require.NotNil(t, unknown.Challenge)
@@ -245,7 +248,7 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeForUnparseableCallerCredential
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Payment not-a-credential")
 
-	_, err = NewTransport(nil, inner).RoundTrip(req)
+	_, err = newTestTransport(nil, inner).RoundTrip(req)
 	var unknown *PaymentOutcomeUnknownError
 	require.ErrorAs(t, err, &unknown)
 	assert.Nil(t, unknown.Challenge)
@@ -282,7 +285,7 @@ func TestClient_Do_RefusesPaymentAfterRedirectThroughAnotherOrigin(t *testing.T)
 		case "/start":
 			http.Redirect(w, r, otherURL, http.StatusFound)
 		case "/priced":
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -310,7 +313,7 @@ func TestClient_Do_KeepsUnknownOutcomeOnClientTimeout(t *testing.T) {
 	defer close(release)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -345,7 +348,7 @@ func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T
 	respond := func(req *http.Request, body string) *http.Response {
 		header := http.Header{}
 		// A server may still offer a challenge next to the problem.
-		header.Set(mpp.HeaderWWWAuthenticate, challenge.ToAuthenticate(challenge.Realm))
+		header.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(challenge))
 		if body != "" {
 			header.Set("Content-Type", "application/problem+json")
 		}
@@ -377,7 +380,7 @@ func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T
 				req.Header.Set(mpp.HeaderAuthorization, authorization)
 			}
 
-			resp, err := NewTransport([]Method{method}, inner).RoundTrip(req)
+			resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)

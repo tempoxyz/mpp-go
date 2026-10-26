@@ -233,23 +233,13 @@ func setPaymentReceiptForStatus(header http.Header, status int, receipt string) 
 // cannot leave a partial set of offers; it is classified by
 // ChallengeSerializationError (414 or 500). Nil challenges are skipped.
 func WritePaymentResponse(w http.ResponseWriter, err error, challenges ...*mpp.Challenge) {
-	writePaymentResponse(w, err, challenges, challengeRealm)
-}
-
-func challengeRealm(c *mpp.Challenge) string { return c.Realm }
-
-func fixedRealm(realm string) func(*mpp.Challenge) string {
-	return func(*mpp.Challenge) string { return realm }
-}
-
-func writePaymentResponse(w http.ResponseWriter, err error, challenges []*mpp.Challenge, realmOf func(*mpp.Challenge) string) {
 	challenges = nonNilChallenges(challenges)
 	if err == nil {
 		if len(challenges) == 0 {
 			writeProblem(w, errNoChallenges)
 			return
 		}
-		headers, headerErr := authenticateHeaders(challenges, realmOf)
+		headers, headerErr := authenticateHeaders(challenges)
 		if headerErr != nil {
 			writeProblem(w, headerErr)
 			return
@@ -260,7 +250,7 @@ func writePaymentResponse(w http.ResponseWriter, err error, challenges []*mpp.Ch
 		return
 	}
 	if len(challenges) > 0 && !IsPaymentOutcomeUnknown(err) {
-		headers, headerErr := authenticateHeaders(challenges, realmOf)
+		headers, headerErr := authenticateHeaders(challenges)
 		if headerErr != nil {
 			writeProblem(w, headerErr)
 			return
@@ -285,25 +275,6 @@ func nonNilChallenges(challenges []*mpp.Challenge) []*mpp.Challenge {
 	return challenges
 }
 
-// WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry
-// challenge, written with realm.
-//
-// Deprecated: Use WritePaymentResponse(w, err, challenge) instead, which
-// writes the challenge's own Realm.
-func WritePaymentErrorWithChallenge(w http.ResponseWriter, err error, challenge *mpp.Challenge, realm string) {
-	writePaymentResponse(w, err, []*mpp.Challenge{challenge}, fixedRealm(realm))
-}
-
-// WritePaymentErrorWithChallenges serializes an MPP error with fresh retry
-// challenges, one WWW-Authenticate field value per challenge in order, written
-// with realm.
-//
-// Deprecated: Use WritePaymentResponse(w, err, challenges...) instead, which
-// writes each challenge's own Realm.
-func WritePaymentErrorWithChallenges(w http.ResponseWriter, err error, challenges []*mpp.Challenge, realm string) {
-	writePaymentResponse(w, err, challenges, fixedRealm(realm))
-}
-
 // IsPaymentOutcomeUnknown reports whether err is an
 // mpp.ErrPaymentOutcomeUnknown problem. Writers send it without retry
 // challenges, since the credential it answers may already have settled.
@@ -311,43 +282,23 @@ func IsPaymentOutcomeUnknown(err error) bool {
 	return errors.Is(err, mpp.ErrorTypePaymentOutcomeUnknown)
 }
 
-// WriteChallenge serializes an initial 402 challenge response, written with
-// realm.
-//
-// Deprecated: Use WritePaymentResponse(w, nil, challenge) instead, which
-// writes the challenge's own Realm.
-func WriteChallenge(w http.ResponseWriter, challenge *mpp.Challenge, realm string) {
-	writePaymentResponse(w, nil, []*mpp.Challenge{challenge}, fixedRealm(realm))
-}
-
-// WriteChallenges serializes an initial 402 response offering every challenge,
-// one WWW-Authenticate field value per challenge in presentation order,
-// written with realm.
-//
-// Deprecated: Use WritePaymentResponse(w, nil, challenges...) instead, which
-// writes each challenge's own Realm.
-func WriteChallenges(w http.ResponseWriter, challenges []*mpp.Challenge, realm string) {
-	writePaymentResponse(w, nil, challenges, fixedRealm(realm))
-}
-
 // authenticateHeaders serializes every challenge before any header is written
 // so a later failure cannot leave a partial set of offers. A failure is
 // classified by ChallengeSerializationError.
-func authenticateHeaders(challenges []*mpp.Challenge, realmOf func(*mpp.Challenge) string) ([]string, error) {
+func authenticateHeaders(challenges []*mpp.Challenge) ([]string, error) {
 	headers := make([]string, 0, len(challenges))
 	for _, challenge := range challenges {
-		realm := realmOf(challenge)
-		header, err := formatChallengeWithRealm(challenge, realm)
+		header, err := mpp.FormatChallenge(challenge)
 		if err != nil {
-			return nil, ChallengeSerializationError(challenge, realm, err)
+			return nil, ChallengeSerializationError(challenge, challenge.Realm, err)
 		}
 		headers = append(headers, header)
 	}
 	return headers, nil
 }
 
-// FormatChallengeWithRealm formats challenge with realm in place of its own
-// Realm, for writers that predate mpp.FormatChallenge.
+// formatChallengeWithRealm formats challenge with realm in place of its own
+// Realm, for ChallengeSerializationError.
 func formatChallengeWithRealm(challenge *mpp.Challenge, realm string) (string, error) {
 	if challenge == nil || challenge.Realm == realm {
 		return mpp.FormatChallenge(challenge)
@@ -420,14 +371,6 @@ func setAuthenticateHeaders(header http.Header, values []string) {
 	for _, value := range values {
 		header.Add(mpp.HeaderWWWAuthenticate, value)
 	}
-}
-
-// WritePaymentError serializes MPP verification errors as problem details.
-//
-// Deprecated: Use WritePaymentResponse instead, which also writes initial and
-// retry challenges.
-func WritePaymentError(w http.ResponseWriter, err error) {
-	writeProblem(w, err)
 }
 
 // writeProblem serializes err as RFC 9457 problem details.

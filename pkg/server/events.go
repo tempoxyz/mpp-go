@@ -92,7 +92,7 @@ func challengesDelivered(err error, challenges []*mpp.Challenge) bool {
 	if len(challenges) == 0 || IsPaymentOutcomeUnknown(err) {
 		return false
 	}
-	_, headerErr := authenticateHeaders(challenges, challengeRealm)
+	_, headerErr := authenticateHeaders(challenges)
 	return headerErr == nil
 }
 

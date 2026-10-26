@@ -142,13 +142,6 @@ func Compose(ctx context.Context, authorization string, offers ...Offer) (*Charg
 	return result, err
 }
 
-// ComposeCharge runs a composed charge for transports other than HTTP.
-//
-// Deprecated: Use Compose instead, which takes the same arguments.
-func ComposeCharge(ctx context.Context, authorization string, configs ...ComposeConfig) (*ChargeResult, error) {
-	return Compose(ctx, authorization, configs...)
-}
-
 // composeRetryResult answers a credential rejected with err, such as a
 // malformed one, with every Challenge its method and intent offer, or every
 // Challenge when none match, and the Mpp that issued each.

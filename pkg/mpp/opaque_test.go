@@ -47,7 +47,7 @@ func TestParseChallengePreservesOpaqueEncoding(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, map[string]string{"a": "first", "z": "last"}, challenge.Opaque)
 
-		formatted := FormatAuthenticate(challenge, challenge.Realm)
+		formatted := formatAuthenticateUnchecked(challenge, challenge.Realm)
 		assert.Contains(t, formatted, `opaque="`+raw+`"`,
 			"the issuer's opaque encoding must be echoed unchanged for %s", opaqueJSON)
 	}
@@ -58,7 +58,7 @@ func TestCredentialEchoPreservesOpaqueEncoding(t *testing.T) {
 	challenge, err := ParseChallenge(header)
 	require.NoError(t, err)
 
-	authorization := FormatAuthorization(&Credential{
+	authorization := formatAuthorizationUnchecked(&Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   map[string]any{"type": "test"},
 	})
@@ -68,7 +68,7 @@ func TestCredentialEchoPreservesOpaqueEncoding(t *testing.T) {
 	credential, err := ParseCredential(authorization)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"a": "first", "z": "last"}, credential.Challenge.Opaque)
-	assert.Equal(t, raw, credentialChallengeOpaque(t, FormatAuthorization(credential)),
+	assert.Equal(t, raw, credentialChallengeOpaque(t, formatAuthorizationUnchecked(credential)),
 		"re-formatting a parsed credential must keep the echoed opaque value unchanged")
 }
 
@@ -79,7 +79,7 @@ func TestFormatAuthenticateReencodesModifiedOpaque(t *testing.T) {
 
 	challenge.Opaque["a"] = "changed"
 
-	formatted := FormatAuthenticate(challenge, challenge.Realm)
+	formatted := formatAuthenticateUnchecked(challenge, challenge.Realm)
 	assert.NotContains(t, formatted, `opaque="`+raw+`"`,
 		"a stale encoding must not be emitted after the decoded opaque changes")
 	assert.Contains(t, formatted, `opaque="`+canonicalOpaque(t, challenge.Opaque)+`"`)
@@ -99,7 +99,7 @@ func TestIssuedChallengeWithMetaVerifiesAfterWireRoundTrip(t *testing.T) {
 	parsed, err := ParseChallenge(formatted)
 	require.NoError(t, err)
 	assert.Equal(t, formatted, parsed.ToAuthenticate(realm))
-	assert.True(t, parsed.Verify(secret, realm))
+	assert.True(t, parsed.verify(secret, realm))
 }
 
 func TestJSONRoundTripPreservesOpaqueEncoding(t *testing.T) {
@@ -112,14 +112,14 @@ func TestJSONRoundTripPreservesOpaqueEncoding(t *testing.T) {
 	var challenge Challenge
 	require.NoError(t, json.Unmarshal(data, &challenge))
 	assert.Equal(t, map[string]string{"a": "first", "z": "last"}, challenge.Opaque)
-	assert.Contains(t, FormatAuthenticate(&challenge, challenge.Realm), `opaque="`+raw+`"`)
+	assert.Contains(t, formatAuthenticateUnchecked(&challenge, challenge.Realm), `opaque="`+raw+`"`)
 
 	credential := challenge.NewCredential(map[string]any{"type": "test"})
 	data, err = json.Marshal(credential)
 	require.NoError(t, err)
 	var decoded Credential
 	require.NoError(t, json.Unmarshal(data, &decoded))
-	assert.Equal(t, raw, credentialChallengeOpaque(t, FormatAuthorization(&decoded)),
+	assert.Equal(t, raw, credentialChallengeOpaque(t, formatAuthorizationUnchecked(&decoded)),
 		"a credential must echo the issuer's opaque after a JSON round trip")
 }
 
@@ -146,10 +146,10 @@ func TestVerifyUsesPreservedOpaqueEncoding(t *testing.T) {
 
 	challenge, err := ParseChallenge(header)
 	require.NoError(t, err)
-	assert.True(t, challenge.Verify(secret, realm))
+	assert.True(t, challenge.verify(secret, realm))
 
 	challenge.Opaque["a"] = "changed"
-	assert.False(t, challenge.Verify(secret, realm), "a modified opaque must not verify")
+	assert.False(t, challenge.verify(secret, realm), "a modified opaque must not verify")
 }
 
 func TestOpaqueWithRawKeyIsEchoed(t *testing.T) {
@@ -158,7 +158,7 @@ func TestOpaqueWithRawKeyIsEchoed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"_raw": "abc"}, challenge.Opaque)
 
-	authorization := FormatAuthorization(challenge.NewCredential(map[string]any{"type": "test"}))
+	authorization := formatAuthorizationUnchecked(challenge.NewCredential(map[string]any{"type": "test"}))
 	assert.Equal(t, raw, credentialChallengeOpaque(t, authorization),
 		"an issuer's _raw key must not be taken for the undecodable-opaque sentinel")
 }

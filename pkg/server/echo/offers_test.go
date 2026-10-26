@@ -6,9 +6,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	echofw "github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -82,7 +85,7 @@ func TestChargeMiddleware_AdvertisesEveryOffer(t *testing.T) {
 		require.Equal(t, testOffers, currencies)
 
 		request := httptest.NewRequest(http.MethodGet, "/paid", nil)
-		request.Header.Set(mpp.HeaderAuthorization, challenges[1].NewCredential(map[string]any{"type": "test"}).ToAuthorization())
+		request.Header.Set(mpp.HeaderAuthorization, mpptest.FormatCredential(challenges[1].NewCredential(map[string]any{"type": "test"})))
 		paid := httptest.NewRecorder()
 		e.ServeHTTP(paid, request)
 		if fail {

@@ -69,7 +69,7 @@ func TestReplayClaimsPersistByDefaultWithExpiringStore(t *testing.T) {
 	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
 	require.NoError(t, err)
 	store := &expiringRecordingStore{MemoryStore: tempo.NewMemoryStore(), expiries: map[string]time.Time{}}
-	method, err := MethodFromConfig(Config{Store: store, RPC: rpc})
+	method, err := New(Config{Store: store, RPC: rpc})
 	require.NoError(t, err)
 
 	receipt, err := method.intent.Verify(ctx, credential, request.Map())
@@ -87,7 +87,7 @@ func TestReplayClaimsPersistByDefaultWithExpiringStore(t *testing.T) {
 func TestExpireReplayKeysRequiresExpiringStore(t *testing.T) {
 	_, err := NewIntent(IntentConfig{Store: newRecordingStore(), ExpireReplayKeys: true})
 	require.ErrorContains(t, err, "ExpireReplayKeys requires a Store that implements tempo.ExpiringStore")
-	_, err = MethodFromConfig(Config{Store: newRecordingStore(), Recipient: testRecipient, Currency: testCurrency, ExpireReplayKeys: true})
+	_, err = New(Config{Store: newRecordingStore(), Recipient: testRecipient, Currency: testCurrency, ExpireReplayKeys: true})
 	require.ErrorContains(t, err, "ExpireReplayKeys requires")
 
 	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), ExpireReplayKeys: true})

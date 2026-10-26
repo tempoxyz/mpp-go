@@ -9,11 +9,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 	echoadapter "github.com/tempoxyz/mpp-go/pkg/server/echo"
@@ -121,7 +124,7 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						challenge, err := mpp.ParseChallenge(initial.Header.Get(mpp.HeaderWWWAuthenticate))
 						require.NoError(t, err)
 						credential := challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"})
-						rejected := send(credential.ToAuthorization())
+						rejected := send(mpptest.FormatCredential(credential))
 						require.Equal(t, tc.status, rejected.StatusCode)
 						assert.Zero(t, handlerCalls)
 						assert.Equal(t, 1, verifyCalls)
@@ -141,10 +144,11 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 						}
 						retryChallenge, err := mpp.ParseChallenge(rejected.Header.Get(mpp.HeaderWWWAuthenticate))
 						require.NoError(t, err)
-						assert.True(t, retryChallenge.Verify("test-secret-key-minimum-32-byte-secret", "api.example.com"))
+						assert.True(t, retryChallenge.VerifyID("test-secret-key-minimum-32-byte-secret"))
+						assert.Equal(t, "api.example.com", retryChallenge.Realm)
 						assert.Equal(t, challenge.Request, retryChallenge.Request)
 						intentErr = nil
-						retry := send(retryChallenge.NewCredential(map[string]any{"type": "hash", "hash": "0xdef456"}).ToAuthorization())
+						retry := send(mpptest.FormatCredential(retryChallenge.NewCredential(map[string]any{"type": "hash", "hash": "0xdef456"})))
 						assert.Equal(t, http.StatusOK, retry.StatusCode)
 						assert.Equal(t, 1, handlerCalls)
 						assert.Equal(t, 2, verifyCalls)
@@ -169,7 +173,7 @@ func TestChargeKeepsCauseOfInternalPaymentError(t *testing.T) {
 	params := server.ChargeParams{Amount: "0.50"}
 	initial, err := payment.Charge(context.Background(), params)
 	require.NoError(t, err)
-	params.Authorization = initial.Challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"}).ToAuthorization()
+	params.Authorization = mpptest.FormatCredential(initial.Challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"}))
 
 	_, err = payment.Charge(context.Background(), params)
 	var problem *mpp.PaymentError
@@ -190,13 +194,13 @@ func TestWriteWrappedPaymentError(t *testing.T) {
 				var resp *http.Response
 				if framework == "fiber" {
 					app := fiber.New()
-					app.Get("/", func(c *fiber.Ctx) error { fiberadapter.WritePaymentError(c, wrapped); return nil })
+					app.Get("/", func(c *fiber.Ctx) error { fiberadapter.WritePaymentResponse(c, wrapped); return nil })
 					var err error
 					resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
 					require.NoError(t, err)
 				} else {
 					recorder := httptest.NewRecorder()
-					server.WritePaymentError(recorder, wrapped)
+					server.WritePaymentResponse(recorder, wrapped)
 					resp = recorder.Result()
 				}
 				defer resp.Body.Close()

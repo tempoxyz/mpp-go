@@ -7,25 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
-
-func TestDefaultRPCURLForChain(t *testing.T) {
-	t.Parallel()
-
-	if got := DefaultRPCURLForChain(tempotx.ChainIdModerato); got != tempotx.RpcUrlModerato {
-		assert.Failf(t, "", "DefaultRPCURLForChain(moderato) = %q, want %q", got, tempotx.RpcUrlModerato)
-		return
-	}
-	if got := DefaultRPCURLForChain(tempotx.ChainIdMainnet); got != tempotx.RpcUrlMainnet {
-		assert.Failf(t, "", "DefaultRPCURLForChain(mainnet) = %q, want %q", got, tempotx.RpcUrlMainnet)
-		return
-	}
-	if got := DefaultRPCURLForChain(999999); got != tempotx.RpcUrlMainnet {
-		assert.Failf(t, "", "DefaultRPCURLForChain(unknown) = %q, want %q", got, tempotx.RpcUrlMainnet)
-		return
-	}
-}
 
 func TestProofHelpers(t *testing.T) {
 	t.Parallel()

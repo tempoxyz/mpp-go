@@ -2,7 +2,6 @@ package fiberadapter
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -253,67 +252,4 @@ func WritePaymentResponse(c *fiberfw.Ctx, err error, challenges ...*mpp.Challeng
 		err = mpp.ErrPaymentRequired(challenges[0].Realm, challenges[0].Description)
 	}
 	server.WritePaymentResponse(newResponseWriter(c), err, challenges...)
-}
-
-// withRealm returns copies of challenges written with realm.
-func withRealm(challenges []*mpp.Challenge, realm string) []*mpp.Challenge {
-	copied := make([]*mpp.Challenge, 0, len(challenges))
-	for _, challenge := range challenges {
-		if challenge == nil {
-			continue
-		}
-		c := *challenge
-		c.Realm = realm
-		copied = append(copied, &c)
-	}
-	return copied
-}
-
-// WritePaymentErrorWithChallenge serializes an MPP error with a fresh retry
-// challenge, written with realm.
-//
-// Deprecated: Use WritePaymentResponse(c, err, challenge) instead, which
-// writes the challenge's own Realm.
-func WritePaymentErrorWithChallenge(c *fiberfw.Ctx, err error, challenge *mpp.Challenge, realm string) {
-	WritePaymentResponse(c, err, withRealm([]*mpp.Challenge{challenge}, realm)...)
-}
-
-// WritePaymentErrorWithChallenges serializes an MPP error with fresh retry
-// challenges, one WWW-Authenticate field value per challenge in order, written
-// with realm.
-//
-// Deprecated: Use WritePaymentResponse(c, err, challenges...) instead, which
-// writes each challenge's own Realm.
-func WritePaymentErrorWithChallenges(c *fiberfw.Ctx, err error, challenges []*mpp.Challenge, realm string) {
-	WritePaymentResponse(c, err, withRealm(challenges, realm)...)
-}
-
-// WriteChallenge serializes a 402 challenge response using RFC 9457 problem
-// details, written with realm.
-//
-// Deprecated: Use WritePaymentResponse(c, nil, challenge) instead, which
-// writes the challenge's own Realm.
-func WriteChallenge(c *fiberfw.Ctx, challenge *mpp.Challenge, realm string) {
-	WritePaymentResponse(c, nil, withRealm([]*mpp.Challenge{challenge}, realm)...)
-}
-
-// WriteChallenges serializes a 402 response offering every challenge, one
-// WWW-Authenticate field value per challenge in presentation order, written
-// with realm.
-//
-// Deprecated: Use WritePaymentResponse(c, nil, challenges...) instead, which
-// writes each challenge's own Realm.
-func WriteChallenges(c *fiberfw.Ctx, challenges []*mpp.Challenge, realm string) {
-	WritePaymentResponse(c, nil, withRealm(challenges, realm)...)
-}
-
-// WritePaymentError serializes MPP verification errors as problem details.
-//
-// Deprecated: Use WritePaymentResponse instead, which also writes initial and
-// retry challenges.
-func WritePaymentError(c *fiberfw.Ctx, err error) {
-	if err == nil {
-		err = errors.New("fiberadapter: nil payment error")
-	}
-	server.WritePaymentResponse(newResponseWriter(c), err)
 }

@@ -127,7 +127,7 @@ func TestChallengeWireAndIDUseSameJCSValues(t *testing.T) {
 	if !assert.NoError(t, err) {
 		return
 	}
-	assert.True(t, parsed.Verify("test-secret", "api.example.com"))
+	assert.True(t, parsed.verify("test-secret", "api.example.com"))
 	assert.Equal(t, header, parsed.ToAuthenticate(parsed.Realm))
 
 	credential := &Credential{

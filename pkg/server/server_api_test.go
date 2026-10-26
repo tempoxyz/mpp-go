@@ -138,7 +138,7 @@ func TestComposeMatchesComposeCharge(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "0xreceipt-beta", paid.Receipt.Reference)
 
-	legacy, err := ComposeCharge(context.Background(), paymentFor(offered.Challenges[1]), offers...)
+	legacy, err := Compose(context.Background(), paymentFor(offered.Challenges[1]), offers...)
 	require.NoError(t, err)
 	assert.Equal(t, paid.Receipt.Reference, legacy.Receipt.Reference)
 

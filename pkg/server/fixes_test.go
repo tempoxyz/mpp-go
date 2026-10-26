@@ -133,7 +133,7 @@ func TestIsMalformedCredentialUnwraps(t *testing.T) {
 
 func TestComposeChargeKeepsChallengeCollectionError(t *testing.T) {
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	result, err := ComposeCharge(context.Background(), "Payment not-base64!", ComposeConfig{
+	result, err := Compose(context.Background(), "Payment not-base64!", ComposeConfig{
 		Mpp:    payment,
 		Params: ChargeParams{Amount: "0.50", Meta: map[string]string{"_mpp_nonce": "fixed"}},
 	})

@@ -1,13 +1,14 @@
 package mpp
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestExpires_Format(t *testing.T) {
-	result := Expires.Seconds(60)
+	result := ExpiresIn(60 * time.Second)
 
 	// Parse the result back.
 	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", result)
@@ -27,16 +28,16 @@ func TestExpires_Format(t *testing.T) {
 func TestExpires_EndsWithZ(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		fn   func(int) string
+		unit time.Duration
 	}{
-		{"Seconds", Expires.Seconds},
-		{"Minutes", Expires.Minutes},
-		{"Hours", Expires.Hours},
-		{"Days", Expires.Days},
-		{"Weeks", Expires.Weeks},
+		{"Seconds", time.Second},
+		{"Minutes", time.Minute},
+		{"Hours", time.Hour},
+		{"Days", 24 * time.Hour},
+		{"Weeks", 7 * 24 * time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result := tc.fn(1)
+			result := ExpiresIn(tc.unit)
 			assert.EqualValuesf(t, 'Z', result[len(result)-1],
 				"expected Z suffix, got %q", result)
 
@@ -45,7 +46,7 @@ func TestExpires_EndsWithZ(t *testing.T) {
 }
 
 func TestExpires_HasMilliseconds(t *testing.T) {
-	result := Expires.Seconds(1)
+	result := ExpiresIn(time.Second)
 	assert.
 		// Format: 2006-01-02T15:04:05.000Z — the .000 is 3 digits.
 		Lenf(t, result, 24,
@@ -54,7 +55,7 @@ func TestExpires_HasMilliseconds(t *testing.T) {
 }
 
 func TestExpires_Minutes(t *testing.T) {
-	result := Expires.Minutes(5)
+	result := ExpiresIn(5 * time.Minute)
 	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", result)
 	if !assert.NoErrorf(t, err,
 		"failed to parse: %v", err) {
@@ -68,7 +69,7 @@ func TestExpires_Minutes(t *testing.T) {
 }
 
 func TestExpires_Hours(t *testing.T) {
-	result := Expires.Hours(2)
+	result := ExpiresIn(2 * time.Hour)
 	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", result)
 	if !assert.NoErrorf(t, err,
 		"failed to parse: %v", err) {
@@ -82,7 +83,7 @@ func TestExpires_Hours(t *testing.T) {
 }
 
 func TestExpires_Days(t *testing.T) {
-	result := Expires.Days(1)
+	result := ExpiresIn(24 * time.Hour)
 	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", result)
 	if !assert.NoErrorf(t, err,
 		"failed to parse: %v", err) {
@@ -96,7 +97,7 @@ func TestExpires_Days(t *testing.T) {
 }
 
 func TestExpires_Weeks(t *testing.T) {
-	result := Expires.Weeks(1)
+	result := ExpiresIn(7 * 24 * time.Hour)
 	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", result)
 	if !assert.NoErrorf(t, err,
 		"failed to parse: %v", err) {

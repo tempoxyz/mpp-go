@@ -9,8 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -101,7 +104,7 @@ func payWith(t *testing.T, url string, challenge *mpp.Challenge) *http.Response 
 		return *new(*http.Response)
 	}
 
-	req.Header.Set("Authorization", credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	resp, err := http.DefaultClient.Do(req)
 	if !assert.NoErrorf(t, err,
 		"Do() error = %v", err) {
@@ -124,7 +127,7 @@ func payWithBody(t *testing.T, url string, challenge *mpp.Challenge, body string
 		return *new(*http.Response)
 	}
 
-	req.Header.Set("Authorization", credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	resp, err := http.DefaultClient.Do(req)
 	if !assert.NoErrorf(t, err,
 		"Do() error = %v", err) {
@@ -246,7 +249,7 @@ func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	require.Equal(t, http.StatusPaymentRequired, challengeResp.StatusCode)
 
 	betaChallenge := findChallenge(t, challengeResp, "beta")
-	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), betaChallenge.Digest)
+	assert.Equal(t, mpp.ComputeBodyDigest([]byte(originalBody)), betaChallenge.Digest)
 
 	paid := payWithBody(t, srv.URL, betaChallenge, `{"query":"tampered"}`)
 	defer paid.Body.Close()
@@ -273,7 +276,7 @@ func TestComposeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	require.Equal(t, http.StatusPaymentRequired, challengeResp.StatusCode)
 
 	challenge := findChallenge(t, challengeResp, "alpha")
-	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+	assert.Equal(t, mpp.ComputeBodyDigest([]byte(originalBody)), challenge.Digest)
 
 	paid := payWithBody(t, srv.URL, challenge, originalBody)
 	defer paid.Body.Close()
@@ -383,7 +386,7 @@ func TestComposeMiddleware_RejectsUnknownMethod(t *testing.T) {
 	)
 	defer srv.Close()
 
-	fakeChallenge := mpp.NewChallenge(composeSecret, composeRealm, "unknown", "charge", map[string]any{"amount": "1.00"})
+	fakeChallenge := mpptest.NewChallenge(composeSecret, composeRealm, "unknown", "charge", map[string]any{"amount": "1.00"})
 	resp := payWith(t, srv.URL, fakeChallenge)
 	defer resp.Body.Close()
 	if !assert.Equalf(t, http.StatusBadRequest, resp.StatusCode,
@@ -416,7 +419,7 @@ func TestComposeMiddleware_CrossMethodCredentialRejected(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-	req.Header.Set("Authorization", credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential))
 
 	paid, err := http.DefaultClient.Do(req)
 	if !assert.NoErrorf(t, err,
@@ -457,7 +460,7 @@ func TestComposeMiddleware_AcceptsPaymentFromMixedAuthorizationHeader(t *testing
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer test-token, "+credential.ToAuthorization())
+	req.Header.Set("Authorization", "Bearer test-token, "+mpptest.FormatCredential(credential))
 
 	paid, err := http.DefaultClient.Do(req)
 	if !assert.NoErrorf(t, err,
@@ -495,7 +498,7 @@ func TestComposeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
 	}
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
-	req.Header.Set("Authorization", credential.ToAuthorization()+", "+credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential)+", "+mpptest.FormatCredential(credential))
 
 	paid, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -534,7 +537,7 @@ func TestComposeMiddleware_ReturnsMalformedCredentialForInvalidEchoedRequest(t *
 		return
 	}
 
-	req.Header.Set("Authorization", credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential))
 
 	paid, err := http.DefaultClient.Do(req)
 	if !assert.NoErrorf(t, err,
@@ -609,7 +612,7 @@ func TestComposeMiddleware_ReissuesAllSameMethodChallengesForMalformedCredential
 	if !assert.NoErrorf(t, err, "http.NewRequest() error = %v", err) {
 		return
 	}
-	req.Header.Set("Authorization", credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential))
 
 	paid, err := http.DefaultClient.Do(req)
 	if !assert.NoErrorf(t, err, "Do() error = %v", err) {
@@ -870,7 +873,7 @@ func TestComposeMiddleware_RequiresAuthAdvertisesAndAcceptsPaymentAuthorization(
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer app-token")
-	req.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+	req.Header.Set(mpp.HeaderPaymentAuthorization, mpptest.FormatCredential(credential))
 	paid, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer paid.Body.Close()

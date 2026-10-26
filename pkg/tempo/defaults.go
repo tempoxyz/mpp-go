@@ -28,18 +28,6 @@ func RPCURLForChain(chainID int64) (string, error) {
 	}
 }
 
-// DefaultRPCURLForChain returns the canonical Tempo RPC URL for a chain ID.
-// It returns the mainnet URL for unknown chain IDs, so a payment meant for
-// another chain would be checked against mainnet.
-//
-// Deprecated: Use RPCURLForChain instead, which reports unknown chain IDs.
-func DefaultRPCURLForChain(chainID int64) string {
-	if rpcURL, err := RPCURLForChain(chainID); err == nil {
-		return rpcURL
-	}
-	return tempotx.RpcUrlMainnet
-}
-
 // InferChainIDFromRPCURL maps known Tempo RPC URLs back to their chain IDs.
 // It returns 0 when the URL does not match a known Tempo endpoint.
 func InferChainIDFromRPCURL(rpcURL string) int64 {

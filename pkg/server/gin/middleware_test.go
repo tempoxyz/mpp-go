@@ -8,9 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	ginfw "github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -84,7 +87,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 
 	paidRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
 	if !assert.Equalf(t, http.StatusOK, paidResponse.Code,
@@ -108,7 +111,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 
 	failedRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	failedRequest.Header.Set("Authorization", credential.ToAuthorization())
+	failedRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	failedRequest.Header.Set("X-Downstream-Error", "true")
 	failedResponse := httptest.NewRecorder()
 	router.ServeHTTP(failedResponse, failedRequest)
@@ -116,7 +119,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	assert.Empty(t, failedResponse.Header().Get(mpp.HeaderPaymentReceipt))
 
 	redirectRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	redirectRequest.Header.Set("Authorization", credential.ToAuthorization())
+	redirectRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	redirectRequest.Header.Set("X-Downstream-Redirect", "true")
 	redirectResponse := httptest.NewRecorder()
 	router.ServeHTTP(redirectResponse, redirectRequest)
@@ -149,7 +152,7 @@ func TestChargeMiddlewareFlushKeepsPaymentReceipt(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodGet, "/stream", nil)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
 
@@ -185,7 +188,7 @@ func TestChargeMiddleware_RequiresAuthUsesPaymentAuthorization(t *testing.T) {
 	credential := challenge.NewCredential(map[string]any{"type": "hash", "hash": "0xabc123"})
 	paidRequest := httptest.NewRequest(http.MethodGet, "/paid", nil)
 	paidRequest.Header.Set("Authorization", "Bearer app-token")
-	paidRequest.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+	paidRequest.Header.Set(mpp.HeaderPaymentAuthorization, mpptest.FormatCredential(credential))
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
 	require.Equal(t, http.StatusOK, paidResponse.Code)
@@ -221,7 +224,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodGet, "/paid/two?view=full", nil)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
 
@@ -248,7 +251,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
 	require.NoError(t, err)
-	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+	assert.Equal(t, mpp.ComputeBodyDigest([]byte(originalBody)), challenge.Digest)
 
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -256,7 +259,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(`{"query":"tampered"}`))
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
 
@@ -288,7 +291,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 	paidRequest := httptest.NewRequest(http.MethodPost, "/paid", strings.NewReader(originalBody))
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse := httptest.NewRecorder()
 	router.ServeHTTP(paidResponse, paidRequest)
 

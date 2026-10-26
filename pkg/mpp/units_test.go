@@ -1,13 +1,13 @@
 package mpp
 
 import (
-	"encoding/json"
+	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestParseUnits(t *testing.T) {
+func TestParseAmountUnits(t *testing.T) {
 	tests := []struct {
 		name     string
 		value    string
@@ -38,10 +38,10 @@ func TestParseUnits(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ParseUnits(tc.value, tc.decimals)
+			got, err := ParseAmount(tc.value, tc.decimals)
 			if tc.wantErr {
 				assert.Errorf(t, err,
-					"expected error, got %d", got)
+					"expected error, got %s", got)
 
 				return
 			}
@@ -49,147 +49,21 @@ func TestParseUnits(t *testing.T) {
 				"unexpected error: %v", err) {
 				return
 			}
-			assert.Equalf(t, tc.want, got,
-				"got %d, want %d", got, tc.want)
+			assert.Equalf(t, big.NewInt(tc.want), got,
+				"got %s, want %d", got, tc.want)
 
 		})
 	}
 }
 
-func TestTransformUnits(t *testing.T) {
-	t.Run("with decimals", func(t *testing.T) {
-		req := map[string]any{
-			"amount":   "1.5",
-			"decimals": 6,
-			"extra":    "keep",
-		}
-		out, err := TransformUnits(req)
-		if !assert.NoErrorf(t, err,
-			"unexpected error: %v", err) {
-			return
-		}
-		assert.Equalf(t, "1500000", out["amount"],
-			"amount = %v, want 1500000", out["amount"])
-		{
-
-			_, ok := out["decimals"]
-			assert.False(t, ok,
-				"decimals key should be removed")
-		}
-		assert.Equal(t, "keep", out["extra"],
-			"extra key should be preserved")
-
-	})
-
-	t.Run("with json.Number decimals", func(t *testing.T) {
-		req := map[string]any{
-			"amount":   "1.5",
-			"decimals": json.Number("6"),
-		}
-		out, err := TransformUnits(req)
-		if !assert.NoErrorf(t, err,
-			"unexpected error: %v", err) {
-			return
-		}
-		assert.Equal(t, "1500000", out["amount"])
-	})
-
-	t.Run("with non-integer json.Number decimals", func(t *testing.T) {
-		_, err := TransformUnits(map[string]any{
-			"amount":   "1.5",
-			"decimals": json.Number("6.5"),
-		})
-		assert.ErrorContains(t, err, "invalid decimals")
-	})
-
-	t.Run("with suggestedDeposit", func(t *testing.T) {
-		req := map[string]any{
-			"amount":           "0.01",
-			"suggestedDeposit": "1.0",
-			"decimals":         6,
-		}
-		out, err := TransformUnits(req)
-		if !assert.NoErrorf(t, err,
-			"unexpected error: %v", err) {
-			return
-		}
-		assert.Equalf(t, "10000", out["amount"],
-			"amount = %v, want 10000", out["amount"])
-		assert.Equalf(t, "1000000", out["suggestedDeposit"],
-			"suggestedDeposit = %v, want 1000000", out["suggestedDeposit"])
-
-	})
-
-	t.Run("without decimals", func(t *testing.T) {
-		req := map[string]any{
-			"amount": "100",
-		}
-		out, err := TransformUnits(req)
-		if !assert.NoErrorf(t, err,
-			"unexpected error: %v", err) {
-			return
-		}
-		assert.Equalf(t, "100", out["amount"],
-			"amount should be unchanged, got %v", out["amount"])
-
-	})
-
-	t.Run("does not mutate original", func(t *testing.T) {
-		req := map[string]any{
-			"amount":   "1.0",
-			"decimals": 6,
-		}
-		_, err := TransformUnits(req)
-		if !assert.NoErrorf(t, err,
-			"unexpected error: %v", err) {
-			return
-		}
-		assert.Equal(t, "1.0", req["amount"],
-			"original map was mutated")
-		{
-
-			_, ok := req["decimals"]
-			assert.True(t, ok,
-				"original map decimals was removed")
-		}
-
-	})
-
-	t.Run("float64 decimals from JSON", func(t *testing.T) {
-		req := map[string]any{
-			"amount":   "1.0",
-			"decimals": float64(6),
-		}
-		out, err := TransformUnits(req)
-		if !assert.NoErrorf(t, err,
-			"unexpected error: %v", err) {
-			return
-		}
-		assert.Equalf(t, "1000000", out["amount"],
-			"amount = %v, want 1000000", out["amount"])
-
-	})
-
-	t.Run("negative decimals returns error without panicking", func(t *testing.T) {
-		req := map[string]any{
-			"amount":   "1.5",
-			"decimals": -1,
-		}
-		assert.NotPanics(t, func() {
-			_, err := TransformUnits(req)
-			assert.Error(t, err, "negative decimals must return an error")
-		})
-	})
-}
-
-func TestParseUnitsNegativeDecimalsDoNotPanic(t *testing.T) {
+func TestParseAmountNegativeDecimalsDoNotPanic(t *testing.T) {
 	// A negative decimals value must yield an error rather than a
 	// slice-bounds panic on fracPart[decimals:].
 	assert.NotPanics(t, func() {
-		if _, err := ParseUnits("1.5", -1); err == nil {
+		if _, err := ParseAmount("1.5", -1); err == nil {
 			t.Error("expected error for negative decimals")
 		}
-		if _, err := ParseUnits("100", -1); err == nil {
+		if _, err := ParseAmount("100", -1); err == nil {
 			t.Error("expected error for negative decimals")
 		}
 	})

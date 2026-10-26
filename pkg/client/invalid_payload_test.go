@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -50,9 +53,9 @@ func TestTransportRegeneratesInvalidPayloadWithFixedExpiry(t *testing.T) {
 				if requiresAuth {
 					opts = append(opts, server.WithRequiresAuth(true))
 				}
-				payment, err := server.New(rejectingMethod{intent}, "api.example.com", "test-secret-key-minimum-32-byte-secret", opts...)
+				payment, err := server.New(rejectingMethod{intent}, "api.example.com", "test-secret-key-minimum-32-byte-secret", append(opts, server.WithChallengeNonce(true))...)
 				require.NoError(t, err)
-				srv := httptest.NewServer(server.ChargeMiddleware(payment, server.ChargeParams{EnableChallengeNonce: true, Amount: "0.50", Expires: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })))
+				srv := httptest.NewServer(server.ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50", Expires: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })))
 				defer srv.Close()
 				method := new(regeneratingMethod)
 				resp, err := New([]Method{method}).Get(context.Background(), srv.URL)
@@ -95,7 +98,7 @@ func TestTransportInvalidPayloadResponseClassification(t *testing.T) {
 		{"oversized", "application/problem+json", strings.Repeat(" ", 64<<10) + invalid, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			challenge := mpp.NewChallenge("secret", "example.com", "tempo", "payment", nil)
+			challenge := mpptest.NewChallenge("secret", "example.com", "tempo", "payment", nil)
 			requests := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				requests++
@@ -103,7 +106,7 @@ func TestTransportInvalidPayloadResponseClassification(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 					return
 				}
-				w.Header().Set(mpp.HeaderWWWAuthenticate, challenge.ToAuthenticate(challenge.Realm))
+				w.Header().Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(challenge))
 				w.Header().Set("Content-Type", tc.contentType)
 				w.WriteHeader(http.StatusPaymentRequired)
 				io.WriteString(w, tc.body)
@@ -129,9 +132,9 @@ func TestTransportReusesNoncedCredentialAfterTransientFailure(t *testing.T) {
 		return mpp.Success("tempo", "paid"), nil
 	}})
 	require.NoError(t, err)
-	payment, err := server.New(rejectingMethod{intent}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	payment, err := server.New(rejectingMethod{intent}, "api.example.com", "test-secret-key-minimum-32-byte-secret", server.WithChallengeNonce(true))
 	require.NoError(t, err)
-	srv := httptest.NewServer(server.ChargeMiddleware(payment, server.ChargeParams{EnableChallengeNonce: true, Amount: "0.50", Expires: mpp.Expires.Minutes(5)})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })))
+	srv := httptest.NewServer(server.ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50", Expires: mpp.ExpiresIn(5 * time.Minute)})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })))
 	defer srv.Close()
 	method := new(regeneratingMethod)
 	resp, err := New([]Method{method}).Get(context.Background(), srv.URL)

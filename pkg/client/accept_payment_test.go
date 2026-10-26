@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -325,7 +328,7 @@ func TestTransportChallengeCandidates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			preferences, err := parseAcceptPayment(tt.preferences)
 			require.NoError(t, err)
-			transport := NewTransport(tt.methods, roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			transport := newTestTransport(tt.methods, roundTripperFunc(func(*http.Request) (*http.Response, error) {
 				return nil, nil
 			}))
 
@@ -433,7 +436,7 @@ func TestTransport_RoundTrip_PaymentNegotiation(t *testing.T) {
 				if r.Header.Get("Authorization") == "" {
 					acceptPayment = r.Header.Get("Accept-Payment")
 					for _, challenge := range challenges {
-						w.Header().Add("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+						w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 					}
 					w.WriteHeader(http.StatusPaymentRequired)
 					return
@@ -445,10 +448,10 @@ func TestTransport_RoundTrip_PaymentNegotiation(t *testing.T) {
 			parsedURL, err := url.Parse(srv.URL)
 			require.NoError(t, err)
 			for _, spec := range tt.challenges {
-				challenges = append(challenges, mpp.NewChallenge("secret", parsedURL.Host, spec.method, spec.intent, spec.request))
+				challenges = append(challenges, mpptest.NewChallenge("secret", parsedURL.Host, spec.method, spec.intent, spec.request))
 			}
 			methods, tracked := tt.setup()
-			transport := NewTransport(methods, nil, WithTransportPaymentPreferences(tt.configured))
+			transport := newTestTransport(methods, nil, WithPaymentPreferences(tt.configured))
 			req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 			require.NoError(t, err)
 			if tt.explicit != "" {
@@ -477,7 +480,7 @@ func TestClient_PaymentPreferences(t *testing.T) {
 		if r.Header.Get("Authorization") == "" {
 			acceptPayment = r.Header.Get("Accept-Payment")
 			for _, challenge := range challenges {
-				w.Header().Add("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+				w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			}
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
@@ -489,8 +492,8 @@ func TestClient_PaymentPreferences(t *testing.T) {
 	parsedURL, err := url.Parse(srv.URL)
 	require.NoError(t, err)
 	challenges = []*mpp.Challenge{
-		mpp.NewChallenge("secret", parsedURL.Host, "tempo", "charge", nil),
-		mpp.NewChallenge("secret", parsedURL.Host, "stripe", "charge", nil),
+		mpptest.NewChallenge("secret", parsedURL.Host, "tempo", "charge", nil),
+		mpptest.NewChallenge("secret", parsedURL.Host, "stripe", "charge", nil),
 	}
 	tempoMethod := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
 	stripeMethod := &mockMethod{name: "stripe", intent: "charge", cred: newTestCredential("stripe")}
@@ -576,10 +579,10 @@ func TestTransportPrepareRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := NewTransport(
+			transport := newTestTransport(
 				tt.methods,
 				roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, nil }),
-				WithTransportPaymentPreferences(tt.configured),
+				WithPaymentPreferences(tt.configured),
 			)
 			req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 			require.NoError(t, err)
@@ -638,10 +641,10 @@ func TestTransport_RoundTrip_InvalidPreferencesFailBeforeRequest(t *testing.T) {
 				called = true
 				return &http.Response{Body: io.NopCloser(strings.NewReader(""))}, nil
 			})
-			transport := NewTransport(
+			transport := newTestTransport(
 				[]Method{tt.method},
 				inner,
-				WithTransportPaymentPreferences(tt.preferences),
+				WithPaymentPreferences(tt.preferences),
 			)
 			req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 			require.NoError(t, err)

@@ -10,13 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
 const (
@@ -293,7 +296,7 @@ func TestCreateCredentialRejectsWireChallengeChainConflict(t *testing.T) {
 		Decimals:  6,
 		ChainID:   1,
 	})
-	challenge, err := mpp.ParseChallenge(issued.ToAuthenticate(testRealm))
+	challenge, err := mpp.ParseChallenge(mpptest.FormatChallenge(issued))
 	if !assert.NoErrorf(t, err,
 		"ParseChallenge() error = %v", err) {
 		return
@@ -312,13 +315,13 @@ func buildChallenge(t *testing.T, params tempo.ChargeRequestParams) *mpp.Challen
 		return *new(*mpp.Challenge)
 	}
 
-	return mpp.NewChallenge(
+	return mpptest.NewChallenge(
 		"secret-key",
 		testRealm,
 		tempo.MethodName,
 		tempo.IntentCharge,
 		request.Map(),
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 }
 
@@ -336,7 +339,7 @@ func TestHashCredentialSizePreflight(t *testing.T) {
 			challenge.Request["_mppx_scope"] = map[string]any{"query": strings.Repeat("a", size)}
 			challenge.RequestB64 = ""
 			if size < 60000 {
-				_, err = mpp.FormatAuthenticateStrict(challenge, challenge.Realm)
+				_, err = mpp.FormatChallenge(challenge)
 				if !assert.NoError(t, err) {
 					return
 				}
@@ -352,7 +355,7 @@ func TestHashCredentialSizePreflight(t *testing.T) {
 			}
 			assert.Len(t, rpc.sentRawTxs, 1)
 			if size == 9000 {
-				authorization, err := mpp.FormatAuthorizationStrict(credential)
+				authorization, err := mpp.FormatCredential(credential)
 				assert.NoError(t, err)
 				assert.Greater(t, len(authorization), 16*1024)
 			}

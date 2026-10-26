@@ -57,7 +57,7 @@ func TestFormatChallengeRejectsWhatParseChallengeRejects(t *testing.T) {
 		_, err := FormatChallenge(c)
 		assert.ErrorContains(t, err, "invalid challenge method", method)
 		// The lenient deprecated formatter still emits it; ParseChallenge rejects it.
-		_, err = ParseChallenge(FormatAuthenticate(c, c.Realm))
+		_, err = ParseChallenge(formatAuthenticateUnchecked(c, c.Realm))
 		assert.Error(t, err, method)
 	}
 
@@ -65,7 +65,7 @@ func TestFormatChallengeRejectsWhatParseChallengeRejects(t *testing.T) {
 	c.RequestB64 = "not base64!"
 	_, err = FormatChallenge(c)
 	assert.ErrorContains(t, err, "invalid challenge request")
-	_, err = ParseChallenge(FormatAuthenticate(c, c.Realm))
+	_, err = ParseChallenge(formatAuthenticateUnchecked(c, c.Realm))
 	assert.Error(t, err)
 }
 
@@ -103,7 +103,7 @@ func TestFormatCredentialRejectsWhatParseCredentialRejects(t *testing.T) {
 		_, err := FormatCredential(c)
 		assert.ErrorContains(t, err, want)
 		// The lenient deprecated formatter still emits it; ParseCredential rejects it.
-		_, err = ParseCredential(FormatAuthorization(c))
+		_, err = ParseCredential(formatAuthorizationUnchecked(c))
 		assert.Error(t, err, want)
 	}
 }

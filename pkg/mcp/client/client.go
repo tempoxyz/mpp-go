@@ -54,16 +54,6 @@ type Config struct {
 	OrderChallenges OrderChallenges
 	// PaymentPreferences ranks Challenges by "method/intent" q-values.
 	PaymentPreferences mppclient.PaymentPreferences
-	// TrustedTempoProofRealms lists the realms the client signs zero-amount
-	// Tempo proofs for. A zero-amount tempo/charge Challenge authenticates the
-	// payer at the realm it names, and an MCP server has no origin to compare
-	// that realm with, so other realms are refused, like the HTTP Transport
-	// refuses realms its origin does not own. Realms compare case-insensitively.
-	//
-	// Deprecated: Trust the realm in the Tempo charge method instead, with a
-	// TrustedProofRealm without an Origin in its Config.TrustedProofRealms
-	// (package github.com/tempoxyz/mpp-go/pkg/tempo/client).
-	TrustedTempoProofRealms []string
 }
 
 type wrapper struct {
@@ -86,7 +76,6 @@ func Middleware(config Config) mcp.Middleware {
 func cloneConfig(config Config) *Config {
 	config.Methods = append([]mppclient.Method(nil), config.Methods...)
 	config.PaymentPreferences = maps.Clone(config.PaymentPreferences)
-	config.TrustedTempoProofRealms = append([]string(nil), config.TrustedTempoProofRealms...)
 	return &config
 }
 
@@ -265,33 +254,18 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 
 // checkOrigin asks the candidate's method, when it implements
 // client.OriginValidator, whether it may pay a Challenge from a server without
-// an origin; a zero-amount tempo/charge proof for a realm in the deprecated
-// TrustedTempoProofRealms still passes, while the method's other origin rules
-// stay authoritative. Other methods keep the built-in rule: a zero-amount
-// tempo/charge Challenge is refused unless TrustedTempoProofRealms lists its
+// an origin. Other methods keep the built-in rule: a zero-amount tempo/charge
+// Challenge is refused, since an MCP server has no origin that could own its
 // realm.
 func (config *Config) checkOrigin(candidate mppclient.ChallengeCandidate) error {
 	challenge := candidate.Challenge
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
-		err := validator.ValidateOrigin(nil, challenge)
-		if err != nil && (!tempoproof.IsProofChallenge(challenge) || !config.trustsProofRealm(challenge.Realm)) {
-			return err
-		}
-		return nil
+		return validator.ValidateOrigin(nil, challenge)
 	}
-	if !tempoproof.IsProofChallenge(challenge) || config.trustsProofRealm(challenge.Realm) {
+	if !tempoproof.IsProofChallenge(challenge) {
 		return nil
 	}
 	return tempoproof.RealmError(challenge.Realm, "", "trust it with the Tempo method's Config.TrustedProofRealms")
-}
-
-func (config *Config) trustsProofRealm(realm string) bool {
-	for _, trusted := range config.TrustedTempoProofRealms {
-		if strings.EqualFold(trusted, realm) {
-			return true
-		}
-	}
-	return false
 }
 
 // IsPaymentRequiredError reports whether err is an MCP payment-required or

@@ -8,8 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -45,7 +48,7 @@ func onChallengeServer(t *testing.T) (*httptest.Server, *int, *[]string) {
 		calls++
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -64,7 +67,7 @@ func TestTransport_OnChallenge_DeclineReturnsErrorWithoutPaying(t *testing.T) {
 	declined := errors.New("amount too high")
 	method := &echoMethod{}
 	var seen *mpp.Challenge
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(_ context.Context, ch *mpp.Challenge, _ func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			seen = ch
 			return nil, declined
@@ -86,7 +89,7 @@ func TestTransport_OnChallenge_NilCredentialUsesMethod(t *testing.T) {
 	srv, calls, sources := onChallengeServer(t)
 	method := &echoMethod{}
 	hookCalls := 0
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(context.Context, *mpp.Challenge, func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			hookCalls++
 			return nil, nil
@@ -106,7 +109,7 @@ func TestTransport_OnChallenge_NilCredentialUsesMethod(t *testing.T) {
 func TestTransport_OnChallenge_ReturnedCredentialIsSent(t *testing.T) {
 	srv, _, sources := onChallengeServer(t)
 	method := &echoMethod{}
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(_ context.Context, ch *mpp.Challenge, _ func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			return &mpp.Credential{Challenge: ch.ToEcho(), Source: "from-hook", Payload: map[string]any{"type": "hash"}}, nil
 		}))
@@ -123,7 +126,7 @@ func TestTransport_OnChallenge_ReturnedCredentialIsSent(t *testing.T) {
 func TestTransport_OnChallenge_CreateCredentialPassesContext(t *testing.T) {
 	srv, _, sources := onChallengeServer(t)
 	method := &echoMethod{}
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			return create(context.WithValue(ctx, onChallengeCtxKey{}, "per-request"))
 		}))
@@ -141,7 +144,7 @@ func TestTransport_OnChallenge_CreateCredentialErrorIsWrapped(t *testing.T) {
 	srv, calls, _ := onChallengeServer(t)
 	boom := errors.New("signer offline")
 	method := &echoMethod{err: boom}
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			return create(ctx)
 		}))
@@ -159,7 +162,7 @@ func TestTransport_OnChallenge_NotCalledForReusedCredential(t *testing.T) {
 	var challenge *mpp.Challenge
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer srv.Close()
@@ -167,7 +170,7 @@ func TestTransport_OnChallenge_NotCalledForReusedCredential(t *testing.T) {
 
 	method := &echoMethod{}
 	hookCalls := 0
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(context.Context, *mpp.Challenge, func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			hookCalls++
 			return nil, nil
@@ -201,7 +204,7 @@ func TestClient_WithOnChallenge(t *testing.T) {
 func TestTransport_OnChallenge_NilAfterCreateDoesNotCreateTwice(t *testing.T) {
 	srv, calls, sources := onChallengeServer(t)
 	method := &echoMethod{}
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			if _, err := create(ctx); err != nil {
 				return nil, err
@@ -224,7 +227,7 @@ func TestTransport_OnChallenge_NilAfterFailedCreateReturnsThatError(t *testing.T
 	srv, calls, _ := onChallengeServer(t)
 	boom := errors.New("signer offline")
 	method := &echoMethod{err: boom}
-	tr := NewTransport([]Method{method}, nil, WithTransportOnChallenge(
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
 		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
 			_, _ = create(ctx) // logged and ignored
 			return nil, nil

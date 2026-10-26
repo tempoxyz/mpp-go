@@ -8,16 +8,19 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
+	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
-	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
-	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
 var (
@@ -78,7 +81,7 @@ func TestSponsoredOUSDChargeWithDefaultsEndToEnd(t *testing.T) {
 			rpc.balances = tt.balances
 			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
 			require.NoError(t, err)
-			payment := newTestServer(t, NewMethod(MethodConfig{
+			payment := newTestServer(t, newMethod(methodConfig{
 				Intent:    intent,
 				Recipient: testRecipient,
 				ChainID:   tt.chainID,
@@ -93,7 +96,7 @@ func TestSponsoredOUSDChargeWithDefaultsEndToEnd(t *testing.T) {
 			require.True(t, request.MethodDetails.FeePayer)
 
 			credential := payWithTransaction(t, rpc, challenges[0])
-			result, err := payment.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: credential.ToAuthorization()})
+			result, err := payment.Charge(ctx, mppserver.ChargeParams{Amount: "0.50", Authorization: mpptest.FormatCredential(credential)})
 			require.NoError(t, err)
 			require.False(t, result.IsChallenge())
 			assert.Equal(t, "success", result.Receipt.Status)
@@ -151,11 +154,7 @@ func TestLocalFeePayerAllowedFeeTokens(t *testing.T) {
 
 	custom, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 		FeePayerPrivateKey: feePayerKey,
-		FeePayerPolicies: map[string]FeePayerPolicy{
-			usdceAddress:   defaultFeePayerPolicy(),
-			ousdAddress:    defaultFeePayerPolicy(),
-			pathUSDAddress: defaultFeePayerPolicy(),
-		},
+		AllowedFeeTokens:   []string{pathUSDAddress, ousdAddress, usdceAddress},
 	})
 	require.NoError(t, err)
 	got, err := custom.allowedFeeTokens(context.Background(), &mockRPC{}, chain(tempotx.ChainIdModerato))
@@ -267,7 +266,7 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 			RPC:                rpc,
 			FeePayerPrivateKey: feePayerKey,
-			FeePayerPolicies:   map[string]FeePayerPolicy{ousdAddress: defaultFeePayerPolicy()},
+			AllowedFeeTokens:   []string{ousdAddress},
 		})
 		require.NoError(t, err)
 
@@ -283,10 +282,7 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 			RPC:                rpc,
 			FeePayerPrivateKey: feePayerKey,
-			FeePayerPolicies: map[string]FeePayerPolicy{
-				pathUSDAddress: defaultFeePayerPolicy(),
-				usdceAddress:   defaultFeePayerPolicy(),
-			},
+			AllowedFeeTokens:   []string{pathUSDAddress, usdceAddress},
 		})
 		require.NoError(t, err)
 
@@ -301,11 +297,12 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(),
 			RPC:                rpc,
 			FeePayerPrivateKey: feePayerKey,
-			FeePayerPolicies: map[string]FeePayerPolicy{usdceAddress: {
+			AllowedFeeTokens:   []string{usdceAddress},
+			FeePayerPolicy: &FeePayerPolicy{
 				MaxFeePerGas:         big.NewInt(1),
 				MaxPriorityFeePerGas: big.NewInt(1),
 				MaxTotalFee:          big.NewInt(1),
-			}},
+			},
 		})
 		require.NoError(t, err)
 
@@ -318,16 +315,16 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 func TestSponsoredDefaultsEmitEveryOffer(t *testing.T) {
 	t.Parallel()
 
-	for _, config := range []MethodConfig{
+	for _, config := range []methodConfig{
 		{ChainID: tempotx.ChainIdMainnet, FeePayer: true},
 		{ChainID: tempotx.ChainIdMainnet, FeePayerURL: "https://fee-payer.example.com"},
 	} {
 		config.Recipient = testRecipient
 		config.Intent = testStoredIntent()
-		method := NewMethod(config)
+		method := newMethod(config)
 		assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))
 	}
-	moderato := NewMethod(MethodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, FeePayer: true, Recipient: testRecipient})
+	moderato := newMethod(methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, FeePayer: true, Recipient: testRecipient})
 	assert.Equal(t, checksummed(ousdAddress, pathUSDAddress), offerCurrencies(t, moderato, mppserver.ChargeParams{Amount: "1", FeePayer: true}, tempotx.ChainIdModerato))
 }
 
@@ -383,7 +380,7 @@ func (r *staticCallRPC) SendRequest(context.Context, string, ...interface{}) (*t
 func TestFeeTokenRequiresLocalFeePayer(t *testing.T) {
 	for _, url := range []string{"", "https://sponsor.example.test"} {
 		t.Run(url, func(t *testing.T) {
-			_, err := MethodFromConfig(Config{Store: tempo.NewMemoryStore(), FeeToken: usdceAddress, FeePayerURL: url})
+			_, err := New(Config{Store: tempo.NewMemoryStore(), FeeToken: usdceAddress, FeePayerURL: url})
 			require.ErrorContains(t, err, "FeeToken requires a local fee payer")
 		})
 	}
@@ -427,7 +424,7 @@ func TestRemoteSponsoredOUSDUsesIndependentFeeToken(t *testing.T) {
 			rpc := newOffersRPC(tt.chainID)
 			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 			require.NoError(t, err)
-			payment := newTestServer(t, NewMethod(MethodConfig{
+			payment := newTestServer(t, newMethod(methodConfig{
 				Intent: intent, Recipient: testRecipient, ChainID: tt.chainID,
 				FeePayer: true, FeePayerURL: sponsor.URL,
 			}), testRealm, offersSecret)
@@ -435,7 +432,7 @@ func TestRemoteSponsoredOUSDUsesIndependentFeeToken(t *testing.T) {
 			require.Equal(t, checksummed(ousdAddress)[0], offers[0].Request["currency"])
 			credential := payWithTransaction(t, rpc, offers[0])
 			result, err := payment.Charge(context.Background(), mppserver.ChargeParams{
-				Amount: "0.50", Authorization: credential.ToAuthorization(),
+				Amount: "0.50", Authorization: mpptest.FormatCredential(credential),
 			})
 			require.NoError(t, err)
 			require.False(t, result.IsChallenge())

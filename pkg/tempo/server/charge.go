@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -93,20 +92,6 @@ type IntentConfig struct {
 	FeePayerSigner *temposigner.Signer
 	// FeePayerPrivateKey constructs FeePayerSigner when FeePayerSigner is nil.
 	FeePayerPrivateKey string
-	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
-	//
-	// Deprecated: Use FeePayerPrivateKey: os.Getenv("NAME") instead.
-	FeePayerPrivateKeyEnv string
-	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor.
-	// With a local fee payer, the configured tokens are the fee tokens it may
-	// pay gas in (tried in address order), independent of the charge currency.
-	// When empty, a local fee payer may use pathUSD and, on mainnet, USDC.e.
-	// Remote fee payers (FeePayerURL) pay in the charge currency, which needs
-	// a policy here. It cannot be combined with AllowedFeeTokens or
-	// FeePayerPolicy.
-	//
-	// Deprecated: Use AllowedFeeTokens and FeePayerPolicy instead.
-	FeePayerPolicies map[string]FeePayerPolicy
 	// AllowedFeeTokens lists the fee tokens this verifier will sponsor, as in
 	// mppx. With a local fee payer, they are the fee tokens it may pay gas in,
 	// tried in this order and independent of the charge currency. Remote fee
@@ -203,12 +188,6 @@ func NewIntent(config IntentConfig) (*Intent, error) {
 // newIntent also builds relay metadata; relay verification owns its replay store.
 func newIntent(config IntentConfig) (*Intent, error) {
 	feePayerPrivateKey := config.FeePayerPrivateKey
-	if feePayerPrivateKey == "" && config.FeePayerPrivateKeyEnv != "" {
-		feePayerPrivateKey = os.Getenv(config.FeePayerPrivateKeyEnv)
-		if feePayerPrivateKey == "" {
-			return nil, fmt.Errorf("tempo server: %s is not set", config.FeePayerPrivateKeyEnv)
-		}
-	}
 	feePayerSigner := config.FeePayerSigner
 	if feePayerSigner == nil && feePayerPrivateKey != "" {
 		resolved, err := temposigner.NewSigner(feePayerPrivateKey)
@@ -1854,27 +1833,8 @@ func hexBig(value *big.Int) string {
 
 // resolveFeePayerPolicies returns the per-token sponsorship policies and the
 // ordered fee tokens a local fee payer may pay gas in (nil for the per-chain
-// defaults) from either the deprecated FeePayerPolicies map or
-// AllowedFeeTokens and FeePayerPolicy.
+// defaults) from AllowedFeeTokens and FeePayerPolicy.
 func resolveFeePayerPolicies(config IntentConfig) (map[string]FeePayerPolicy, []common.Address, error) {
-	if len(config.FeePayerPolicies) > 0 && (config.AllowedFeeTokens != nil || config.FeePayerPolicy != nil) {
-		return nil, nil, fmt.Errorf("tempo server: FeePayerPolicies cannot be combined with AllowedFeeTokens or FeePayerPolicy")
-	}
-	if config.AllowedFeeTokens == nil && config.FeePayerPolicy == nil {
-		policies, err := normalizeFeePayerPolicies(config.FeePayerPolicies)
-		if err != nil {
-			return nil, nil, err
-		}
-		var feeTokens []common.Address
-		if len(config.FeePayerPolicies) > 0 {
-			for token := range policies {
-				feeTokens = append(feeTokens, common.HexToAddress(token))
-			}
-			// Map keys have no order; sort by address so selection is deterministic.
-			slices.SortFunc(feeTokens, func(a, b common.Address) int { return a.Cmp(b) })
-		}
-		return policies, feeTokens, nil
-	}
 	policy := defaultFeePayerPolicy()
 	if config.FeePayerPolicy != nil {
 		if config.FeePayerPolicy.MaxFeePerGas != nil {
@@ -1924,9 +1884,6 @@ func resolveFeePayerPolicies(config IntentConfig) (map[string]FeePayerPolicy, []
 }
 
 func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string]FeePayerPolicy, error) {
-	if len(configured) == 0 {
-		configured = defaultFeePayerPolicies()
-	}
 	policies := make(map[string]FeePayerPolicy, len(configured))
 	for currency, policy := range configured {
 		if !common.IsHexAddress(currency) {
@@ -1972,7 +1929,7 @@ func defaultFeePayerPolicy() FeePayerPolicy {
 }
 
 // allowedFeeTokens returns the ordered fee tokens a local fee payer may pay
-// gas in: the configured FeePayerPolicies tokens, or mppx's defaults of
+// gas in: the configured AllowedFeeTokens, or mppx's defaults of
 // pathUSD plus the chain's default currency (USDC.e on mainnet), limited to
 // tokens with a fee-payer policy.
 func (i *Intent) allowedFeeTokens(ctx context.Context, rpc tempo.RPCClient, request tempo.ChargeRequest) ([]common.Address, error) {

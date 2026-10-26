@@ -6,8 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -99,8 +102,8 @@ func TestParseChargeRequest_KeepsChainIDFromWireChallenge(t *testing.T) {
 
 	// Challenge JSON is decoded with json.Number, so the chainId a client or
 	// relay sees after parsing the header is not the int64 Map() produced.
-	issued := mpp.NewChallenge("secret", "api.example.com", MethodName, IntentCharge, request.Map())
-	received, err := mpp.ParseChallenge(issued.ToAuthenticate("api.example.com"))
+	issued := mpptest.NewChallenge("secret", "api.example.com", MethodName, IntentCharge, request.Map())
+	received, err := mpp.ParseChallenge(mpptest.FormatChallenge(issued))
 	if !assert.NoErrorf(t, err,
 		"ParseChallenge() error = %v", err) {
 		return

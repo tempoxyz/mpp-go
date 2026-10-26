@@ -66,8 +66,8 @@ func TestComposeMatchingDoesNotReencodeCredential(t *testing.T) {
 		assert.NotEmpty(t, resp.Header().Get(mpp.HeaderWWWAuthenticate))
 	})
 
-	t.Run("ComposeCharge", func(t *testing.T) {
-		result, err := ComposeCharge(context.Background(), authorization, configs...)
+	t.Run("Compose", func(t *testing.T) {
+		result, err := Compose(context.Background(), authorization, configs...)
 		require.Error(t, err)
 		var pe *mpp.PaymentError
 		require.True(t, errors.As(err, &pe), "want a client PaymentError, got %v", err)

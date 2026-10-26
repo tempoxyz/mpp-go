@@ -36,10 +36,6 @@ const (
 	// signing and round trips. This is deliberately wider than mppx's 25
 	// seconds, which leaves only about 10.
 	SponsoredValidBeforeWindow = 60 * time.Second
-	// FeePayerWindow is the client-side validity window used for sponsored charges.
-	//
-	// Deprecated: use SponsoredValidBeforeWindow.
-	FeePayerWindow = SponsoredValidBeforeWindow
 	// FeePayerMinRemainingValidity is the minimum validity a sponsored charge
 	// must keep: servers reject sponsored transactions with less remaining
 	// before valid_before, refuse to issue sponsored challenges that expire
@@ -58,10 +54,6 @@ const (
 	TransferWithMemoCalldataLength = 4 + 32 + 32 + 32
 	// USDCEAddress is the bridged USDC (USDC.e) contract on Tempo mainnet.
 	USDCEAddress = "0x20C000000000000000000000b9537d11c60E8b50"
-	// MainnetUSDCAddress is the bridged USDC (USDC.e) contract on Tempo mainnet.
-	//
-	// Deprecated: Use USDCEAddress instead.
-	MainnetUSDCAddress = USDCEAddress
 	// OUSDAddress is the OpenUSD (OUSD) contract, deployed at the same address
 	// on Tempo mainnet and Moderato.
 	OUSDAddress = "0x20c0000000000000000000006a37DA5C996874BE"

@@ -44,7 +44,7 @@ func TestPaymentAuthorizationHeaderIsBoundIntoID(t *testing.T) {
 
 	assert.NotEqual(t, implicit.ID, advertised.ID)
 	assert.Equal(t, HeaderPaymentAuthorization, advertised.Header)
-	assert.True(t, advertised.Verify("test-secret-key-12345", "api.example.com"))
+	assert.True(t, advertised.verify("test-secret-key-12345", "api.example.com"))
 	assert.Contains(t, advertised.ToAuthenticate("api.example.com"), `header="`+HeaderPaymentAuthorization+`"`)
 	assert.Equal(t, HeaderPaymentAuthorization, advertised.CredentialHeader())
 }
@@ -67,7 +67,7 @@ func TestWWWAuthenticateRoundTripPreservesCredentialHeader(t *testing.T) {
 	assert.Contains(t, header, `header="`+HeaderPaymentAuthorization+`"`)
 	assert.Equal(t, HeaderPaymentAuthorization, parsed.Header)
 	assert.Equal(t, HeaderPaymentAuthorization, parsed.CredentialHeader())
-	assert.True(t, parsed.Verify("test-secret", "api.example.com"))
+	assert.True(t, parsed.verify("test-secret", "api.example.com"))
 }
 
 func TestChallengeCreationRejectsInvalidCredentialHeader(t *testing.T) {

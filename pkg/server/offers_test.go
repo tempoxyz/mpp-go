@@ -8,9 +8,13 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -125,7 +129,7 @@ func TestMppCharge_OffersShareExplicitExpiresMetaAndDigest(t *testing.T) {
 	t.Parallel()
 
 	payment := newOffersTestServer(t, &recordingOfferIntent{}, offerA, offerB, offerC)
-	expires := mpp.Expires.Minutes(10)
+	expires := mpp.ExpiresIn(10 * time.Minute)
 	result, err := payment.Charge(context.Background(), ChargeParams{
 		Amount:      "1",
 		Expires:     expires,
@@ -138,7 +142,7 @@ func TestMppCharge_OffersShareExplicitExpiresMetaAndDigest(t *testing.T) {
 	for _, challenge := range result.Challenges {
 		assert.Equal(t, expires, challenge.Expires)
 		assert.Equal(t, map[string]string{"trace": "abc"}, applicationMeta(challenge.Opaque))
-		assert.Equal(t, mpp.BodyDigest.Compute([]byte(`{"q":1}`)), challenge.Digest)
+		assert.Equal(t, mpp.ComputeBodyDigest([]byte(`{"q":1}`)), challenge.Digest)
 		assert.Equal(t, "coffee", challenge.Description)
 	}
 }
@@ -156,7 +160,7 @@ func TestMppCharge_VerifiesCredentialForAnyOffer(t *testing.T) {
 			require.NoError(t, err)
 
 			credential := issued.Challenges[index].NewCredential(map[string]any{"type": "test"})
-			result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: credential.ToAuthorization()})
+			result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: mpptest.FormatCredential(credential)})
 			require.NoError(t, err)
 			require.False(t, result.IsChallenge())
 			assert.Empty(t, result.Challenges)
@@ -177,7 +181,7 @@ func TestMppCharge_RejectsCredentialForUnofferedCurrency(t *testing.T) {
 	require.NoError(t, err)
 	credential := other.Challenge.NewCredential(map[string]any{"type": "test"})
 
-	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: credential.ToAuthorization()})
+	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: mpptest.FormatCredential(credential)})
 	var paymentErr *mpp.PaymentError
 	require.ErrorAs(t, err, &paymentErr)
 	assert.Equal(t, mpp.ErrorTypeInvalidChallenge, paymentErr.Type)
@@ -193,11 +197,11 @@ func TestMppCharge_RejectsForgedOffer(t *testing.T) {
 
 	intent := &recordingOfferIntent{}
 	payment := newOffersTestServer(t, intent, offerA, offerB)
-	forged := mpp.NewChallenge("another-secret-key-minimum-32-bytes!!", "api.example.com", "tempo", "charge",
-		map[string]any{"amount": "1", "currency": offerB}, mpp.WithExpires(mpp.Expires.Minutes(5)))
+	forged := mpptest.NewChallenge("another-secret-key-minimum-32-bytes!!", "api.example.com", "tempo", "charge",
+		map[string]any{"amount": "1", "currency": offerB}, mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)))
 	credential := forged.NewCredential(map[string]any{"type": "test"})
 
-	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: credential.ToAuthorization()})
+	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: mpptest.FormatCredential(credential)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "challenge was not issued by this server")
 	assert.Equal(t, []string{offerA, offerB}, offeredCurrencies(result.Challenges))
@@ -213,7 +217,7 @@ func TestMppCharge_VerificationFailureReissuesEveryOffer(t *testing.T) {
 	require.NoError(t, err)
 
 	credential := issued.Challenges[1].NewCredential(map[string]any{"type": "test"})
-	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: credential.ToAuthorization()})
+	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Authorization: mpptest.FormatCredential(credential)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "insufficient balance")
 	require.Len(t, result.Challenges, 2)
@@ -241,7 +245,7 @@ func TestMppCharge_PerRequestCurrencyOverrideIssuesSingleOffer(t *testing.T) {
 	assert.Equal(t, []string{offerC}, offeredCurrencies(issued.Challenges))
 
 	credential := issued.Challenge.NewCredential(map[string]any{"type": "test"})
-	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Currency: offerC, Authorization: credential.ToAuthorization()})
+	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", Currency: offerC, Authorization: mpptest.FormatCredential(credential)})
 	require.NoError(t, err)
 	assert.Equal(t, "0xreceipt-"+offerC, result.Receipt.Reference)
 }
@@ -309,7 +313,7 @@ func TestChargeMiddleware_AdvertisesEveryOfferAndAcceptsAny(t *testing.T) {
 
 	for _, challenge := range []*mpp.Challenge{challenges[1], challenges[0]} {
 		request := httptest.NewRequest(http.MethodGet, "/paid", nil)
-		request.Header.Set(mpp.HeaderAuthorization, challenge.NewCredential(map[string]any{"type": "test"}).ToAuthorization())
+		request.Header.Set(mpp.HeaderAuthorization, mpptest.FormatCredential(challenge.NewCredential(map[string]any{"type": "test"})))
 		paid := httptest.NewRecorder()
 		handler.ServeHTTP(paid, request)
 		require.Equal(t, http.StatusOK, paid.Code)
@@ -329,7 +333,7 @@ func TestChargeMiddleware_VerificationFailureAdvertisesEveryOffer(t *testing.T) 
 	require.NoError(t, err)
 
 	request := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	request.Header.Set(mpp.HeaderAuthorization, issued.Challenges[1].NewCredential(map[string]any{"type": "test"}).ToAuthorization())
+	request.Header.Set(mpp.HeaderAuthorization, mpptest.FormatCredential(issued.Challenges[1].NewCredential(map[string]any{"type": "test"})))
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	require.Equal(t, http.StatusPaymentRequired, recorder.Code)
@@ -358,7 +362,7 @@ func TestComposeMiddleware_ExpandsMultiOfferEntries(t *testing.T) {
 
 	request, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
-	request.Header.Set(mpp.HeaderAuthorization, challenges[1].NewCredential(map[string]any{"type": "test"}).ToAuthorization())
+	request.Header.Set(mpp.HeaderAuthorization, mpptest.FormatCredential(challenges[1].NewCredential(map[string]any{"type": "test"})))
 	paid, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	body, _ := io.ReadAll(paid.Body)
@@ -390,7 +394,7 @@ func TestComposeMiddleware_SelectsMultiOfferEntryByOffer(t *testing.T) {
 	// fall back to the first tempo entry.
 	request, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
-	request.Header.Set(mpp.HeaderAuthorization, challenges[3].NewCredential(map[string]any{"type": "test"}).ToAuthorization())
+	request.Header.Set(mpp.HeaderAuthorization, mpptest.FormatCredential(challenges[3].NewCredential(map[string]any{"type": "test"})))
 	paid, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	paid.Body.Close()
@@ -399,47 +403,47 @@ func TestComposeMiddleware_SelectsMultiOfferEntryByOffer(t *testing.T) {
 	assert.Equal(t, []string{offerB}, premium.currencies())
 }
 
-func TestWriteChallenges(t *testing.T) {
+func TestWritePaymentResponseOffersChallenges(t *testing.T) {
 	t.Parallel()
 
-	first := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerA})
-	second := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerB})
+	first := mpptest.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerA})
+	second := mpptest.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerB})
 
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set(mpp.HeaderWWWAuthenticate, "stale")
-	WriteChallenges(recorder, []*mpp.Challenge{first, second}, "api.example.com")
+	WritePaymentResponse(recorder, nil, first, second)
 	assert.Equal(t, http.StatusPaymentRequired, recorder.Code)
 	assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
 	assert.Equal(t, []string{offerA, offerB}, offeredCurrencies(parseAuthenticateValues(t, recorder.Header())))
 
 	single := httptest.NewRecorder()
-	WriteChallenge(single, first, "api.example.com")
-	assert.Equal(t, []string{first.ToAuthenticate("api.example.com")}, single.Header().Values(mpp.HeaderWWWAuthenticate))
+	WritePaymentResponse(single, nil, first)
+	assert.Equal(t, []string{mpptest.FormatChallenge(first)}, single.Header().Values(mpp.HeaderWWWAuthenticate))
 
 	empty := httptest.NewRecorder()
-	WriteChallenges(empty, nil, "api.example.com")
+	WritePaymentResponse(empty, nil)
 	assert.Equal(t, http.StatusInternalServerError, empty.Code)
 	assert.Empty(t, empty.Header().Values(mpp.HeaderWWWAuthenticate))
 
 	withErr := httptest.NewRecorder()
-	WritePaymentErrorWithChallenges(withErr, mpp.ErrVerificationFailed("nope"), []*mpp.Challenge{first, second}, "api.example.com")
+	WritePaymentResponse(withErr, mpp.ErrVerificationFailed("nope"), first, second)
 	assert.Equal(t, http.StatusPaymentRequired, withErr.Code)
 	assert.Equal(t, []string{offerA, offerB}, offeredCurrencies(parseAuthenticateValues(t, withErr.Header())))
 
 	noChallenges := httptest.NewRecorder()
-	WritePaymentErrorWithChallenges(noChallenges, mpp.ErrVerificationFailed("nope"), nil, "api.example.com")
+	WritePaymentResponse(noChallenges, mpp.ErrVerificationFailed("nope"))
 	assert.Equal(t, http.StatusPaymentRequired, noChallenges.Code)
 	assert.Empty(t, noChallenges.Header().Values(mpp.HeaderWWWAuthenticate))
 }
 
-func TestWriteChallengesRejectsInvalidChallengeWithoutPartialHeaders(t *testing.T) {
+func TestWritePaymentResponseRejectsInvalidChallengeWithoutPartialHeaders(t *testing.T) {
 	t.Parallel()
 
-	valid := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerA})
-	invalid := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerB}, mpp.WithDescription("bad\r\nheader"))
+	valid := mpptest.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerA})
+	invalid := mpptest.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"currency": offerB}, mpp.WithDescription("bad\r\nheader"))
 
 	recorder := httptest.NewRecorder()
-	WriteChallenges(recorder, []*mpp.Challenge{valid, invalid}, "api.example.com")
+	WritePaymentResponse(recorder, nil, valid, invalid)
 	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 	assert.Empty(t, recorder.Header().Values(mpp.HeaderWWWAuthenticate))
 }

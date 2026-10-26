@@ -31,13 +31,6 @@ func (c *Challenge) NewCredential(payload map[string]any, opts ...CredentialOpti
 	return credential
 }
 
-// FromAuthorization parses an Authorization header value into a Credential.
-//
-// Deprecated: Use ParseCredential instead.
-func FromAuthorization(header string) (*Credential, error) {
-	return ParseCredential(header)
-}
-
 // MarshalJSON emits the ergonomic JSON credential shape with a decoded
 // challenge request object instead of the internal base64url string.
 func (c Credential) MarshalJSON() ([]byte, error) {

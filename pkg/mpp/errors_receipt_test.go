@@ -2,11 +2,12 @@ package mpp
 
 import (
 	"errors"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestPaymentErrorConstructors(t *testing.T) {
@@ -255,7 +256,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		WithExternalID("ext-123"),
 		WithSubscriptionID("sub-123"),
 		WithFundingCurrency("0x20c0000000000000000000000000000000000001"),
-		WithExtra(map[string]any{"settled": true}),
+		withExtra(map[string]any{"settled": true}),
 	)
 	if !assert.Equalf(t, "success", receipt.Status,
 		"receipt.Status = %q, want %q", receipt.Status, "success") {
@@ -270,7 +271,7 @@ func TestReceiptRoundTrip(t *testing.T) {
 		return
 	}
 
-	header := FormatReceipt(receipt)
+	header := formatReceiptUnchecked(receipt)
 	parsed, err := ParseReceipt(header)
 	if !assert.NoErrorf(t, err,
 		"ParseReceipt() error = %v", err) {
@@ -328,9 +329,9 @@ func TestParsePaymentReceiptPreservesForeignSubscriptionID(t *testing.T) {
 		return
 	}
 
-	roundtripped, err := ParseReceipt(FormatReceipt(parsed))
+	roundtripped, err := ParseReceipt(formatReceiptUnchecked(parsed))
 	if !assert.NoErrorf(t, err,
-		"ParseReceipt(FormatReceipt(parsed)) error = %v", err) {
+		"ParseReceipt(formatReceiptUnchecked(parsed)) error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "sub-123", roundtripped.SubscriptionID,
@@ -456,8 +457,8 @@ func TestParsePaymentReceiptPreservesMethodExtensionFields(t *testing.T) {
 
 	// The extension is re-emitted at the top level of the wire (not nested
 	// under "extra"), matching the canonical shape.
-	decoded, err := B64Decode(FormatReceipt(parsed))
-	if !assert.NoErrorf(t, err, "B64Decode(FormatReceipt(parsed)) error = %v", err) {
+	decoded, err := B64Decode(formatReceiptUnchecked(parsed))
+	if !assert.NoErrorf(t, err, "B64Decode(formatReceiptUnchecked(parsed)) error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "0xdeadbeef", decoded["originTxHash"],
@@ -466,8 +467,8 @@ func TestParsePaymentReceiptPreservesMethodExtensionFields(t *testing.T) {
 	}
 
 	// And it survives a full parse -> format -> parse round trip unchanged.
-	roundtripped, err := ParseReceipt(FormatReceipt(parsed))
-	if !assert.NoErrorf(t, err, "ParseReceipt(FormatReceipt(parsed)) error = %v", err) {
+	roundtripped, err := ParseReceipt(formatReceiptUnchecked(parsed))
+	if !assert.NoErrorf(t, err, "ParseReceipt(formatReceiptUnchecked(parsed)) error = %v", err) {
 		return
 	}
 	if !assert.Equalf(t, "0xdeadbeef", roundtripped.Extensions["originTxHash"],
@@ -487,12 +488,12 @@ func TestChallengeVerifyAndToEcho(t *testing.T) {
 		map[string]any{"amount": "100"},
 		WithExpires("2026-01-01T00:00:00.000Z"),
 	)
-	if !assert.True(t, challenge.Verify("secret-key", "api.example.com"),
-		"challenge.Verify(secret-key, api.example.com) = false, want true") {
+	if !assert.True(t, challenge.verify("secret-key", "api.example.com"),
+		"challenge.verify(secret-key, api.example.com) = false, want true") {
 		return
 	}
-	if !assert.False(t, challenge.Verify("secret-key", "other.example.com"),
-		"challenge.Verify(secret-key, other.example.com) = true, want false") {
+	if !assert.False(t, challenge.verify("secret-key", "other.example.com"),
+		"challenge.verify(secret-key, other.example.com) = true, want false") {
 		return
 	}
 
@@ -590,7 +591,7 @@ func TestReceiptFundingCurrencyRoundTripsWithExtensions(t *testing.T) {
 	assert.Equal(t, object["fundingCurrency"], parsed.Extensions["fundingCurrency"])
 
 	// Formatting the parsed receipt keeps every field.
-	decoded, err := B64Decode(FormatReceipt(parsed))
+	decoded, err := B64Decode(formatReceiptUnchecked(parsed))
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -605,7 +606,7 @@ func TestReceiptFundingCurrencyRoundTripsWithExtensions(t *testing.T) {
 		Method:     parsed.Method,
 		Extensions: parsed.Extensions,
 	}
-	decoded, err = B64Decode(FormatReceipt(rebuilt))
+	decoded, err = B64Decode(formatReceiptUnchecked(rebuilt))
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -613,7 +614,7 @@ func TestReceiptFundingCurrencyRoundTripsWithExtensions(t *testing.T) {
 
 	// The named field wins over a conflicting Extensions copy.
 	rebuilt.FundingCurrency = "0x20c0000000000000000000000000000000000001"
-	decoded, err = B64Decode(FormatReceipt(rebuilt))
+	decoded, err = B64Decode(formatReceiptUnchecked(rebuilt))
 	if !assert.NoError(t, err) {
 		return
 	}

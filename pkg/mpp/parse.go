@@ -326,28 +326,6 @@ func FormatChallenge(c *Challenge) (string, error) {
 	return formatAuthenticateStrict(c, c.Realm)
 }
 
-// FormatAuthenticate formats a Challenge as an authentication header value
-// with the given realm. It returns an empty string when c cannot be
-// formatted.
-//
-// Output format: Payment id="...", realm="...", method="...", intent="...", request="..."
-//
-// Deprecated: Use FormatChallenge instead, which writes c.Realm (the realm
-// the challenge ID binds) and returns formatting errors.
-func FormatAuthenticate(c *Challenge, realm string) string {
-	header, _ := formatAuthenticate(c, realm, false)
-	return header
-}
-
-// FormatAuthenticateStrict formats a Challenge as an authentication header value
-// with the given realm, rejecting what FormatChallenge rejects.
-//
-// Deprecated: Use FormatChallenge instead, which writes c.Realm, the realm the
-// challenge ID binds.
-func FormatAuthenticateStrict(c *Challenge, realm string) (string, error) {
-	return formatAuthenticateStrict(c, realm)
-}
-
 func formatAuthenticateStrict(c *Challenge, realm string) (string, error) {
 	if _, err := parseAdvertisedCredentialHeader(c.Header); err != nil {
 		return "", err
@@ -453,8 +431,8 @@ func b64EncodeRequestWithError(request map[string]any) (string, error) {
 }
 
 func escapeQuoted(value string) string {
-	// Strip CR and LF unconditionally so the non-strict FormatAuthenticate can
-	// never emit a header value that splits the HTTP response. FormatAuthenticateStrict
+	// Strip CR and LF unconditionally so the non-strict Challenge.ToAuthenticate
+	// can never emit a header value that splits the HTTP response. FormatChallenge
 	// rejects such values earlier with an error; this keeps the default path safe too.
 	var builder strings.Builder
 	for len(value) > 0 {
@@ -641,17 +619,6 @@ func validateCredential(c *Credential) error {
 	return nil
 }
 
-// FormatAuthorization formats a Credential as an Authorization header value.
-// It returns an empty string when c cannot be formatted.
-//
-// Output format: Payment <base64url-json>
-//
-// Deprecated: Use FormatCredential instead, which returns formatting errors.
-func FormatAuthorization(c *Credential) string {
-	header, _ := formatAuthorization(c)
-	return header
-}
-
 func formatAuthorization(c *Credential) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("mpp: credential is nil")
@@ -836,15 +803,6 @@ var receiptBaseFields = map[string]struct{}{
 	"externalId":     {},
 	"subscriptionId": {},
 	"extra":          {},
-}
-
-// FormatPaymentReceipt formats a Receipt as a Payment-Receipt header value.
-// It returns the encoding of an empty object when r cannot be encoded.
-//
-// Deprecated: Use FormatReceiptWithError instead, which returns formatting
-// errors.
-func FormatPaymentReceipt(r *Receipt) string {
-	return b64EncodeAny(receiptFields(r))
 }
 
 // FormatReceiptWithError formats r as a Payment-Receipt header value, the

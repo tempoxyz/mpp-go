@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -110,13 +114,13 @@ func newSplitTestServerIntent(t *testing.T, hooks *splitTestIntent) Intent {
 }
 
 func splitCredential(secretKey string, request map[string]any) *mpp.Credential {
-	challenge := mpp.NewChallenge(
+	challenge := mpptest.NewChallenge(
 		secretKey,
 		"api.example.com",
 		"tempo",
 		"charge",
 		request,
-		mpp.WithExpires(mpp.Expires.Minutes(5)),
+		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
 	return challenge.NewCredential(map[string]any{"type": "transaction", "signature": "0x1234"})
 }
@@ -128,7 +132,7 @@ func TestVerifyOrChallengeUsesSplitLifecycle(t *testing.T) {
 	credential := splitCredential("test-secret-key-minimum-32-byte-secret", request)
 
 	result, err := VerifyOrChallenge(context.Background(), VerifyParams{
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 		Intent:        newSplitTestServerIntent(t, intent),
 		Request:       request,
 		Realm:         "api.example.com",

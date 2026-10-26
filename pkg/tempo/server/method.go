@@ -14,33 +14,17 @@ import (
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 )
 
-// MethodConfig configures a Tempo payment method for server-side charging.
-type MethodConfig struct {
-	// Intent verifies Tempo charge credentials for this method.
-	Intent *Intent
-	// Currency restricts issued challenges to exactly this token contract
-	// address. It cannot be combined with Currencies.
-	//
-	// Deprecated: Use Currencies with a single element.
-	Currency string
-	// Currencies lists the accepted token contract addresses in presentation
-	// order. The server issues one charge Challenge per currency, and a
-	// Credential for any of them verifies. An explicit list replaces the chain
-	// defaults from tempo.DefaultCurrenciesForChain; it must contain at least
-	// one valid 0x-prefixed address, and case-insensitive duplicates are
-	// dropped. It cannot be combined with Currency.
-	Currencies []string
-	// Recipient is the default payee address for issued challenges.
-	Recipient string
-	// Decimals controls how human-readable amounts are normalized.
-	Decimals int
-	// ChainID binds issued challenges to a specific Tempo chain when set.
-	ChainID int64
-	// FeePayer enables sponsored transaction flows by default.
-	FeePayer bool
-	// FeePayerURL points at a remote co-signer when the server does not sign locally.
-	FeePayerURL string
-	// SupportedModes limits the credential submission modes advertised to clients.
+// methodConfig holds the request defaults New gives a Method; see Config for
+// each field.
+type methodConfig struct {
+	Intent         *Intent
+	Currency       string
+	Currencies     []string
+	Recipient      string
+	Decimals       int
+	ChainID        int64
+	FeePayer       bool
+	FeePayerURL    string
 	SupportedModes []tempo.ChargeMode
 }
 
@@ -61,25 +45,7 @@ var _ mppserver.Method = (*Method)(nil)
 var _ mppserver.ChargeRequestBuilder = (*Method)(nil)
 var _ mppserver.ChargeOffersBuilder = (*Method)(nil)
 
-// NewMethod builds a Tempo server method with request defaults.
-//
-// Without Currency or Currencies, the method accepts
-// tempo.DefaultCurrenciesForChain for the configured chain, or for the chain
-// inferred from the intent's RPC URL when ChainID is zero. With no custom RPC,
-// it defaults to mainnet. NewMethod panics
-// when Intent lacks replay storage or the currency configuration is invalid (see MethodConfig.Currencies);
-// use New to receive the error instead.
-//
-// Deprecated: Use New instead, which returns configuration errors rather
-// than panicking. To share one Intent between methods, set Config.Intent.
-func NewMethod(config MethodConfig) *Method {
-	if config.Intent == nil || !hasReplayStore(config.Intent.store) {
-		panic("tempo server: Intent must be configured with a replay Store")
-	}
-	return newMethod(config)
-}
-
-func newMethod(config MethodConfig) *Method {
+func newMethod(config methodConfig) *Method {
 	decimals := config.Decimals
 	if decimals == 0 {
 		decimals = tempo.DefaultDecimals

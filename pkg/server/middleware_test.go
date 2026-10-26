@@ -12,8 +12,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -79,7 +82,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 		return
 	}
 
-	retry.Header.Set("Authorization", credential.ToAuthorization())
+	retry.Header.Set("Authorization", mpptest.FormatCredential(credential))
 
 	paidResponse, err := http.DefaultClient.Do(retry)
 	if !assert.NoErrorf(t, err,
@@ -149,7 +152,7 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 
 	paidRequest, err := http.NewRequest(http.MethodGet, server.URL+"/paid/two?view=full", nil)
 	require.NoError(t, err)
-	paidRequest.Header.Set("Authorization", credential.ToAuthorization())
+	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	paidResponse, err := http.DefaultClient.Do(paidRequest)
 	require.NoError(t, err)
 	defer paidResponse.Body.Close()
@@ -177,7 +180,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
 	require.NoError(t, err)
-	assert.Equal(t, mpp.BodyDigest.Compute([]byte(originalBody)), challenge.Digest)
+	assert.Equal(t, mpp.ComputeBodyDigest([]byte(originalBody)), challenge.Digest)
 
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -186,7 +189,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	}
 	retry, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{"query":"tampered"}`))
 	require.NoError(t, err)
-	retry.Header.Set("Authorization", credential.ToAuthorization())
+	retry.Header.Set("Authorization", mpptest.FormatCredential(credential))
 
 	paidResponse, err := http.DefaultClient.Do(retry)
 	require.NoError(t, err)
@@ -221,7 +224,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 	}
 	retry, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(originalBody))
 	require.NoError(t, err)
-	retry.Header.Set("Authorization", credential.ToAuthorization())
+	retry.Header.Set("Authorization", mpptest.FormatCredential(credential))
 
 	paidResponse, err := http.DefaultClient.Do(retry)
 	require.NoError(t, err)
@@ -252,7 +255,7 @@ func TestChargeMiddlewareReturnsFreshChallengeOnVerificationFailure(t *testing.T
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/paid", nil)
-	req.Header.Set("Authorization", credential.ToAuthorization())
+	req.Header.Set("Authorization", mpptest.FormatCredential(credential))
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 
@@ -294,7 +297,7 @@ func TestChargeMiddlewareRejectsMultiplePaymentCredentials(t *testing.T) {
 
 	retry, err := http.NewRequest(http.MethodGet, server.URL, nil)
 	require.NoError(t, err)
-	retry.Header.Set("Authorization", credential.ToAuthorization()+", "+credential.ToAuthorization())
+	retry.Header.Set("Authorization", mpptest.FormatCredential(credential)+", "+mpptest.FormatCredential(credential))
 
 	paidResponse, err := http.DefaultClient.Do(retry)
 	require.NoError(t, err)
@@ -455,7 +458,7 @@ func TestChargeMiddleware_RequiresAuthReadsPaymentAuthorizationAndPreservesBeare
 	retry, err := http.NewRequest(http.MethodGet, server.URL, nil)
 	require.NoError(t, err)
 	retry.Header.Set("Authorization", "Bearer app-token")
-	retry.Header.Set(mpp.HeaderPaymentAuthorization, credential.ToAuthorization())
+	retry.Header.Set(mpp.HeaderPaymentAuthorization, mpptest.FormatCredential(credential))
 
 	paidResponse, err := http.DefaultClient.Do(retry)
 	require.NoError(t, err)
@@ -511,11 +514,11 @@ func TestChargeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
 	}
 }
 
-func TestWritePaymentErrorWithChallengesOmitsChallengesForOutcomeUnknown(t *testing.T) {
-	challenge := mpp.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "1"})
+func TestWritePaymentResponseOmitsRetryChallengesForOutcomeUnknown(t *testing.T) {
+	challenge := mpptest.NewChallenge("test-secret-key-minimum-32-byte-secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "1"})
 
 	resp := httptest.NewRecorder()
-	WritePaymentErrorWithChallenges(resp, mpp.ErrPaymentOutcomeUnknown(challenge.ID), []*mpp.Challenge{challenge}, "api.example.com")
+	WritePaymentResponse(resp, mpp.ErrPaymentOutcomeUnknown(challenge.ID), challenge)
 
 	assert.Equal(t, http.StatusPaymentRequired, resp.Code)
 	assert.Empty(t, resp.Header().Values(mpp.HeaderWWWAuthenticate),
@@ -528,6 +531,6 @@ func TestWritePaymentErrorWithChallengesOmitsChallengesForOutcomeUnknown(t *test
 
 	// Other errors still carry their retry challenge.
 	resp = httptest.NewRecorder()
-	WritePaymentErrorWithChallenges(resp, mpp.ErrVerificationFailed("bad proof"), []*mpp.Challenge{challenge}, "api.example.com")
+	WritePaymentResponse(resp, mpp.ErrVerificationFailed("bad proof"), challenge)
 	assert.Len(t, resp.Header().Values(mpp.HeaderWWWAuthenticate), 1)
 }

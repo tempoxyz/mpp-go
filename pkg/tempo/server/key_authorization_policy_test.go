@@ -23,14 +23,9 @@ func TestFeePayerPolicyKeyAuthorization(t *testing.T) {
 	// Resolve the policy the way the sponsored Verify paths do, so the flag
 	// must survive IntentConfig normalization and per-currency lookup.
 	intent, err := NewIntent(IntentConfig{
-		Store: tempo.NewMemoryStore(),
-		FeePayerPolicies: map[string]FeePayerPolicy{
-			tempotx.AlphaUSDAddress.Hex(): func() FeePayerPolicy {
-				policy := defaultFeePayerPolicy()
-				policy.RejectKeyAuthorization = true
-				return policy
-			}(),
-		},
+		Store:            tempo.NewMemoryStore(),
+		AllowedFeeTokens: []string{tempotx.AlphaUSDAddress.Hex()},
+		FeePayerPolicy:   &FeePayerPolicy{RejectKeyAuthorization: true},
 	})
 	require.NoError(t, err)
 	rejecting, err := intent.feePayerPolicyFor(tempotx.AlphaUSDAddress.Hex())

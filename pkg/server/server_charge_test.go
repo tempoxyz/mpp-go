@@ -5,8 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -90,7 +93,7 @@ func TestMppCharge_RequiresAuthAdvertisesPaymentAuthorizationHeader(t *testing.T
 	require.NoError(t, err)
 	require.True(t, result.IsChallenge())
 	assert.Equal(t, mpp.HeaderPaymentAuthorization, result.Challenge.Header)
-	assert.Contains(t, result.Challenge.ToAuthenticate(payment.Realm()), `header="`+mpp.HeaderPaymentAuthorization+`"`)
+	assert.Contains(t, mpptest.FormatChallenge(result.Challenge), `header="`+mpp.HeaderPaymentAuthorization+`"`)
 }
 
 func TestMppCharge_RequiresAuthVerifiesPaymentAuthorizationAndIgnoresBearer(t *testing.T) {
@@ -105,7 +108,7 @@ func TestMppCharge_RequiresAuthVerifiesPaymentAuthorizationAndIgnoresBearer(t *t
 
 	ignored, err := payment.Charge(context.Background(), ChargeParams{
 		Amount:        "0.50",
-		Authorization: credential.ToAuthorization(),
+		Authorization: mpptest.FormatCredential(credential),
 	})
 	require.NoError(t, err)
 	assert.True(t, ignored.IsChallenge())
@@ -113,7 +116,7 @@ func TestMppCharge_RequiresAuthVerifiesPaymentAuthorizationAndIgnoresBearer(t *t
 	paid, err := payment.Charge(context.Background(), ChargeParams{
 		Amount:               "0.50",
 		Authorization:        "Bearer app-token",
-		PaymentAuthorization: credential.ToAuthorization(),
+		PaymentAuthorization: mpptest.FormatCredential(credential),
 	})
 	require.NoError(t, err)
 	require.False(t, paid.IsChallenge())

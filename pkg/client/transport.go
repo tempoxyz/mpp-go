@@ -27,7 +27,6 @@ type Transport struct {
 	paymentPreferences []paymentPreference
 	acceptPayment      string
 	configErr          error
-	trustedProofRealms map[string]string
 	onChallenge        OnChallengeFunc
 	maxRetries         int
 	orderChallenges    OrderChallenges
@@ -58,14 +57,8 @@ type paymentState struct {
 	unknown *PaymentOutcomeUnknownError
 }
 
-// TransportOption configures a Transport.
-//
-// Deprecated: Use NewHTTPTransport, which takes the Client's Option.
-type TransportOption func(*transportConfig)
-
 type transportConfig struct {
 	paymentPreferences PaymentPreferences
-	trustedProofRealms map[string]string
 	onChallenge        OnChallengeFunc
 	maxRetries         *int
 	orderChallenges    OrderChallenges
@@ -94,55 +87,6 @@ type OnChallengeFunc func(
 	createCredential func(ctx context.Context) (*mpp.Credential, error),
 ) (*mpp.Credential, error)
 
-// WithTransportOnChallenge sets a hook that runs before the transport creates a
-// credential for a 402 challenge. Client users should use WithOnChallenge.
-//
-// Deprecated: Use NewHTTPTransport with WithOnChallenge instead.
-func WithTransportOnChallenge(onChallenge OnChallengeFunc) TransportOption {
-	return func(config *transportConfig) {
-		config.onChallenge = onChallenge
-	}
-}
-
-// WithTransportTrustedProofRealm pins the Tempo proof realm for a known HTTP origin.
-// The origin must include scheme and host (and port, when non-default).
-//
-// Deprecated: Use the Tempo charge client's Config.TrustedProofRealms
-// (package github.com/tempoxyz/mpp-go/pkg/tempo/client) instead.
-func WithTransportTrustedProofRealm(origin, realm string) TransportOption {
-	return func(config *transportConfig) {
-		if config.trustedProofRealms == nil {
-			config.trustedProofRealms = make(map[string]string)
-		}
-		config.trustedProofRealms[origin] = realm
-	}
-}
-
-// WithTransportPaymentPreferences sets payment preferences on a standalone
-// Transport. Client users should use WithPaymentPreferences instead. Unknown
-// keys and invalid q-values cause RoundTrip to fail before sending the request.
-//
-// Deprecated: Use NewHTTPTransport with WithPaymentPreferences instead.
-func WithTransportPaymentPreferences(preferences PaymentPreferences) TransportOption {
-	return func(config *transportConfig) {
-		config.paymentPreferences = clonePaymentPreferences(preferences)
-	}
-}
-
-// NewTransport creates a payment-aware transport. Configuration errors are
-// returned by every RoundTrip.
-//
-// Deprecated: Use NewHTTPTransport instead, which returns configuration
-// errors and takes the Client's Option, or NewHTTPClient for redirect-safe
-// payments.
-func NewTransport(methods []Method, inner http.RoundTripper, opts ...TransportOption) *Transport {
-	config := new(transportConfig)
-	for _, opt := range opts {
-		opt(config)
-	}
-	return newTransport(methods, inner, config)
-}
-
 func newTransport(methods []Method, inner http.RoundTripper, config *transportConfig) *Transport {
 	if inner == nil {
 		inner = http.DefaultTransport
@@ -166,7 +110,6 @@ func newTransport(methods []Method, inner http.RoundTripper, config *transportCo
 		paymentPreferences: preferences,
 		acceptPayment:      header,
 		configErr:          err,
-		trustedProofRealms: config.trustedProofRealms,
 		onChallenge:        config.onChallenge,
 		maxRetries:         maxRetries,
 		orderChallenges:    config.orderChallenges,
@@ -693,34 +636,14 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 	}
 	// The method decides whether the server at this origin may receive its
 	// credential, such as a Tempo proof that authenticates the payer at the
-	// challenge realm. A realm pinned with the deprecated
-	// WithTrustedTempoProofRealm still passes, but only for a zero-amount
-	// tempo/charge proof: the method's other origin rules stay authoritative.
+	// challenge realm.
 	if validator, ok := candidate.method.(OriginValidator); ok {
-		err := validator.ValidateOrigin(req.URL, challenge)
-		if err != nil && (!tempoproof.IsProofChallenge(challenge) || !t.pinnedProofRealm(req.URL, challenge.Realm)) {
-			return err
-		}
-		return nil
+		return validator.ValidateOrigin(req.URL, challenge)
 	}
 	// Methods that do not validate origins keep the built-in rule for
 	// zero-amount tempo/charge proofs: the server must own the realm.
-	if tempoproof.IsProofChallenge(challenge) &&
-		!tempoproof.OriginOwnsRealm(req.URL, challenge.Realm) &&
-		!t.pinnedProofRealm(req.URL, challenge.Realm) {
+	if tempoproof.IsProofChallenge(challenge) && !tempoproof.OriginOwnsRealm(req.URL, challenge.Realm) {
 		return tempoproof.RealmError(challenge.Realm, requestOrigin(req.URL), "")
 	}
 	return nil
-}
-
-// pinnedProofRealm reports whether WithTrustedTempoProofRealm pinned realm
-// for the origin of u.
-func (t *Transport) pinnedProofRealm(u *url.URL, realm string) bool {
-	origin := requestOrigin(u)
-	for pinnedOrigin, pinned := range t.trustedProofRealms {
-		if tempoproof.NormalizeOrigin(pinnedOrigin) == origin && pinned == realm {
-			return true
-		}
-	}
-	return false
 }

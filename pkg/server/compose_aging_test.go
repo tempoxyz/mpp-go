@@ -41,19 +41,19 @@ func TestComposeAgingOfferDoesNotRejectOtherOffers(t *testing.T) {
 	handler := ComposeMiddleware(configs...)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	offered, err := ComposeCharge(context.Background(), "", configs...)
+	offered, err := Compose(context.Background(), "", configs...)
 	require.NoError(t, err)
 	require.Len(t, offered.Challenges, 2)
-	authorization := mpp.FormatAuthorization(offered.Challenges[0].NewCredential(map[string]any{}))
+	authorization := mustFormatCredential(t, offered.Challenges[0].NewCredential(map[string]any{}))
 	unpaid := httptest.NewRecorder()
 	handler.ServeHTTP(unpaid, httptest.NewRequest(http.MethodGet, "/", nil))
 	require.Equal(t, http.StatusPaymentRequired, unpaid.Code)
 	httpChallenge, err := mpp.ParseChallenge(unpaid.Header().Values(mpp.HeaderWWWAuthenticate)[0])
 	require.NoError(t, err)
-	httpAuthorization := mpp.FormatAuthorization(httpChallenge.NewCredential(map[string]any{}))
+	httpAuthorization := mustFormatCredential(t, httpChallenge.NewCredential(map[string]any{}))
 	aged.Store(true)
 
-	paid, err := ComposeCharge(context.Background(), authorization, configs...)
+	paid, err := Compose(context.Background(), authorization, configs...)
 	require.NoError(t, err)
 	require.Nil(t, paid.Challenge)
 	assert.Equal(t, "0xreceipt-test", paid.Receipt.Reference)
@@ -63,4 +63,11 @@ func TestComposeAgingOfferDoesNotRejectOtherOffers(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func mustFormatCredential(t *testing.T, credential *mpp.Credential) string {
+	t.Helper()
+	header, err := mpp.FormatCredential(credential)
+	require.NoError(t, err)
+	return header
 }

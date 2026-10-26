@@ -62,17 +62,17 @@ func FuzzParseChallenge(f *testing.F) {
 		if err != nil {
 			return
 		}
-		h1, err := FormatAuthenticateStrict(c1, c1.Realm)
+		h1, err := formatAuthenticateStrict(c1, c1.Realm)
 		if err != nil {
 			// Strict formatting refuses values a quoted auth-param cannot carry.
 			return
 		}
 		c2, err := ParseChallenge(h1)
 		if err != nil {
-			t.Fatalf("ParseChallenge(FormatAuthenticateStrict(c)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
+			t.Fatalf("ParseChallenge(formatAuthenticateStrict(c)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
 		}
 		assertSameChallenge(t, c1, c2, header, h1)
-		h2, err := FormatAuthenticateStrict(c2, c2.Realm)
+		h2, err := formatAuthenticateStrict(c2, c2.Realm)
 		if err != nil || h1 != h2 {
 			t.Fatalf("formatting is not stable: %q != %q (err %v)", h1, h2, err)
 		}
@@ -101,7 +101,7 @@ func assertSameChallenge(t *testing.T, c1, c2 *Challenge, input, formatted strin
 }
 
 // FuzzParseCredential checks Authorization parsing and that accepted
-// credentials survive FormatAuthorization and a second parse unchanged.
+// credentials survive formatting and a second parse unchanged.
 func FuzzParseCredential(f *testing.F) {
 	echo := ChallengeEcho{
 		ID:      "challenge-id",
@@ -113,10 +113,10 @@ func FuzzParseCredential(f *testing.F) {
 		Opaque:  map[string]string{"trace": "123", "route": "paid"},
 	}
 	seed := &Credential{Challenge: echo, Payload: map[string]any{"type": "hash", "hash": "0xabc123"}, Source: "did:pkh:eip155:42431:0x1234"}
-	f.Add(FormatAuthorization(seed))
+	f.Add(formatAuthorizationUnchecked(seed))
 	echo.Header = "Payment-Authorization"
 	seed.Challenge = echo
-	f.Add("Bearer token, " + FormatAuthorization(seed))
+	f.Add("Bearer token, " + formatAuthorizationUnchecked(seed))
 	f.Add("Payment " + base64.RawURLEncoding.EncodeToString([]byte(`{"challenge":{"id":"x","method":"tempo","intent":"charge","request":"e30","opaque":{"a":"b"}},"payload":{"n":12345678901234567890123}}`)))
 	f.Add("Payment " + base64.RawURLEncoding.EncodeToString([]byte(`{"challenge":{"id":"x","method":"tempo","intent":"charge","request":"e30","opaque":"eyJhIjoiYiJ9"},"payload":{}}`)))
 	f.Add("Payment abc, Payment def")
@@ -135,27 +135,27 @@ func FuzzParseCredential(f *testing.F) {
 		}
 		c2, err := ParseCredential(h1)
 		if err != nil {
-			t.Fatalf("ParseCredential(FormatAuthorization(c)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
+			t.Fatalf("ParseCredential(formatAuthorizationUnchecked(c)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
 		}
 		if !reflect.DeepEqual(c1.Challenge, c2.Challenge) || c1.Source != c2.Source || !JSONEqual(c1.Payload, c2.Payload) {
 			t.Fatalf("credential changed across a round trip:\n%+v\n%+v\ninput: %q", c1, c2, header)
 		}
-		if h2 := FormatAuthorization(c2); h1 != h2 {
+		if h2 := formatAuthorizationUnchecked(c2); h1 != h2 {
 			t.Fatalf("formatting is not stable: %q != %q", h1, h2)
 		}
 	})
 }
 
 // FuzzParsePaymentReceipt checks Payment-Receipt parsing and that accepted
-// receipts survive FormatPaymentReceipt and a second parse.
+// receipts survive formatting and a second parse.
 func FuzzParsePaymentReceipt(f *testing.F) {
 	receipt := Success("tempo", "ref-123",
 		WithExternalID("ext-123"),
 		WithSubscriptionID("sub-123"),
 		WithFundingCurrency("0x20c0000000000000000000000000000000000001"),
-		WithExtra(map[string]any{"settled": true}),
+		withExtra(map[string]any{"settled": true}),
 	)
-	f.Add(FormatPaymentReceipt(receipt))
+	f.Add(formatReceiptUnchecked(receipt))
 	for _, raw := range []string{
 		`{"status":"success","method":"tempo","timestamp":"2026-01-29T12:00:00Z","reference":"0xabc"}`,
 		`{"status":"success","method":"tempo","timestamp":"2026-01-29T12:00:00.123456789+02:00","reference":"0xabc","txHash":"0x1","extra":{"n":1e400}}`,
@@ -173,21 +173,21 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// FormatPaymentReceipt writes four-digit UTC years; a timestamp whose
+		// The receipt encoder writes four-digit UTC years; a timestamp whose
 		// UTC instant falls outside years 0000-9999 cannot be re-emitted.
 		if y := r1.Timestamp.UTC().Year(); y < 0 || y > 9999 {
 			t.Skip("timestamp year outside RFC 3339 range after UTC conversion")
 		}
-		h1 := FormatPaymentReceipt(r1)
+		h1 := formatReceiptUnchecked(r1)
 		r2, err := ParsePaymentReceipt(h1)
 		if err != nil {
-			t.Fatalf("ParsePaymentReceipt(FormatPaymentReceipt(r)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
+			t.Fatalf("ParsePaymentReceipt(formatReceiptUnchecked(r)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
 		}
 		if r1.Status != r2.Status || r1.Method != r2.Method || r1.Reference != r2.Reference ||
 			r1.ExternalID != r2.ExternalID || r1.SubscriptionID != r2.SubscriptionID || r1.FundingCurrency != r2.FundingCurrency {
 			t.Fatalf("receipt changed across a round trip:\n%+v\n%+v", r1, r2)
 		}
-		// FormatPaymentReceipt omits an empty extra object, so an empty map and
+		// The receipt encoder omits an empty extra object, so an empty map and
 		// a missing one are the same receipt.
 		if !JSONEqual(nonEmpty(r1.Extra), nonEmpty(r2.Extra)) || !JSONEqual(nonEmpty(r1.Extensions), nonEmpty(r2.Extensions)) {
 			t.Fatalf("receipt extra or extensions changed across a round trip:\n%+v\n%+v", r1, r2)
@@ -195,7 +195,7 @@ func FuzzParsePaymentReceipt(f *testing.F) {
 		if want := r1.Timestamp.UTC().Truncate(time.Millisecond); !want.Equal(r2.Timestamp) {
 			t.Fatalf("receipt timestamp %v, want %v", r2.Timestamp, want)
 		}
-		if h2 := FormatPaymentReceipt(r2); h1 != h2 {
+		if h2 := formatReceiptUnchecked(r2); h1 != h2 {
 			t.Fatalf("formatting is not stable: %q != %q", h1, h2)
 		}
 	})
@@ -280,8 +280,8 @@ func FuzzCanonicalJSON(f *testing.F) {
 	})
 }
 
-// FuzzParseUnits checks ParseUnits against an exact big.Rat reference.
-func FuzzParseUnits(f *testing.F) {
+// FuzzParseAmount checks ParseAmount against an exact big.Rat reference.
+func FuzzParseAmount(f *testing.F) {
 	for _, seed := range []struct {
 		value    string
 		decimals uint8
@@ -297,20 +297,20 @@ func FuzzParseUnits(f *testing.F) {
 		// Real tokens use at most 18 decimals; bound it so the reference
 		// arithmetic stays cheap.
 		d := int(decimals % 40)
-		got, err := ParseUnits(value, d)
+		got, err := ParseAmount(value, d)
 		if err != nil {
 			return
 		}
-		if got < 0 {
-			t.Fatalf("ParseUnits(%q, %d) = %d, want non-negative", value, d, got)
+		if got.Sign() < 0 {
+			t.Fatalf("ParseAmount(%q, %d) = %s, want non-negative", value, d, got)
 		}
 		want, ok := new(big.Rat).SetString(strings.TrimSpace(value))
 		if !ok {
-			t.Fatalf("ParseUnits(%q, %d) accepted a non-decimal value", value, d)
+			t.Fatalf("ParseAmount(%q, %d) accepted a non-decimal value", value, d)
 		}
 		want.Mul(want, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(d)), nil)))
-		if !want.IsInt() || want.Num().Cmp(big.NewInt(got)) != 0 {
-			t.Fatalf("ParseUnits(%q, %d) = %d, want %s", value, d, got, want.RatString())
+		if !want.IsInt() || want.Num().Cmp(got) != 0 {
+			t.Fatalf("ParseAmount(%q, %d) = %s, want %s", value, d, got, want.RatString())
 		}
 	})
 }

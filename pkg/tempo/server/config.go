@@ -20,7 +20,11 @@ type Config struct {
 	// Deprecated: Use Currencies with a single element.
 	Currency string
 	// Currencies lists the accepted token contract addresses in presentation
-	// order; see MethodConfig.Currencies.
+	// order. The server issues one charge Challenge per currency, and a
+	// Credential for any of them verifies. An explicit list replaces the chain
+	// defaults from tempo.DefaultCurrenciesForChain; it must contain at least
+	// one valid 0x-prefixed address, and case-insensitive duplicates are
+	// dropped. It cannot be combined with Currency.
 	Currencies []string
 	// Recipient is the default payee address for issued challenges.
 	Recipient string
@@ -43,16 +47,6 @@ type Config struct {
 	FeePayerSigner *temposigner.Signer
 	// FeePayerPrivateKey constructs FeePayerSigner when FeePayerSigner is nil.
 	FeePayerPrivateKey string
-	// FeePayerPrivateKeyEnv loads the fee-payer key from an environment variable when FeePayerPrivateKey is empty.
-	//
-	// Deprecated: Use FeePayerPrivateKey: os.Getenv("NAME") instead.
-	FeePayerPrivateKeyEnv string
-	// FeePayerPolicies allowlists the fee tokens this verifier will sponsor,
-	// each with its own limits. It cannot be combined with AllowedFeeTokens
-	// or FeePayerPolicy.
-	//
-	// Deprecated: Use AllowedFeeTokens and FeePayerPolicy instead.
-	FeePayerPolicies map[string]FeePayerPolicy
 	// AllowedFeeTokens lists the fee tokens this verifier will sponsor; see
 	// IntentConfig.AllowedFeeTokens.
 	AllowedFeeTokens []string
@@ -89,7 +83,7 @@ func New(config Config) (*Method, error) {
 	if _, err := resolveCurrencies(config.Currency, config.Currencies, config.ChainID); err != nil {
 		return nil, err
 	}
-	methodConfig := MethodConfig{
+	methodConfig := methodConfig{
 		Intent:         config.Intent,
 		Currency:       config.Currency,
 		Currencies:     config.Currencies,
@@ -106,17 +100,15 @@ func New(config Config) (*Method, error) {
 			buildIntent = newIntent
 		}
 		intent, err := buildIntent(IntentConfig{
-			RPC:                   config.RPC,
-			RPCURL:                config.RPCURL,
-			FeePayerSigner:        config.FeePayerSigner,
-			FeePayerPrivateKey:    config.FeePayerPrivateKey,
-			FeePayerPrivateKeyEnv: config.FeePayerPrivateKeyEnv,
-			FeePayerPolicies:      config.FeePayerPolicies,
-			AllowedFeeTokens:      config.AllowedFeeTokens,
-			FeePayerPolicy:        config.FeePayerPolicy,
-			FeeToken:              config.FeeToken,
-			Store:                 config.Store,
-			ExpireReplayKeys:      config.ExpireReplayKeys,
+			RPC:                config.RPC,
+			RPCURL:             config.RPCURL,
+			FeePayerSigner:     config.FeePayerSigner,
+			FeePayerPrivateKey: config.FeePayerPrivateKey,
+			AllowedFeeTokens:   config.AllowedFeeTokens,
+			FeePayerPolicy:     config.FeePayerPolicy,
+			FeeToken:           config.FeeToken,
+			Store:              config.Store,
+			ExpireReplayKeys:   config.ExpireReplayKeys,
 		})
 		if err != nil {
 			return nil, err

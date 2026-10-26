@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -63,7 +65,7 @@ func challengeForURL(t *testing.T, rawURL, method string, request map[string]any
 		return *new(*mpp.Challenge)
 	}
 
-	return mpp.NewChallenge("secret", parsedURL.Host, method, "payment", request, opts...)
+	return mpptest.NewChallenge("secret", parsedURL.Host, method, "payment", request, opts...)
 }
 
 func TestTransport_RoundTrip_No402(t *testing.T) {
@@ -73,7 +75,7 @@ func TestTransport_RoundTrip_No402(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tr := NewTransport(nil, nil)
+	tr := newTestTransport(nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -96,7 +98,7 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			w.Write([]byte("pay me"))
 			return
@@ -114,7 +116,7 @@ func TestTransport_RoundTrip_402WithPayment(t *testing.T) {
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -150,7 +152,7 @@ func TestTransport_RoundTrip_RetriesFreshPaymentChallenges(t *testing.T) {
 				assert.NotEmpty(t, r.Header.Get("Authorization"))
 			}
 			challenge := challenges[callCount-1]
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -166,7 +168,7 @@ func TestTransport_RoundTrip_RetriesFreshPaymentChallenges(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
 
-	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -181,7 +183,7 @@ func TestTransport_RoundTrip_StopsAtDefaultPaymentRetryLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		challenge := challenges[callCount]
 		callCount++
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer srv.Close()
@@ -193,7 +195,7 @@ func TestTransport_RoundTrip_StopsAtDefaultPaymentRetryLimit(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
 
-	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -212,7 +214,7 @@ func TestTransport_RoundTrip_ReusesCredentialForRepeatedChallenge(t *testing.T) 
 			authorizations = append(authorizations, authorization)
 		}
 		if callCount <= 2 {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -225,7 +227,7 @@ func TestTransport_RoundTrip_ReusesCredentialForRepeatedChallenge(t *testing.T) 
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
 
-	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -243,7 +245,7 @@ func TestTransport_RoundTrip_UsesAdvertisedPaymentAuthorizationHeader(t *testing
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if r.Header.Get(mpp.HeaderPaymentAuthorization) == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			w.Write([]byte("pay me"))
 			return
@@ -261,7 +263,7 @@ func TestTransport_RoundTrip_UsesAdvertisedPaymentAuthorizationHeader(t *testing
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer app-token")
 	resp, err := tr.RoundTrip(req)
@@ -282,17 +284,17 @@ func TestTransport_RoundTrip_UsesAdvertisedPaymentAuthorizationHeader(t *testing
 }
 
 func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
-	challenge := mpp.NewChallenge("secret", "realm", "stripe", "payment", nil)
+	challenge := mpptest.NewChallenge("secret", "realm", "stripe", "payment", nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 		w.Write([]byte("pay me"))
 	}))
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -313,7 +315,7 @@ func TestTransport_RoundTrip_MatchesMethodAndIntent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			for _, challenge := range challenges {
-				w.Header().Add("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+				w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			}
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
@@ -327,8 +329,8 @@ func TestTransport_RoundTrip_MatchesMethodAndIntent(t *testing.T) {
 		return
 	}
 	challenges = []*mpp.Challenge{
-		mpp.NewChallenge("secret", parsedURL.Host, "tempo", "authorize", nil),
-		mpp.NewChallenge("secret", parsedURL.Host, "tempo", "charge", nil),
+		mpptest.NewChallenge("secret", parsedURL.Host, "tempo", "authorize", nil),
+		mpptest.NewChallenge("secret", parsedURL.Host, "tempo", "charge", nil),
 	}
 	method := &mockMethod{
 		name:   "tempo",
@@ -340,7 +342,7 @@ func TestTransport_RoundTrip_MatchesMethodAndIntent(t *testing.T) {
 	if !assert.NoError(t, err) {
 		return
 	}
-	resp, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -353,18 +355,18 @@ func TestTransport_RoundTrip_MatchesMethodAndIntent(t *testing.T) {
 
 func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 	// Use an expiry in the past.
-	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil,
+	challenge := mpptest.NewChallenge("secret", "realm", "tempo", "payment", nil,
 		mpp.WithExpires("2020-01-01T00:00:00.000Z"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 		w.Write([]byte("expired"))
 	}))
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -385,18 +387,18 @@ func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 func TestTransport_RoundTrip_402UnparseableExpiresIsSkipped(t *testing.T) {
 	// A challenge whose expires cannot be parsed must not be paid: the issuing
 	// server would itself reject the resulting credential.
-	challenge := mpp.NewChallenge("secret", "realm", "tempo", "payment", nil,
+	challenge := mpptest.NewChallenge("secret", "realm", "tempo", "payment", nil,
 		mpp.WithExpires("not-a-timestamp"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate("realm"))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 		w.Write([]byte("bad expires"))
 	}))
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err, "unexpected error: %v", err) {
@@ -420,7 +422,7 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 			assert.Equalf(t, "request-body", string(body),
 				"first request body = %q, want %q", string(body), "request-body")
 
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -436,7 +438,7 @@ func TestTransport_RoundTrip_PostWithBody(t *testing.T) {
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	bodyStr := "request-body"
 	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(bodyStr))
 	req.GetBody = func() (io.ReadCloser, error) {
@@ -466,8 +468,8 @@ func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Add("WWW-Authenticate", stripeChallenge.ToAuthenticate(stripeChallenge.Realm))
-			w.Header().Add("WWW-Authenticate", tempoChallenge.ToAuthenticate(tempoChallenge.Realm))
+			w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(stripeChallenge))
+			w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(tempoChallenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -479,7 +481,7 @@ func TestTransport_RoundTrip_MultipleWWWAuthenticate(t *testing.T) {
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -500,7 +502,7 @@ func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", `Bearer realm="example", `+mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -511,7 +513,7 @@ func TestTransport_RoundTrip_MergedWWWAuthenticate(t *testing.T) {
 
 	cred := newTestCredential("tempo")
 	method := &mockMethod{name: "tempo", cred: cred}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -536,7 +538,7 @@ func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
 	defer srv.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
 	if !assert.NoErrorf(t, err,
@@ -557,14 +559,14 @@ func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
 func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
 	var challenge *mpp.Challenge
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer srv.Close()
 	challenge = challengeForURL(t, srv.URL, "tempo", nil)
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	req = req.WithContext(withPaymentOrigin(req.Context(), "https://api.example.com"))
 	_, err := tr.RoundTrip(req)
@@ -582,45 +584,38 @@ func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {
 func TestTransport_RoundTrip_RejectsRelayedTempoProof(t *testing.T) {
 	var challenge *mpp.Challenge
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer srv.Close()
-	challenge = mpp.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{
+	challenge = mpptest.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{
 		"amount": "0", "currency": "0x3333333333333333333333333333333333333333",
 		"recipient": "0x2222222222222222222222222222222222222222",
 	})
 
 	method := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	_, err := tr.RoundTrip(req)
 	require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
 	assert.Equal(t, 0, method.calls)
 }
 
-func TestTransport_ZeroProofRequiresHTTPSDefaultPortOrOriginPin(t *testing.T) {
+func TestTransport_ZeroProofRequiresHTTPSDefaultPort(t *testing.T) {
 	for _, tc := range []struct {
-		name, url, trustedOrigin string
-		allowed                  bool
+		name, url string
+		allowed   bool
 	}{
-		{"HTTPS default", "https://api.example/paid", "", true},
-		{"HTTPS port 443", "https://api.example:443/paid", "", true},
-		{"HTTP", "http://api.example/paid", "", false},
-		{"other HTTPS port", "https://api.example:8443/paid", "", false},
-		{"HTTP pinned", "http://api.example/paid", "http://api.example", true},
-		{"other HTTPS port pinned", "https://api.example:8443/paid", "https://api.example:8443", true},
-		{"different port pinned", "https://api.example:8443/paid", "https://api.example:9443", false},
+		{"HTTPS default", "https://api.example/paid", true},
+		{"HTTPS port 443", "https://api.example:443/paid", true},
+		{"HTTP", "http://api.example/paid", false},
+		{"other HTTPS port", "https://api.example:8443/paid", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			options := []TransportOption{}
-			if tc.trustedOrigin != "" {
-				options = append(options, WithTransportTrustedProofRealm(tc.trustedOrigin, "api.example"))
-			}
-			transport := NewTransport(nil, nil, options...)
+			transport := newTestTransport(nil, nil)
 			request, err := http.NewRequest(http.MethodGet, tc.url, nil)
 			require.NoError(t, err)
-			challenge := mpp.NewChallenge("secret", "api.example", "tempo", "charge", map[string]any{"amount": "0"})
+			challenge := mpptest.NewChallenge("secret", "api.example", "tempo", "charge", map[string]any{"amount": "0"})
 			err = transport.validatePaymentOrigin(request, challengeCandidate{challenge: challenge, method: &mockMethod{name: "tempo", intent: "charge"}})
 			if tc.allowed {
 				require.NoError(t, err)
@@ -636,14 +631,14 @@ func TestTransport_RoundTrip_RejectsAlternateZeroAmounts(t *testing.T) {
 		t.Run(fmt.Sprint(amount), func(t *testing.T) {
 			var challenge *mpp.Challenge
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+				w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 				w.WriteHeader(http.StatusPaymentRequired)
 			}))
 			defer srv.Close()
-			challenge = mpp.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{"amount": amount})
+			challenge = mpptest.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{"amount": amount})
 			method := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
 			req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-			_, err := NewTransport([]Method{method}, nil).RoundTrip(req)
+			_, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
 			require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
 			assert.Zero(t, method.calls)
 		})
@@ -657,17 +652,17 @@ func TestTransport_RoundTrip_SkipsRelayedProofWhenAnotherChallengeIsValid(t *tes
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		w.Header().Add("WWW-Authenticate", relayed.ToAuthenticate(relayed.Realm))
-		w.Header().Add("WWW-Authenticate", valid.ToAuthenticate(valid.Realm))
+		w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(relayed))
+		w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(valid))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer srv.Close()
-	relayed = mpp.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{"amount": "0"})
-	valid = mpp.NewChallenge("secret", "other.example", "stripe", "payment", map[string]any{"amount": "100"})
+	relayed = mpptest.NewChallenge("secret", "target.example", "tempo", "charge", map[string]any{"amount": "0"})
+	valid = mpptest.NewChallenge("secret", "other.example", "stripe", "payment", map[string]any{"amount": "100"})
 	proof := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
 	stripe := &mockMethod{name: "stripe", cred: newTestCredential("stripe")}
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-	resp, err := NewTransport([]Method{proof, stripe}, nil).RoundTrip(req)
+	resp, err := newTestTransport([]Method{proof, stripe}, nil).RoundTrip(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -675,37 +670,12 @@ func TestTransport_RoundTrip_SkipsRelayedProofWhenAnotherChallengeIsValid(t *tes
 	assert.Equal(t, 1, stripe.calls)
 }
 
-func TestTransport_RoundTrip_AllowsPinnedNonHostnameProofRealm(t *testing.T) {
-	var challenge *mpp.Challenge
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
-		w.WriteHeader(http.StatusPaymentRequired)
-	}))
-	defer srv.Close()
-	challenge = mpp.NewChallenge("secret", "MPP Payment", "tempo", "charge", map[string]any{"amount": "0"})
-	method := &mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")}
-	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-	resp, err := NewTransport([]Method{method}, nil, WithTransportTrustedProofRealm(srv.URL, "MPP Payment")).RoundTrip(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, 1, method.calls)
-	req, _ = http.NewRequest(http.MethodGet, srv.URL, nil)
-	_, err = NewTransport([]Method{method}, nil, WithTransportTrustedProofRealm(srv.URL, "mpp payment")).RoundTrip(req)
-	require.ErrorContains(t, err, "refusing to sign Tempo proof for realm")
-	assert.Equal(t, 1, method.calls)
-}
-
 func TestTransport_RoundTrip_StandaloneRefusesRedirectedPayment(t *testing.T) {
 	// A standalone Transport (no Client.Do wrapper) plugged into a redirect
 	// following http.Client must not auto-pay an origin reached via redirect.
 	var challenge *mpp.Challenge
 	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer attacker.Close()
@@ -717,7 +687,7 @@ func TestTransport_RoundTrip_StandaloneRefusesRedirectedPayment(t *testing.T) {
 	defer origin.Close()
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	// The natural, unguarded way to use the exported Transport.
 	hc := &http.Client{Transport: tr}
 	req, _ := http.NewRequest(http.MethodGet, origin.URL, nil)
@@ -741,7 +711,7 @@ func TestTransport_RoundTrip_StandaloneDirectRequestStillPays(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -751,7 +721,7 @@ func TestTransport_RoundTrip_StandaloneDirectRequestStillPays(t *testing.T) {
 	challenge = challengeForURL(t, srv.URL, "tempo", nil)
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	tr := NewTransport([]Method{method}, nil)
+	tr := newTestTransport([]Method{method}, nil)
 	hc := &http.Client{Transport: tr}
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := hc.Do(req)
@@ -768,7 +738,7 @@ func TestClient_Get(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -805,7 +775,7 @@ func TestClient_Post(t *testing.T) {
 			"content-type = %q, want application/json", r.Header.Get("Content-Type"))
 
 		if r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 			w.WriteHeader(http.StatusPaymentRequired)
 			return
 		}
@@ -845,7 +815,7 @@ func TestClient_WithHTTPClient(t *testing.T) {
 func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 	var challenge *mpp.Challenge
 	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", challenge.ToAuthenticate(challenge.Realm))
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer attacker.Close()
@@ -871,7 +841,7 @@ func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 }
 
 func TestTransport_PayRedirects_RefusesBrokenRedirectChain(t *testing.T) {
-	transport := NewTransport(nil, nil)
+	transport := newTestTransport(nil, nil)
 	transport.payRedirects = true
 	challenge, err := mpp.NewChallengeWithError("secret", "evil.example", "tempo", "charge", map[string]any{"amount": "1"})
 	require.NoError(t, err)
