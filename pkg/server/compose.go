@@ -55,9 +55,10 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 // body and route scope from r (see Mpp.ChargeRequest). An offer whose
 // Params.MppxScope is set keeps that scope.
 //
-// It always returns a non-nil result: when err is non-nil or the result
-// IsChallenge, write it with its ServeHTTP method. Otherwise the payment is
-// verified and the result carries its Credential and Receipt.
+// It always returns a non-nil result. Write it with its ServeHTTP method
+// before anything else, as for Mpp.ChargeRequest: that writes the 402 or
+// problem response, or, for a verified payment, sets the Payment-Receipt
+// header for the resource the handler then writes.
 func ComposeRequest(r *http.Request, offers ...Offer) (*ChargeResult, error) {
 	entries, _, err := newComposedEntries(offers, false)
 	return paymentFlow{entries: entries, err: err}.serveRequest(r)
@@ -116,7 +117,7 @@ func Compose(ctx context.Context, authorization string, offers ...Offer) (*Charg
 	if err != nil {
 		return nil, err
 	}
-	result, err := paymentFlow{entries: entries}.run(ctx, authorization, nil, nil)
+	result, err := paymentFlow{entries: entries}.run(ctx, authorization, sourceAny, nil, nil)
 	if err != nil && !result.IsChallenge() {
 		return nil, err
 	}
@@ -130,17 +131,19 @@ func ComposeCharge(ctx context.Context, authorization string, configs ...Compose
 	return Compose(ctx, authorization, configs...)
 }
 
-// composeMalformedCredentialResult answers a malformed credential with every
-// Challenge its method and intent offer, or every Challenge when none match.
-func composeMalformedCredentialResult(
+// composeRetryResult answers a credential rejected with err, such as a
+// malformed one, with every Challenge its method and intent offer, or every
+// Challenge when none match, and the Mpp that issued each.
+func composeRetryResult(
 	ctx context.Context,
 	entries []composedEntry,
 	cred *mpp.Credential,
 	body []byte,
 	scope map[string]string,
 	err error,
-) (*ChargeResult, error) {
+) (*ChargeResult, []*Mpp, error) {
 	var challenges []*mpp.Challenge
+	var issuers []*Mpp
 	if cred != nil {
 		for _, entry := range findEntriesByMethodIntent(entries, cred) {
 			offered, chErr := freshComposeChallenges(ctx, entry, body, scope)
@@ -148,37 +151,44 @@ func composeMalformedCredentialResult(
 				continue
 			}
 			challenges = append(challenges, offered...)
+			issuers = append(issuers, issuedBy(entry.mpp, len(offered))...)
 		}
 	}
 	if len(challenges) == 0 {
 		var collectErr error
-		challenges, collectErr = collectComposeChallenges(ctx, entries, body, scope)
+		challenges, issuers, collectErr = collectComposeChallenges(ctx, entries, body, scope)
 		if collectErr != nil {
-			return failedResult(composeChallengeCollectionError(err, collectErr))
+			return failedFlow(composeChallengeCollectionError(err, collectErr))
 		}
 	}
-	return challengeResult(challenges, err)
+	result, err := challengeResult(challenges, err)
+	return result, issuers, err
 }
 
-func collectComposeChallenges(ctx context.Context, entries []composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
+// collectComposeChallenges issues every offer's Challenges, in offer order,
+// and returns the Mpp that issued each. It fails when any offer fails.
+func collectComposeChallenges(ctx context.Context, entries []composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, []*Mpp, error) {
 	var challenges []*mpp.Challenge
+	var issuers []*Mpp
 	for _, entry := range entries {
 		offered, err := freshComposeChallenges(ctx, entry, body, scope)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		challenges = append(challenges, offered...)
+		issuers = append(issuers, issuedBy(entry.mpp, len(offered))...)
 	}
 	if len(challenges) == 0 {
-		return nil, errNoChallenges
+		return nil, nil, errNoChallenges
 	}
-	return challenges, nil
+	return challenges, issuers, nil
 }
 
 // freshComposeChallenges issues every Challenge offered by one compose entry.
+// The flow reports them to ChallengeCreated once it returns them.
 func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
-	params := entry.requestParams("", scope, body)
-	result, err := entry.mpp.Charge(ctx, params)
+	params := entry.requestParams("", sourceAny, scope, body)
+	result, err := entry.mpp.chargeWithEvents(ctx, params, false)
 	if err != nil {
 		return nil, err
 	}
@@ -188,10 +198,9 @@ func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byt
 // requestParams returns the entry's ChargeParams bound to one request: the
 // Payment credential, the request scope unless the params set their own, and
 // a non-empty body.
-func (entry composedEntry) requestParams(credential string, scope map[string]string, body []byte) ChargeParams {
+func (entry composedEntry) requestParams(credential string, source credentialSource, scope map[string]string, body []byte) ChargeParams {
 	params := entry.params
-	params.Authorization = credential
-	params.PaymentAuthorization = credential
+	params.Authorization, params.PaymentAuthorization = credentialFields(credential, source)
 	if len(scope) > 0 && len(params.MppxScope) == 0 {
 		params.MppxScope = scope
 	}
@@ -199,6 +208,20 @@ func (entry composedEntry) requestParams(credential string, scope map[string]str
 		params.Body = body
 	}
 	return params
+}
+
+// credentialFields returns the Authorization and Payment-Authorization values
+// that carry credential as it arrived from source: only the field it was sent
+// in, or both for a transport other than HTTP.
+func credentialFields(credential string, source credentialSource) (authorization, paymentAuthorization string) {
+	switch source {
+	case sourceAuthorization:
+		return credential, ""
+	case sourcePaymentAuthorization:
+		return "", credential
+	default:
+		return credential, credential
+	}
 }
 
 // composeChallengeCollectionError reports that no challenge could be issued in
@@ -233,8 +256,11 @@ func findEntriesByMethodIntent(entries []composedEntry, cred *mpp.Credential) []
 // method+intent but different amounts, currencies, or opaque metadata.
 // authorization is the Payment credential cred was parsed from; offers are
 // built against it as received, not a re-encoding of cred, which can grow
-// past the header size limit.
-func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorization string, scope map[string]string) (composedEntry, bool, error) {
+// past the header size limit. Only entries that read their credential from
+// source are considered. Without an exact match it falls back to an entry
+// for the credential's method and intent, then for its method alone, whose
+// Charge then rejects the credential with retry Challenges.
+func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorization string, source credentialSource, scope map[string]string) (composedEntry, bool, error) {
 	echoedRequest, err := echoedRequestMap(cred)
 	if err != nil {
 		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err)).WithCause(err)
@@ -242,14 +268,10 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorizat
 
 	// Prefer an exact match on method + intent + request.
 	for _, entry := range entries {
-		method := entry.mpp.method
-		if cred.Challenge.Method != method.Name() {
+		if !source.accepts(entry.mpp) || !entry.offersMethodIntent(cred) {
 			continue
 		}
-		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
-			continue
-		}
-		requests, err := entry.scopedRequests(scope, authorization)
+		requests, err := entry.scopedRequests(scope, authorization, source)
 		if err != nil {
 			return composedEntry{}, false, err
 		}
@@ -263,41 +285,64 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, authorizat
 		}
 	}
 
-	// Fall back to method + intent only (let Charge return the precise error).
+	// Fall back to method + intent, then to method only (let Charge return
+	// the precise error with retry Challenges).
 	for _, entry := range entries {
-		method := entry.mpp.method
-		if cred.Challenge.Method != method.Name() {
-			continue
+		if source.accepts(entry.mpp) && entry.offersMethodIntent(cred) {
+			return entry, true, nil
 		}
-		if _, ok := method.Intents()[cred.Challenge.Intent]; !ok {
-			continue
+	}
+	for _, entry := range entries {
+		if source.accepts(entry.mpp) && cred.Challenge.Method == entry.mpp.method.Name() {
+			return entry, true, nil
 		}
-		return entry, true, nil
 	}
 
 	return composedEntry{}, false, nil
+}
+
+// offersMethodIntent reports whether the entry offers the credential's
+// method and intent.
+func (entry composedEntry) offersMethodIntent(cred *mpp.Credential) bool {
+	method := entry.mpp.method
+	if cred.Challenge.Method != method.Name() {
+		return false
+	}
+	_, ok := method.Intents()[cred.Challenge.Intent]
+	return ok
+}
+
+// offersMethod reports whether any entry offers the credential's method,
+// whatever field it reads its credential from.
+func offersMethod(entries []composedEntry, cred *mpp.Credential) bool {
+	for _, entry := range entries {
+		if cred.Challenge.Method == entry.mpp.method.Name() {
+			return true
+		}
+	}
+	return false
 }
 
 // scopedRequests builds an entry's offers to match against the Payment
 // credential in authorization. Building them with the Credential present
 // skips issuance-only checks, such as the sponsored-expiry floor, that do not
 // apply to verifying a Credential.
-func (entry composedEntry) scopedRequests(scope map[string]string, authorization string) ([]map[string]any, error) {
+func (entry composedEntry) scopedRequests(scope map[string]string, authorization string, source credentialSource) ([]map[string]any, error) {
 	params := entry.params
 	if len(scope) > 0 && len(params.MppxScope) == 0 {
 		params.MppxScope = scope
 	}
 	if authorization != "" {
-		params.Authorization = authorization
-		params.PaymentAuthorization = authorization
+		params.Authorization, params.PaymentAuthorization = credentialFields(authorization, source)
 	}
 	return entry.mpp.buildChargeRequests(params)
 }
 
 // composePaymentCredential returns the one Payment credential header carries
 // in the fields the entries read it from: Authorization, and
-// Payment-Authorization for entries created WithRequiresAuth.
-func composePaymentCredential(entries []composedEntry, header http.Header) (string, error) {
+// Payment-Authorization for entries created WithRequiresAuth, and the field
+// it arrived in.
+func composePaymentCredential(entries []composedEntry, header http.Header) (string, credentialSource, error) {
 	needsDefault := false
 	needsAuth := false
 	for _, entry := range entries {
@@ -313,20 +358,20 @@ func composePaymentCredential(entries []composedEntry, header http.Header) (stri
 	if needsDefault {
 		authorization, err = mpp.FindPaymentAuthorizationStrict(header.Get(mpp.HeaderAuthorization))
 		if err != nil {
-			return "", err
+			return "", sourceAny, err
 		}
 	}
 	if needsAuth {
 		paymentAuthorization, err = mpp.FindPaymentAuthorizationStrict(header.Get(mpp.HeaderPaymentAuthorization))
 		if err != nil {
-			return "", err
+			return "", sourceAny, err
 		}
 	}
 	if authorization != "" && paymentAuthorization != "" {
-		return "", fmt.Errorf("mpp: multiple Payment credentials")
+		return "", sourceAny, fmt.Errorf("mpp: multiple Payment credentials")
 	}
 	if paymentAuthorization != "" {
-		return paymentAuthorization, nil
+		return paymentAuthorization, sourcePaymentAuthorization, nil
 	}
-	return authorization, nil
+	return authorization, sourceAuthorization, nil
 }

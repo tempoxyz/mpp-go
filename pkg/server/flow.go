@@ -50,7 +50,7 @@ func (f paymentFlow) serveRequest(r *http.Request) (*ChargeResult, error) {
 	if f.err != nil {
 		return failedResult(f.err)
 	}
-	credential, err := composePaymentCredential(f.entries, r.Header)
+	credential, source, err := composePaymentCredential(f.entries, r.Header)
 	if err != nil {
 		// The client sent a Payment credential that cannot be read, which a
 		// direct Charge reports to PaymentFailed too.
@@ -58,50 +58,117 @@ func (f paymentFlow) serveRequest(r *http.Request) (*ChargeResult, error) {
 		f.paymentFailed(r.Context(), nil, err)
 		return failedResult(err)
 	}
-	return f.run(r.Context(), credential, ScopeFromHTTPRequest(r, ""), body)
+	return f.run(r.Context(), credential, source, ScopeFromHTTPRequest(r, ""), body)
+}
+
+// credentialSource is the field a Payment credential arrived in.
+type credentialSource int
+
+const (
+	// sourceAny is a credential a transport other than HTTP carries, such as
+	// MCP, which every offer accepts.
+	sourceAny credentialSource = iota
+	// sourceAuthorization is the Authorization header, which only offers
+	// whose Mpp is not created WithRequiresAuth accept.
+	sourceAuthorization
+	// sourcePaymentAuthorization is the Payment-Authorization header, which
+	// only offers whose Mpp is created WithRequiresAuth accept.
+	sourcePaymentAuthorization
+)
+
+// accepts reports whether m reads its Payment credential from source.
+func (s credentialSource) accepts(m *Mpp) bool {
+	switch s {
+	case sourceAuthorization:
+		return !m.requiresAuth
+	case sourcePaymentAuthorization:
+		return m.requiresAuth
+	default:
+		return true
+	}
 }
 
 // run verifies credential, the Payment credential ("Payment <base64url>") or
 // empty when the client sent none, against the offer it echoes, binding scope
-// and body into every offer that sets no scope of its own. It always returns
-// a non-nil result whose err field is the returned error.
-func (f paymentFlow) run(ctx context.Context, credential string, scope map[string]string, body []byte) (*ChargeResult, error) {
+// and body into every offer that sets no scope of its own. source is the
+// field credential arrived in; an offer that reads its credential from
+// another field never accepts it. It always returns a non-nil result whose
+// err field is the returned error.
+//
+// It reports ChallengeCreated for the Challenges the result returns, and only
+// once the whole set is issued and can be serialized.
+func (f paymentFlow) run(ctx context.Context, credential string, source credentialSource, scope map[string]string, body []byte) (*ChargeResult, error) {
+	result, issuers, err := f.charge(ctx, credential, source, scope, body)
+	if challenges := result.offers(); len(issuers) == len(challenges) && challengesDelivered(err, challenges) {
+		for i, challenge := range challenges {
+			issuers[i].challengesCreated(ctx, []*mpp.Challenge{challenge})
+		}
+	}
+	return result, err
+}
+
+// charge runs the flow, returning with the result the Mpp that issued each
+// Challenge it offers.
+func (f paymentFlow) charge(ctx context.Context, credential string, source credentialSource, scope map[string]string, body []byte) (*ChargeResult, []*Mpp, error) {
 	if f.err != nil {
-		return failedResult(f.err)
+		return failedFlow(f.err)
 	}
 	if credential == "" {
-		challenges, err := collectComposeChallenges(ctx, f.entries, body, scope)
+		challenges, issuers, err := collectComposeChallenges(ctx, f.entries, body, scope)
 		if err != nil {
-			return failedResult(err)
+			return failedFlow(err)
 		}
-		return challengeResult(challenges, nil)
+		result, err := challengeResult(challenges, nil)
+		return result, issuers, err
 	}
 
 	cred, err := mpp.ParseCredential(credential)
 	if err != nil {
 		err = mpp.ErrMalformedCredential(err.Error())
 		f.paymentFailed(ctx, nil, err)
-		return composeMalformedCredentialResult(ctx, f.entries, nil, body, scope, err)
+		return composeRetryResult(ctx, f.entries, nil, body, scope, err)
 	}
-	entry, ok, err := findMatchingEntry(f.entries, cred, credential, scope)
+	entry, ok, err := findMatchingEntry(f.entries, cred, credential, source, scope)
 	if err != nil {
 		f.paymentFailed(ctx, cred, err)
 		if isMalformedCredential(err) {
-			return composeMalformedCredentialResult(ctx, f.entries, cred, body, scope, err)
+			return composeRetryResult(ctx, f.entries, cred, body, scope, err)
 		}
-		return failedResult(err)
+		return failedFlow(err)
 	}
 	if !ok {
+		if offersMethod(f.entries, cred) {
+			// The offer for this method reads its credential from the other
+			// header: reject it with that offer's Challenges, which name the
+			// header to send it in.
+			err := mpp.ErrInvalidChallenge(cred.Challenge.ID, "Payment credential sent in a header this offer does not read")
+			f.paymentFailed(ctx, cred, err)
+			return composeRetryResult(ctx, f.entries, cred, body, scope, err)
+		}
 		err := mpp.ErrMethodUnsupported(cred.Challenge.Method + "/" + cred.Challenge.Intent)
 		f.paymentFailed(ctx, cred, err)
-		return failedResult(err)
+		return failedFlow(err)
 	}
 
-	result, err := entry.mpp.Charge(ctx, entry.requestParams(credential, scope, body))
+	result, err := entry.mpp.chargeWithEvents(ctx, entry.requestParams(credential, source, scope, body), false)
 	if result == nil {
-		return failedResult(err)
+		return failedFlow(err)
 	}
-	return result, err
+	return result, issuedBy(entry.mpp, len(result.offers())), err
+}
+
+func failedFlow(err error) (*ChargeResult, []*Mpp, error) {
+	result, err := failedResult(err)
+	return result, nil, err
+}
+
+// issuedBy returns n issuers, all m.
+func issuedBy(m *Mpp, n int) []*Mpp {
+	issuers := make([]*Mpp, n)
+	for i := range issuers {
+		issuers[i] = m
+	}
+	return issuers
 }
 
 // paymentFailed reports a Credential the flow rejected before dispatching it
@@ -146,9 +213,12 @@ func isMalformedCredential(err error) bool {
 // set, the route scope (see ScopeFromHTTPRequest), overriding the matching
 // params fields.
 //
-// It always returns a non-nil result: when err is non-nil or the result
-// IsChallenge, write it with its ServeHTTP method. Otherwise the payment is
-// verified and the result carries its Credential and Receipt.
+// It always returns a non-nil result. Write it with its ServeHTTP method
+// before anything else: when err is non-nil or the result IsChallenge, that
+// writes the 402 or problem response. Otherwise the payment is verified, the
+// result carries its Credential and Receipt, and ServeHTTP sets the
+// Payment-Receipt and Cache-Control: private headers for the resource the
+// handler then writes.
 func (m *Mpp) ChargeRequest(r *http.Request, params ChargeParams) (*ChargeResult, error) {
 	return m.flow(params).serveRequest(r)
 }

@@ -23,10 +23,13 @@ func init() {
 // onChallengeCreated, onPaymentSuccess and onPaymentFailed. Every hook is
 // optional and runs synchronously on the request's goroutine, so keep it
 // fast and do not block in it. Hooks observe the flow; they cannot change
-// its outcome.
+// its outcome: a hook that panics is recovered and the panic is ignored, so
+// a request whose payment settled is still served.
 type Events struct {
 	// ChallengeCreated is called for every Challenge returned to the client,
-	// whether as the initial offer or as a retry offer after a failure.
+	// whether as the initial offer or as a retry offer after a failure. It
+	// is called only once the whole set of Challenges for the response is
+	// issued and can be serialized, never for an offer that is not returned.
 	ChallengeCreated func(ctx context.Context, challenge *mpp.Challenge)
 	// PaymentSucceeded is called after a Credential is verified and settled.
 	PaymentSucceeded func(ctx context.Context, credential *mpp.Credential, receipt *mpp.Receipt)
@@ -43,8 +46,10 @@ func WithEvents(events Events) Option {
 }
 
 // emitCharge reports the outcome of one Charge call. authorization is the
-// Payment credential the call was given, empty when there was none.
-func (m *Mpp) emitCharge(ctx context.Context, authorization string, result *ChargeResult, err error) {
+// Payment credential the call was given, empty when there was none. With
+// challenges false it leaves ChallengeCreated to the caller, a composed flow
+// that reports the full set of Challenges it returns.
+func (m *Mpp) emitCharge(ctx context.Context, authorization string, result *ChargeResult, err error, challenges bool) {
 	if m.events == nil {
 		return
 	}
@@ -56,16 +61,39 @@ func (m *Mpp) emitCharge(ctx context.Context, authorization string, result *Char
 	if result == nil {
 		return
 	}
-	if hook := m.events.ChallengeCreated; hook != nil {
-		for _, challenge := range result.offers() {
-			hook(ctx, challenge)
-		}
+	if challenges && challengesDelivered(err, result.offers()) {
+		m.challengesCreated(ctx, result.offers())
 	}
 	if err == nil && result.Challenge == nil && result.Credential != nil {
 		if hook := m.events.PaymentSucceeded; hook != nil {
-			hook(ctx, result.Credential, result.Receipt)
+			safeCall(func() { hook(ctx, result.Credential, result.Receipt) })
 		}
 	}
+}
+
+// challengesCreated reports challenges to the ChallengeCreated hook.
+func (m *Mpp) challengesCreated(ctx context.Context, challenges []*mpp.Challenge) {
+	if m == nil || m.events == nil || m.events.ChallengeCreated == nil {
+		return
+	}
+	hook := m.events.ChallengeCreated
+	for _, challenge := range challenges {
+		if challenge != nil {
+			safeCall(func() { hook(ctx, challenge) })
+		}
+	}
+}
+
+// challengesDelivered reports whether a payment response for err returns
+// challenges to the client, as WritePaymentResponse writes it: some are
+// offered, the outcome is known and every one serializes.
+func challengesDelivered(err error, challenges []*mpp.Challenge) bool {
+	challenges = nonNilChallenges(challenges)
+	if len(challenges) == 0 || IsPaymentOutcomeUnknown(err) {
+		return false
+	}
+	_, headerErr := authenticateHeaders(challenges, challengeRealm)
+	return headerErr == nil
 }
 
 func (m *Mpp) paymentFailed(ctx context.Context, credential *mpp.Credential, err error) {
@@ -73,8 +101,15 @@ func (m *Mpp) paymentFailed(ctx context.Context, credential *mpp.Credential, err
 		return
 	}
 	if hook := m.events.PaymentFailed; hook != nil {
-		hook(ctx, credential, err)
+		safeCall(func() { hook(ctx, credential, err) })
 	}
+}
+
+// safeCall runs a user hook, recovering and ignoring a panic so that a hook
+// cannot abort a request, such as one whose payment already settled.
+func safeCall(hook func()) {
+	defer func() { _ = recover() }()
+	hook()
 }
 
 // submittedCredential reports whether authorization carries a Payment

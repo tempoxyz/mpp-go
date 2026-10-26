@@ -47,8 +47,10 @@ func ExampleMpp_ChargeRequest() {
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		res, err := payment.ChargeRequest(r, server.ChargeParams{Amount: "0.01"})
+		// Writes the 402 with the Challenge or the problem details, or sets
+		// the Payment-Receipt header for a verified payment.
+		res.ServeHTTP(w, r)
 		if err != nil || res.IsChallenge() {
-			res.ServeHTTP(w, r) // 402 with the Challenge, or the problem details
 			return
 		}
 		fmt.Fprintln(w, "paid:", res.Receipt.Reference)
@@ -64,9 +66,12 @@ func ExampleMpp_ChargeRequest() {
 	paid := httptest.NewRecorder()
 	handler.ServeHTTP(paid, r)
 	fmt.Print(paid.Body.String())
+	receipt, _ := mpp.ParseReceipt(paid.Header().Get(mpp.HeaderPaymentReceipt))
+	fmt.Println("receipt:", receipt.Reference)
 	// Output:
 	// 402
 	// paid: 0xreceipt
+	// receipt: 0xreceipt
 }
 
 func ExampleCompose() {

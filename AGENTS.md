@@ -92,8 +92,11 @@ Each type has one canonical Parse/Format pair; the other spellings
   `(*ChargeResult).ServeHTTP` (Fiber through a fasthttp-backed
   `http.ResponseWriter`). Only serving a verified payment (receipt
   deferral, context values) is framework-specific.
-- HTTP handlers: `res, err := payment.ChargeRequest(r, params)`; when
-  `err != nil || res.IsChallenge()`, `res.ServeHTTP(w, r)`. Other transports
+- HTTP handlers: `res, err := payment.ChargeRequest(r, params)`, then
+  `res.ServeHTTP(w, r)` for every result before writing anything: it writes
+  the 402 or problem response when `err != nil || res.IsChallenge()`, and
+  otherwise sets `Payment-Receipt` and `Cache-Control: private` for the
+  resource the handler then writes. Other transports
   (MCP) use `Charge(ctx, params)` with the Credential in `params`, or
   `server.Compose(ctx, authorization, offers...)` (`Offer` is an alias of
   `ComposeConfig`; `ComposeCharge` is deprecated).
@@ -109,7 +112,18 @@ Each type has one canonical Parse/Format pair; the other spellings
   (nil Credential), whether it arrives through `Charge`, `ChargeRequest`,
   the middlewares, `Compose` or MCP `_meta`. Transports in this module
   report a Credential they reject before `Charge` through
-  `internal/serverevents`.
+  `internal/serverevents`. ChallengeCreated fires only for Challenges a
+  response returns, once the whole set is issued and serializes (a composed
+  flow reports them itself, through `chargeWithEvents(..., false)`). Hooks
+  run under `safeCall`: a panic is recovered and ignored.
+- A composed HTTP flow keeps the header a Credential arrived in: an offer
+  created `WithRequiresAuth` accepts it only from `Payment-Authorization`,
+  any other offer only from `Authorization`. A Credential sent in the other
+  header is rejected with `402` invalid-challenge and that method's retry
+  offers.
+- A Credential for an offered method but an intent or request no offer
+  matches is dispatched to that offer's `Charge`, which answers `402` with
+  retry offers; only a method no offer has gets `400` method-unsupported.
 - `_mppx_scope` stays a `{route, resource, query}` map inside the challenge
   request. mppx binds a `"GET /route"` string in the opaque metadata instead;
   aligning them is a wire change older Go verifiers reject, so it needs a

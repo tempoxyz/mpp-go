@@ -400,14 +400,16 @@ func (r *ChargeResult) IsChallenge() bool {
 	return r != nil && r.Challenge != nil
 }
 
-// ServeHTTP writes the payment response for the result, so a handler can
-// answer an unpaid request with:
+// ServeHTTP writes the payment response for the result. Call it for every
+// result, before writing the resource, so a paid response carries its
+// Payment-Receipt:
 //
 //	res, err := payment.ChargeRequest(r, params)
+//	res.ServeHTTP(w, r)
 //	if err != nil || res.IsChallenge() {
-//		res.ServeHTTP(w, r)
-//		return
+//		return // the 402 or problem response is written
 //	}
+//	// The payment is verified: write the resource.
 //
 // For a Challenge, or an error returned with the result, it writes them as
 // WritePaymentResponse does: the 402 offering every Challenge, or the
@@ -535,12 +537,19 @@ func applyMppxScope(request map[string]any, scope map[string]string) {
 // offer it echoes. The result is nil only when err is non-nil and no
 // Challenge could be issued.
 func (m *Mpp) Charge(ctx context.Context, params ChargeParams) (*ChargeResult, error) {
+	return m.chargeWithEvents(ctx, params, true)
+}
+
+// chargeWithEvents runs Charge and reports its outcome to the handler's
+// events. With challengeEvents false it leaves ChallengeCreated to a composed
+// flow, which reports only the Challenges it returns.
+func (m *Mpp) chargeWithEvents(ctx context.Context, params ChargeParams, challengeEvents bool) (*ChargeResult, error) {
 	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
 	result, err := m.charge(ctx, params)
 	if result != nil {
 		result.err = err
 	}
-	m.emitCharge(ctx, authorization, result, err)
+	m.emitCharge(ctx, authorization, result, err, challengeEvents)
 	return result, err
 }
 
