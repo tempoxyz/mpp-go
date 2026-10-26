@@ -112,3 +112,23 @@ func TestIntentReusesRPCClients(t *testing.T) {
 	_, err = byChain.resolveRPC(tempo.ChargeRequest{MethodDetails: tempo.MethodDetails{ChainID: &unknown}})
 	require.ErrorContains(t, err, "unknown chain id")
 }
+
+func TestFeeTokenMustBeAnAllowedFeeToken(t *testing.T) {
+	t.Parallel()
+	_, err := NewIntent(IntentConfig{
+		Store:              tempo.NewMemoryStore(),
+		FeePayerPrivateKey: feePayerKey,
+		AllowedFeeTokens:   []string{tempo.PathUSDAddress},
+		FeeToken:           tempo.USDCEAddress,
+	})
+	require.ErrorContains(t, err, "is not in AllowedFeeTokens")
+
+	intent, err := NewIntent(IntentConfig{
+		Store:              tempo.NewMemoryStore(),
+		FeePayerPrivateKey: feePayerKey,
+		AllowedFeeTokens:   []string{tempo.PathUSDAddress, tempo.USDCEAddress},
+		FeeToken:           tempo.USDCEAddress,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, common.HexToAddress(tempo.USDCEAddress), intent.feeToken)
+}

@@ -214,3 +214,38 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	require.NoError(t, err)
 	return u
 }
+
+func TestLegacyProofRealmPinOnlyOverridesProofChallenges(t *testing.T) {
+	// A charged (non-proof) tempo challenge: the pinned realm must not
+	// override the method's own origin policy.
+	srv, paid := payingServer(t, func(string) []*mpp.Challenge {
+		return []*mpp.Challenge{mustChallenge("target.example", "tempo", "charge", map[string]any{"amount": "1"})}
+	})
+	method := &originMethod{
+		mockMethod: mockMethod{name: "tempo", intent: "charge", cred: newTestCredential("tempo")},
+		err:        errors.New("method origin policy"),
+	}
+	_, err := New([]Method{method}, WithTrustedTempoProofRealm(srv.URL, "target.example")).Get(context.Background(), srv.URL+"/paid")
+	require.ErrorIs(t, err, method.err)
+	assert.Equal(t, int32(0), paid.Load())
+}
+
+func TestOriginsIgnoreDefaultPorts(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{
+		"https://API.example.com:443/x": "https://api.example.com",
+		"http://api.example.com:80":     "http://api.example.com",
+		"https://api.example.com:8443":  "https://api.example.com:8443",
+		"http://api.example.com:443":    "http://api.example.com:443",
+	} {
+		assert.Equal(t, want, requestOrigin(mustParseURL(t, raw)), raw)
+	}
+	check := sameOriginCheckRedirect(nil)
+	first := &http.Request{URL: mustParseURL(t, "https://api.example.com/start")}
+	require.NoError(t, check(&http.Request{URL: mustParseURL(t, "https://API.example.com:443/next")}, []*http.Request{first}))
+	require.Error(t, check(&http.Request{URL: mustParseURL(t, "https://api.example.com:8443/next")}, []*http.Request{first}))
+
+	transport := &Transport{trustedProofRealms: map[string]string{"https://API.example.com:443": "realm.example"}}
+	assert.True(t, transport.pinnedProofRealm(mustParseURL(t, "https://api.example.com/paid"), "realm.example"))
+	assert.False(t, transport.pinnedProofRealm(mustParseURL(t, "https://api.example.com:8443/paid"), "realm.example"))
+}

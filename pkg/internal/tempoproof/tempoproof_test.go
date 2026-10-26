@@ -37,4 +37,8 @@ func TestOriginOwnsRealm(t *testing.T) {
 	}
 	assert.False(t, OriginOwnsRealm(nil, "api.example.com"))
 	assert.Equal(t, "https://api.example.com:8443", NormalizeOrigin(" HTTPS://API.example.com:8443/ "))
+	assert.Equal(t, "https://api.example.com", NormalizeOrigin("https://api.example.com:443/"))
+	assert.Equal(t, "http://api.example.com", NormalizeOrigin("HTTP://api.example.com:80"))
+	assert.Equal(t, "https://api.example.com", Origin(&url.URL{Scheme: "HTTPS", Host: "API.example.com:443"}))
+	assert.Equal(t, "https://[::1]", Origin(&url.URL{Scheme: "https", Host: "[::1]:443"}))
 }

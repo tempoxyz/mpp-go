@@ -640,11 +640,11 @@ func paymentOrigin(ctx context.Context) string {
 	return ""
 }
 
+// requestOrigin returns the origin of requestURL with its scheme and host
+// lowercased and a default port (443 for https, 80 for http) dropped, so
+// https://h and https://h:443 compare equal.
 func requestOrigin(requestURL *url.URL) string {
-	if requestURL == nil {
-		return ""
-	}
-	return strings.ToLower(requestURL.Scheme) + "://" + strings.ToLower(requestURL.Host)
+	return tempoproof.Origin(requestURL)
 }
 
 func sameOriginURL(requestURL *url.URL, origin string) bool {
@@ -682,10 +682,11 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 	// The method decides whether the server at this origin may receive its
 	// credential, such as a Tempo proof that authenticates the payer at the
 	// challenge realm. A realm pinned with the deprecated
-	// WithTrustedTempoProofRealm still passes.
+	// WithTrustedTempoProofRealm still passes, but only for a zero-amount
+	// tempo/charge proof: the method's other origin rules stay authoritative.
 	if validator, ok := candidate.method.(OriginValidator); ok {
 		err := validator.ValidateOrigin(req.URL, challenge)
-		if err != nil && !t.pinnedProofRealm(req.URL, challenge.Realm) {
+		if err != nil && (!tempoproof.IsProofChallenge(challenge) || !t.pinnedProofRealm(req.URL, challenge.Realm)) {
 			return err
 		}
 		return nil
@@ -703,6 +704,11 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 // pinnedProofRealm reports whether WithTrustedTempoProofRealm pinned realm
 // for the origin of u.
 func (t *Transport) pinnedProofRealm(u *url.URL, realm string) bool {
-	pinned, ok := t.trustedProofRealms[requestOrigin(u)]
-	return ok && pinned == realm
+	origin := requestOrigin(u)
+	for pinnedOrigin, pinned := range t.trustedProofRealms {
+		if tempoproof.NormalizeOrigin(pinnedOrigin) == origin && pinned == realm {
+			return true
+		}
+	}
+	return false
 }

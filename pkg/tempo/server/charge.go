@@ -121,8 +121,9 @@ type IntentConfig struct {
 	FeePayerPolicy *FeePayerPolicy
 	// FeeToken fixes the fee token a local fee payer pays gas in. When empty,
 	// the local fee payer uses the first allowed fee token it holds a balance
-	// of, or the first allowed fee token. It must be an allowed fee token and
-	// is ignored for remote fee payers (FeePayerURL).
+	// of, or the first allowed fee token. It must be an allowed fee token (New
+	// and NewIntent reject one missing from AllowedFeeTokens) and is ignored
+	// for remote fee payers (FeePayerURL).
 	FeeToken string
 	// Store is required to verify payments. Use a persistent store shared by all
 	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
@@ -234,6 +235,11 @@ func newIntent(config IntentConfig) (*Intent, error) {
 			return nil, fmt.Errorf("tempo server: FeeToken requires a local fee payer signer")
 		}
 		feeToken = common.HexToAddress(config.FeeToken)
+		// Every sponsored request would fail later with a FeeToken the
+		// explicit allowlist does not name, so refuse it now.
+		if config.AllowedFeeTokens != nil && !slices.Contains(feeTokens, feeToken) {
+			return nil, fmt.Errorf("tempo server: FeeToken %s is not in AllowedFeeTokens", feeToken.Hex())
+		}
 	}
 	return &Intent{
 		rpc:              config.RPC,

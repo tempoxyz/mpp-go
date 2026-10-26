@@ -109,10 +109,14 @@ Clients and Tempo methods:
   (also `mcpclient.ErrPaymentDeclined`). Read receipts with `mpp.ReceiptFromResponse`.
 - Method-specific origin rules belong in the method, through
   `client.OriginValidator`; the generic clients only keep a built-in Tempo proof
-  check for methods that do not implement it (`pkg/internal/tempoproof`).
+  check for methods that do not implement it (`pkg/internal/tempoproof`). The
+  deprecated realm pins (`WithTrustedTempoProofRealm`, `TrustedTempoProofRealms`)
+  override a validator only for zero-amount `tempo/charge` proofs. Origins compare
+  with lowercase hosts and default ports dropped (`tempoproof.Origin`).
 - Tempo server: construct with `charge.New(charge.Config{...})`; `MethodFromConfig`
   and `NewMethod` are deprecated. Sponsor fees with `AllowedFeeTokens` and
-  `FeePayerPolicy` (not the deprecated `FeePayerPolicies` map).
+  `FeePayerPolicy` (not the deprecated `FeePayerPolicies` map); a `FeeToken` must
+  be in an explicit `AllowedFeeTokens` list.
 - Tempo client: build `Config.PaymentPolicy` from `charge.MaxAmount`,
   `MaxAtomicAmount` and `AllowChainIDs` combined with `AllPolicies`; trust proof realms
   with `Config.TrustedProofRealms`. Use `tempo.ChainIDMainnet`/`ChainIDModerato`,

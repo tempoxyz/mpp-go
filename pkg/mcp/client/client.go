@@ -265,13 +265,16 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 
 // checkOrigin asks the candidate's method, when it implements
 // client.OriginValidator, whether it may pay a Challenge from a server without
-// an origin; a realm in the deprecated TrustedTempoProofRealms still passes.
-// Other methods keep the built-in rule: a zero-amount tempo/charge Challenge
-// is refused unless TrustedTempoProofRealms lists its realm.
+// an origin; a zero-amount tempo/charge proof for a realm in the deprecated
+// TrustedTempoProofRealms still passes, while the method's other origin rules
+// stay authoritative. Other methods keep the built-in rule: a zero-amount
+// tempo/charge Challenge is refused unless TrustedTempoProofRealms lists its
+// realm.
 func (config *Config) checkOrigin(candidate mppclient.ChallengeCandidate) error {
 	challenge := candidate.Challenge
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
-		if err := validator.ValidateOrigin(nil, challenge); err != nil && !config.trustsProofRealm(challenge.Realm) {
+		err := validator.ValidateOrigin(nil, challenge)
+		if err != nil && (!tempoproof.IsProofChallenge(challenge) || !config.trustsProofRealm(challenge.Realm)) {
 			return err
 		}
 		return nil

@@ -43,17 +43,31 @@ func OriginOwnsRealm(u *url.URL, realm string) bool {
 }
 
 // Origin returns the lowercase scheme://host[:port] origin of u, or "" for nil.
+// A default port (443 for https, 80 for http) is dropped, so https://h and
+// https://h:443 have the same origin.
 func Origin(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Host)
+	switch {
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		host = strings.TrimSuffix(host, ":443")
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		host = strings.TrimSuffix(host, ":80")
+	}
+	return scheme + "://" + host
 }
 
-// NormalizeOrigin lowercases a configured origin and drops a trailing slash,
-// so it compares equal to Origin of a URL at that origin.
+// NormalizeOrigin lowercases a configured origin, drops a trailing slash and
+// a default port, so it compares equal to Origin of a URL at that origin.
 func NormalizeOrigin(origin string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(origin)), "/")
+	normalized := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(origin)), "/")
+	if u, err := url.Parse(normalized); err == nil && u.Scheme != "" && u.Host != "" && u.Path == "" {
+		return Origin(u)
+	}
+	return normalized
 }
 
 // RealmError is the error for a proof challenge whose realm the sender does
