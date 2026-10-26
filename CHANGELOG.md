@@ -1,5 +1,79 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.6.0`
+
+### Minor Changes
+
+- Remove the deprecated APIs that the canonical core, client, Tempo and server APIs replaced. Wire behavior is unchanged. Migrate as follows:
+- | Package | Removed | Use instead |
+- | --- | --- | --- |
+- | `mpp` | `FromAuthenticate` | `ParseChallenge` |
+- | `mpp` | `FormatAuthenticate`, `FormatAuthenticateStrict` | `FormatChallenge`, which writes `c.Realm` and returns an error |
+- | `mpp` | `(*Challenge).Verify(secret, realm)` | `(*Challenge).VerifyID(secret)` plus a `c.Realm == realm` check |
+- | `mpp` | `FromAuthorization` | `ParseCredential` |
+- | `mpp` | `FormatAuthorization` | `FormatCredential` |
+- | `mpp` | `FromPaymentReceipt` | `ParseReceipt` |
+- | `mpp` | `FormatReceipt`, `FormatPaymentReceipt`, `(*Receipt).ToPaymentReceipt` | `FormatReceiptWithError` |
+- | `mpp` | `WithExtra` | `WithExtensions` (top-level receipt fields, as mppx and mpp-rs emit) |
+- | `mpp` | `Expires.Seconds/Minutes/Hours/Days/Weeks(n)` | `ExpiresIn(n * time.Minute)` and so on |
+- | `mpp` | `BodyDigest.Compute`, `BodyDigest.Verify` | `ComputeBodyDigest`, `VerifyBodyDigest` with the raw body bytes |
+- | `mpp` | `ParseUnits` | `ParseAmount` (`*big.Int`, no int64 overflow) |
+- | `mpp` | `TransformUnits` | convert amounts with `ParseAmount` when building the request |
+- | `client` | `NewTransport`, `TransportOption` | `NewHTTPTransport(methods, inner, opts...)` (returns configuration errors) or `NewHTTPClient` |
+- | `client` | `WithTransportOnChallenge` | `WithOnChallenge` |
+- | `client` | `WithTransportPaymentPreferences` | `WithPaymentPreferences` |
+- | `client` | `WithTransportTrustedProofRealm`, `WithTrustedTempoProofRealm` | the Tempo charge client's `Config.TrustedProofRealms` |
+- | `mcp/client` | `Config.TrustedTempoProofRealms` | a `TrustedProofRealm` without an `Origin` in the Tempo charge client's `Config.TrustedProofRealms`; its `Realm` must match the challenge realm exactly, including case (the removed field compared case-insensitively) |
+- | `server` | `WriteChallenge`, `WriteChallenges` | `WritePaymentResponse(w, nil, challenges...)` |
+- | `server` | `WritePaymentErrorWithChallenge`, `WritePaymentErrorWithChallenges` | `WritePaymentResponse(w, err, challenges...)` |
+- | `server` | `WritePaymentError` | `WritePaymentResponse(w, err)` |
+- | `server` | `ComposeCharge` | `Compose` (same arguments) |
+- | `server/fiber` | `WriteChallenge`, `WriteChallenges`, `WritePaymentErrorWithChallenge`, `WritePaymentErrorWithChallenges`, `WritePaymentError` | `WritePaymentResponse(c, err, challenges...)` |
+- | `tempo` | `DefaultRPCURLForChain` | `RPCURLForChain`, which reports unknown chain IDs |
+- | `tempo` | `MainnetUSDCAddress` | `USDCEAddress` |
+- | `tempo` | `FeePayerWindow` | `SponsoredValidBeforeWindow` |
+- | `tempo/server` | `NewMethod`, `MethodConfig` | `New(Config{...})`; share one verifier with `Config.Intent` |
+- | `tempo/server` | `Config.FeePayerPolicies`, `IntentConfig.FeePayerPolicies` | `AllowedFeeTokens` (in the order to try) and `FeePayerPolicy` |
+- | `tempo/server` | `Config.FeePayerPrivateKeyEnv`, `IntentConfig.FeePayerPrivateKeyEnv` | `FeePayerPrivateKey: os.Getenv("NAME")` |
+- The realm written by the removed realm-taking writers is now always the Challenge's own `Realm`, which its ID binds. Without the removed realm pins, a zero-amount `tempo/charge` proof is paid only when the Tempo method's `OriginValidator` (its `Config.TrustedProofRealms`) accepts it, or, for methods without one, when the request origin owns the realm.
+- The deprecated APIs this release still kept are removed as well; see `remove-remaining-deprecated-apis.md`. (by @BrendanRyan, [#267](https://github.com/tempoxyz/mpp-go/pull/267))
+- Remove the last deprecated APIs, which were kept for the mpp-tools conformance adapter and the READMEs. Migrate as follows:
+- | Package | Removed | Use instead |
+- | --- | --- | --- |
+- | `mpp` | `NewChallenge` | `NewChallengeWithError`, which returns the error `NewChallenge` panicked with |
+- | `mpp` | `GenerateChallengeID` | `GenerateChallengeIDWithError` |
+- | `mpp` | `(*Challenge).ToAuthenticate(realm)`, `(*Challenge).ToAuthenticateStrict(realm)` | `FormatChallenge(c)`, which writes `c.Realm` and returns an error |
+- | `mpp` | `(*Credential).ToAuthorization()`, `FormatAuthorizationStrict` | `FormatCredential(c)` |
+- | `mpp` | `ParsePaymentReceipt` | `ParseReceipt` |
+- | `mpp` | `Receipt.Extra` | `Receipt.Extensions["extra"]` (set it with `WithExtensions`) |
+- | `server` | `ChargeParams.EnableChallengeNonce` | `server.New(..., server.WithChallengeNonce(true))`; `VerifyParams.EnableChallengeNonce` is unchanged |
+- | `tempo` | `ChargeSponsoredChallengeStoreKey` | `ChargeSponsoredTransactionStoreKey` (verification still rejects Challenges reserved under the legacy key) |
+- | `tempo/server` | `MethodFromConfig` | `New` (same `Config`) |
+- | `tempo/server` | `Config.Currency` | `Config.Currencies: []string{currency}` |
+- A top-level `"extra"` receipt field is now an ordinary method-defined extension: `ParseReceipt` keeps it in `Receipt.Extensions["extra"]` (any JSON value, not only an object) and `FormatReceiptWithError` writes it back at the top level, so the wire is unchanged. An empty `"extra"` object is still dropped.
+- `Config.Currencies: []string{currency}` requires a 0x-prefixed address; the removed `Currency` field accepted any string verbatim. (by @BrendanRyan, [#267](https://github.com/tempoxyz/mpp-go/pull/267))
+
+### Patch Changes
+
+- Canonicalize Tempo split amounts in `tempo.ParseChargeRequest`, as the total amount already is. A split amount with leading zeros or surrounding whitespace (such as `"0100"` or `" 50 "`) was kept as written, so the server rejected a matching transfer because it compares split amounts as decimal strings, and the client failed to build the transfer for a whitespace-padded amount. (by @BrendanRyan, [#261](https://github.com/tempoxyz/mpp-go/pull/261))
+- The examples' `devnet.WaitForRPC` now waits until the local devnet builds blocks at the current time, not only until it answers `eth_chainId`, so funding a freshly started devnet no longer fails with `valid_before ... too far in the future`.
+- Start the devnet with `docker compose up -d --wait`: it returns once the localnet image's health check reports its setup complete. (by @BrendanRyan, [#269](https://github.com/tempoxyz/mpp-go/pull/269))
+- Unified the server charge flow and added server APIs.
+- One framework-neutral flow now runs `ChargeMiddleware`, `ComposeMiddleware` and the Gin, Echo and Fiber adapters; `ChargeMiddleware` behaves as `ComposeMiddleware` with one offer.
+- Added `server.Compose` (replaces the deprecated `ComposeCharge`), the `server.Offer` alias of `ComposeConfig`, `(*Mpp).ChargeRequest` and `server.ComposeRequest`, which read the credential, body and route scope from an `*http.Request`, and `(*ChargeResult).ServeHTTP`, which writes the 402 or problem response. Added `(*VerifyResult).IsChallenge`.
+- Added `ComposeMiddleware` to the Gin, Echo and Fiber adapters.
+- Added `server.WithChallengeNonce`; `ChargeParams.EnableChallengeNonce` is deprecated and still enables the nonce for its call.
+- Added `server.WithEvents` with `ChallengeCreated`, `PaymentSucceeded` and `PaymentFailed` hooks, like mppx's `onChallengeCreated`, `onPaymentSuccess` and `onPaymentFailed`. `ChallengeCreated` fires only for Challenges a response returns, after the whole set is issued, and a panic in any hook is recovered so it cannot abort a request.
+- Call `res.ServeHTTP(w, r)` on every `ChargeRequest` or `ComposeRequest` result before writing the resource: for a verified payment it sets `Payment-Receipt` and `Cache-Control: private`.
+- `server.New` now defaults an empty secret key to `MPP_SECRET_KEY` and rejects a typed nil `Method`. An empty realm stays empty; pass `server.DetectRealm()` for the environment's realm.
+- Behavior changes: the initial `402` from `ComposeMiddleware` and the Fiber `ChargeMiddleware` no longer carries a problem body, like `ChargeMiddleware` (`fiberadapter.WritePaymentResponse` still writes one). `ChargeMiddleware` and the adapters answer a Credential for a payment method the route does not offer with `400` method-unsupported, like `ComposeMiddleware`, instead of a `402` invalid-challenge with a retry offer; a Credential for an offered method with an intent or request no offer matches still gets the `402` with retry offers. In a composition mixing handlers with and without `WithRequiresAuth`, each offer accepts a Credential only from the header it reads (`Payment-Authorization` or `Authorization`); one sent in the other header gets a `402` invalid-challenge. (by @BrendanRyan, [#263](https://github.com/tempoxyz/mpp-go/pull/263))
+- Simplify the Tempo and client APIs, additively.
+- `tempo`: `ChainIDMainnet` and `ChainIDModerato`, `USDCEAddress` (`MainnetUSDCAddress` is deprecated) and `NewRPCClientWithOptions`. `DefaultRPCURLForChain`, which maps unknown chains to mainnet, is deprecated in favor of `RPCURLForChain`.
+- `tempo/server`: `New(Config)` is the one constructor; `MethodFromConfig` and `NewMethod` are deprecated. `AllowedFeeTokens` and a single `FeePayerPolicy` (as in mppx) replace the deprecated `FeePayerPolicies` map (a `FeePayerPolicy` that sets only `MaxFeePerGas` below the 100 gwei default lowers the default priority fee to it), and `FeePayerPrivateKeyEnv` is deprecated. A `FeeToken` missing from an explicit `AllowedFeeTokens` list is now rejected at construction instead of failing every sponsored request. Setting both `Config.Intent` and `Relay` is now an error rather than silently dropping the Intent. RPC clients built from URLs are reused instead of rebuilt per credential.
+- `tempo/client`: a `PaymentPolicy` type with `MaxAmount`, `MaxAtomicAmount`, `AllowChainIDs` and `AllPolicies`; `Config.TrustedProofRealms`; the method implements `client.OriginValidator`. The RPC client is built once.
+- `client`: `NewHTTPClient` returns a standard `*http.Client` with same-origin redirects, and `NewHTTPTransport` reports configuration errors at construction; both take `Option`. New `WithMaxRetries`, `WithOrderChallenges`, `OrderChallenges`, `OriginValidator` and `ErrPaymentDeclined`, which an `OnChallenge` decline now matches (only when the hook returns an error before a credential is created). `NewTransport`, `TransportOption`, the `WithTransport*` options and `WithTrustedTempoProofRealm` are deprecated; a realm it pins only overrides a method's `OriginValidator` for zero-amount `tempo/charge` proofs. Origin checks (same-origin redirects, payment origins and pinned realms) now treat a default port as absent, so `https://h` and `https://h:443` are the same origin.
+- `mcp/client`: `Middleware(Config)` installs payment handling without `Wrap`'s registry; `ErrPaymentDeclined` is `client.ErrPaymentDeclined`; `TrustedTempoProofRealms` is deprecated in favor of the Tempo method's `TrustedProofRealms`, and only overrides a method's `OriginValidator` for zero-amount `tempo/charge` proofs. (by @BrendanRyan, [#264](https://github.com/tempoxyz/mpp-go/pull/264))
+
 ## `github.com/tempoxyz/mpp-go@0.5.1`
 
 ### Patch Changes
