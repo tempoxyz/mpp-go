@@ -1,5 +1,64 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.5.1`
+
+### Patch Changes
+
+- Core API cleanup: one canonical way per operation, with the old spellings kept
+- as deprecated wrappers.
+- `mpp.FormatChallenge(c) (string, error)` writes `c.Realm`, the realm the
+-   challenge ID binds, and returns formatting errors.
+-   It rejects a method `ParseChallenge` would reject.
+-   `(*Challenge).VerifyID(secret)` checks an ID against `c.Realm`; callers
+-   still compare `c.Realm` with the realm they expect.
+- `mpp.FormatCredential(c) (string, error)` and
+-   `mpp.FormatReceiptWithError(r) (string, error)` return formatting errors and
+-   reject what `ParseCredential` and `ParseReceipt` would reject: a credential
+-   missing challenge id, method, intent or request, or with a nil payload; a
+-   receipt with an empty method, a status other than `"success"`, or a header
+-   over the size limit. The HTTP and MCP clients report such a credential as a
+-   local error without sending it.
+-   `mpp.WithExtensions` sets top-level receipt extension fields.
+- `mpp.ChallengesFromResponse` and `mpp.ReceiptFromResponse` parse a
+-   `*http.Response`, handling repeated and merged `WWW-Authenticate` fields and
+-   ignoring other schemes.
+- `mpp.ExpiresIn`, `mpp.ParseExpires` and `mpp.CheckExpires` replace the
+-   `mpp.Expires` helpers and the SDK's duplicated expiry parsers.
+-   `mpp.ComputeBodyDigest` and `mpp.VerifyBodyDigest` take raw bytes and never
+-   panic. `mpp.ParseAmount` returns a `*big.Int`, so 18-decimal amounts do not
+-   overflow.
+- `mpp.IntentCharge` and `mpp.IntentSession` constants; `tempo.IntentCharge`
+-   refers to `mpp.IntentCharge`.
+- `mpp.ErrorType` implements `error` and `*mpp.PaymentError` implements `Is`, so
+-   `errors.Is(err, mpp.ErrorTypeMalformedCredential)` works through wrapping.
+- `server.WritePaymentResponse(w, err, challenges...)` and
+-   `fiberadapter.WritePaymentResponse(c, err, challenges...)` write initial
+-   402s, problem details and retry challenges, with each challenge's own realm.
+-   Server body digests now return an error instead of panicking for an
+-   unsupported `Body` such as an `io.Reader`. After a payment settles, the
+-   middlewares always serve the handler: a receipt that cannot be formatted is
+-   left out of `Payment-Receipt` rather than failing the request.
+- Composed charges match a credential against the header as received, so a
+-   valid credential whose re-encoding would exceed the size limit no longer
+-   fails with a 500.
+- Deprecated: `FormatAuthenticate`, `FormatAuthenticateStrict`,
+- `(*Challenge).ToAuthenticate`, `ToAuthenticateStrict`, `Verify`,
+- `FromAuthenticate`, `NewChallenge`, `GenerateChallengeID`,
+- `FormatAuthorization`, `FormatAuthorizationStrict`,
+- `(*Credential).ToAuthorization`, `FromAuthorization`, `ParsePaymentReceipt`,
+- `FormatPaymentReceipt`, `FromPaymentReceipt`, `FormatReceipt`,
+- `(*Receipt).ToPaymentReceipt`, `Receipt.Extra`, `WithExtra`, `Expires`,
+- `BodyDigest`, `ParseUnits`, `TransformUnits`, and in `server` and
+- `fiberadapter` `WritePaymentError`, `WritePaymentErrorWithChallenge`,
+- `WritePaymentErrorWithChallenges`, `WriteChallenge` and `WriteChallenges`. (by @BrendanRyan, [#260](https://github.com/tempoxyz/mpp-go/pull/260))
+- Made the live integration tests self-contained: they moved to the nested module `tests/`, which starts the pinned Tempo localnet from `docker-compose.yml` with testcontainers when `TEMPO_RPC_URL` is unset. Added live tests for each framework adapter, a paid MCP tool call, `tempo.RedisStore` replay protection against a real Redis, and the examples' smoke tests, plus a cross-SDK smoke workflow against mppx. The examples' devnet helpers now stop when their context ends and wrap the last RPC error. (by @BrendanRyan, [#256](https://github.com/tempoxyz/mpp-go/pull/256))
+- Pinned the changelog release workflow to tempoxyz/changelogs v0.10.0. (by @BrendanRyan, [#252](https://github.com/tempoxyz/mpp-go/pull/252))
+- Fix server and client edge cases. `ChargeMiddleware`, `ComposeMiddleware` and the Gin, Echo and Fiber adapters keep a caller-set `ChargeParams.MppxScope` instead of overwriting it, and no longer write a response header after a handler hijacks the connection. Server misconfiguration (reserved `_mpp_nonce` metadata, a challenge request or description that cannot be encoded, no offers) now returns a 500 internal payment error instead of a client 400, whether or not the request carries a credential (`WritePaymentErrorWithChallenges` and its Fiber equivalent included); a request whose path or query alone makes the challenge header too large gets a 414 URI Too Long, classified by the new `server.ChallengeSerializationError`. An `mpp.ErrPaymentOutcomeUnknown` problem is sent without retry challenges (`server.IsPaymentOutcomeUnknown`), and `Transport` returns a 402 `payment-outcome-unknown` response to the caller instead of paying again. `ParseReceipt` also keeps `fundingCurrency` in `Receipt.Extensions` (the named field wins when formatting), so it round-trips through code that copies only extensions, as the mpp-tools conformance vector `success_receipt_extension_fields` expects. Also, a credential missing the required body digest gets an `invalid-challenge` problem with its fresh challenge. `server.New` rejects a nil method. `client.Client` keeps net/http's 10-redirect limit when its `http.Client` has no `CheckRedirect`, and runs a custom `CheckRedirect` before its own check, which still refuses every cross-origin redirect. `Transport` closes the request body on early errors without closing it twice, and returns `PaymentOutcomeUnknownError` when a request carrying a credential, including one the caller set, fails without a response; `client.Client` keeps that error when its `http.Client.Timeout` expires. A malformed credential that coincides with a failure to issue challenges in `ComposeCharge` and `ComposeMiddleware` now reports the internal error instead of a malformed-credential 402. Adds `mpp.ErrPaymentActionRequired` and `mpp.ErrPaymentOutcomeUnknown`, matching mppx. Relay calls without a configured `HTTPClient` time out after 30 seconds. (by @BrendanRyan, [#253](https://github.com/tempoxyz/mpp-go/pull/253))
+- Tempo charge settlement no longer locks out a paid credential. When the receipt wait fails after a successful broadcast, the verifier releases its replay claims and returns a verification error saying the outcome is unknown; a retry with the same credential first looks up the receipt of the transaction it would broadcast and, when that transaction is already included, settles from its receipt without simulating it again (its spent balance and nonce would fail the simulation); otherwise it re-broadcasts the signed transaction, which the node includes at most once, as in mppx. A local fee payer re-signs a sponsored retry identically, so sponsored retries recover the same way; without a configured `FeeToken`, whose fee token is picked by live balance, the retry also looks up the transaction it would have signed with every other allowed fee token, so a changed fee-payer balance does not hide an included payment; with a local fee payer, the sponsored sender is now simulated after its replay claim and co-signature. The receipt wait now outlives a client disconnect within its existing budget, sponsored charges release their claim the same way, and claims are kept only for a transaction that was included (reverted, or not satisfying the charge), including a reverted transaction found after `eth_sendRawTransaction` fails, which now returns `transaction reverted` instead of `transaction submission failed`. When the node rejects the broadcast as a duplicate of a transaction it already holds (`already known`), as on a retry while the first attempt is still pending, the verifier waits for its receipt for the full receipt budget and, if it is still unresolved, returns the outcome-unknown error instead of `transaction submission failed`. The verifier rejects a broadcast hash that differs from the signed transaction's hash, and a failure to release a claim after a failed broadcast is now reported instead of ignored.
+- Add the optional `tempo.ExpiringStore` interface (`PutIfAbsentUntil`), implemented by `MemoryStore` and `RedisStore` (with `SET NX EXAT`, an absolute deadline that verifier clock skew cannot shorten; Redis 6.2 or later), and the opt-in `ExpireReplayKeys` setting on the charge server's `Config` and `IntentConfig`. With it, the verifier lets replay keys expire ten minutes after the challenge's expiry, the moment after which the credential can no longer be accepted; it requires a store that implements `tempo.ExpiringStore`, and is only safe when credentials reach the verifier through `server.Mpp`, which verifies the challenge HMAC including its expiry. By default replay keys are still kept forever with `PutIfAbsent`. `RedisStore.Get` matches `redis.Nil` with `errors.Is`. (by @BrendanRyan, [#257](https://github.com/tempoxyz/mpp-go/pull/257))
+- Raised golang.org/x/net to v0.60.0, golang.org/x/text to v0.42.0 and github.com/quic-go/quic-go to v0.59.1 to fix reachable vulnerabilities reported by govulncheck. Added golangci-lint, govulncheck, API compatibility and nightly fuzzing checks. (by @BrendanRyan, [#258](https://github.com/tempoxyz/mpp-go/pull/258))
+- Release automatically every Monday by enabling auto-merge on the changelog release PR from a scheduled workflow run. (by @BrendanRyan, [#245](https://github.com/tempoxyz/mpp-go/pull/245))
+
 ## `github.com/tempoxyz/mpp-go@0.5.0`
 
 ### Minor Changes
