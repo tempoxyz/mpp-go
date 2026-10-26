@@ -137,21 +137,11 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			// Keep net/http's default limit of 10 redirects.
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
-		if sameOriginURL(redirectReq.URL, origin) {
-			return nil
+		// Refuse every cross-origin redirect, as mppx does: the other origin
+		// would choose what this client fetches and may pay for.
+		if !sameOriginURL(redirectReq.URL, origin) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", origin, requestOrigin(redirectReq.URL))
 		}
-		// The Transport attaches credentials to its own retry requests, so
-		// net/http never copies them into a redirect. A Payment credential the
-		// caller set on the request itself would be copied, though, in any
-		// field a challenge names, and net/http does not strip those: refuse
-		// to carry one to another origin. The Transport separately refuses to
-		// pay a redirected origin, or this origin once the chain has left it.
-		if hasPaymentCredential(redirectReq.Header) {
-			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q with a Payment credential", origin, requestOrigin(redirectReq.URL))
-		}
-		state.mu.Lock()
-		state.leftOrigin = true
-		state.mu.Unlock()
 		return nil
 	}
 	resp, err := hc.Do(req)
@@ -191,13 +181,6 @@ func restorePaymentOutcomeUnknown(err error, state *paymentState) error {
 
 // maxRedirects matches net/http's default redirect limit.
 const maxRedirects = 10
-
-// hasPaymentCredential reports whether any header field, whatever its name
-// or the case of its name, carries a value in the Payment auth scheme.
-func hasPaymentCredential(header http.Header) bool {
-	_, ok := paymentCredentialValue(header)
-	return ok
-}
 
 // Get is a convenience method for GET requests.
 func (c *Client) Get(ctx context.Context, url string) (*http.Response, error) {

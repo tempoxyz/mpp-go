@@ -32,8 +32,27 @@ func TestClient_Do_KeepsDefaultRedirectLimit(t *testing.T) {
 	assert.Equal(t, int32(10), hits.Load())
 }
 
-func TestClient_Do_FollowsCrossOriginRedirectWithoutPayment(t *testing.T) {
+func TestClient_Do_FollowsSameOriginRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/end", http.StatusFound)
+			return
+		}
+		_, _ = io.WriteString(w, "done")
+	}))
+	defer srv.Close()
+
+	resp, err := New(nil).Get(context.Background(), srv.URL+"/start")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, "done", string(body))
+}
+
+func TestClient_Do_RefusesCrossOriginRedirectWithoutPayment(t *testing.T) {
+	var otherHits atomic.Int32
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherHits.Add(1)
 		_, _ = io.WriteString(w, "free")
 	}))
 	defer other.Close()
@@ -42,11 +61,11 @@ func TestClient_Do_FollowsCrossOriginRedirectWithoutPayment(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	resp, err := New(nil).Get(context.Background(), origin.URL)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	assert.Equal(t, "free", string(body))
+	// mppx and the mpp-tools conformance flow
+	// cross_origin_redirect_before_402_rejected refuse it before any 402.
+	_, err := New(nil).Get(context.Background(), origin.URL)
+	require.ErrorContains(t, err, "refusing cross-origin redirect")
+	assert.Zero(t, otherHits.Load())
 }
 
 func TestClient_Do_NeverSendsPaymentCredentialCrossOrigin(t *testing.T) {
@@ -73,17 +92,12 @@ func TestClient_Do_NeverSendsPaymentCredentialCrossOrigin(t *testing.T) {
 	challenge = challengeForURL(t, origin.URL, "tempo", nil)
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	resp, err := New([]Method{method}).Get(context.Background(), origin.URL)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	_, err := New([]Method{method}).Get(context.Background(), origin.URL)
+	require.ErrorContains(t, err, "refusing cross-origin redirect")
 	assert.Equal(t, 1, method.calls)
 	mu.Lock()
 	defer mu.Unlock()
-	require.NotEmpty(t, otherAuth)
-	for _, value := range otherAuth {
-		assert.NotContains(t, strings.ToLower(value), "payment")
-	}
+	assert.Empty(t, otherAuth)
 }
 
 func TestClient_Do_RefusesCrossOriginRedirectWithCallerCredential(t *testing.T) {
@@ -239,7 +253,7 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeForUnparseableCallerCredential
 	assert.Contains(t, err.Error(), "do not blindly retry")
 }
 
-func TestClient_Do_RefusesCrossOriginRedirectWithCredentialInAnyField(t *testing.T) {
+func TestClient_Do_RunsCallerRedirectHookFirst(t *testing.T) {
 	var otherHits atomic.Int32
 	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		otherHits.Add(1)
@@ -250,39 +264,13 @@ func TestClient_Do_RefusesCrossOriginRedirectWithCredentialInAnyField(t *testing
 	}))
 	defer origin.Close()
 
-	tests := map[string]func(*http.Request){
-		"non-canonical key": func(req *http.Request) { req.Header["payment-authorization"] = []string{"Payment abc"} },
-		"custom field":      func(req *http.Request) { req.Header.Set("X-Payment-Credential", "payment abc") },
-	}
-	for name, setHeader := range tests {
-		t.Run(name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
-			require.NoError(t, err)
-			setHeader(req)
-			_, err = New(nil).Do(req)
-			require.ErrorContains(t, err, "refusing cross-origin redirect")
-		})
-	}
-	assert.Zero(t, otherHits.Load())
-}
-
-func TestClient_Do_ChecksCredentialAddedByCallerRedirectHook(t *testing.T) {
-	var otherHits atomic.Int32
-	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		otherHits.Add(1)
-	}))
-	defer other.Close()
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, other.URL, http.StatusFound)
-	}))
-	defer origin.Close()
-
-	hc := &http.Client{CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-		req.Header.Set(mpp.HeaderPaymentAuthorization, "Payment abc")
-		return nil
+	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}}
-	_, err := New(nil, WithHTTPClient(hc)).Get(context.Background(), origin.URL)
-	require.ErrorContains(t, err, "refusing cross-origin redirect")
+	resp, err := New(nil, WithHTTPClient(hc)).Get(context.Background(), origin.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.Zero(t, otherHits.Load())
 }
 
@@ -309,9 +297,10 @@ func TestClient_Do_RefusesPaymentAfterRedirectThroughAnotherOrigin(t *testing.T)
 	otherURL = other.URL
 
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-	// origin/start -> other -> origin/priced: other chose the paid resource.
+	// origin/start -> other -> origin/priced: other would choose the paid
+	// resource, so the first hop away from origin is refused.
 	_, err := New([]Method{method}).Get(context.Background(), origin.URL+"/start")
-	require.ErrorContains(t, err, "after a redirect through another origin")
+	require.ErrorContains(t, err, "refusing cross-origin redirect")
 	assert.Zero(t, method.calls)
 }
 

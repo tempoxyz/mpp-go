@@ -47,9 +47,6 @@ type paymentState struct {
 	origin string
 
 	mu sync.Mutex
-	// leftOrigin records that a redirect in this chain went to another
-	// origin, so a later hop back to origin was chosen by that other server.
-	leftOrigin bool
 	// unknown is the last PaymentOutcomeUnknownError the Transport returned,
 	// kept so Client.Do can restore it when net/http replaces the error.
 	unknown *PaymentOutcomeUnknownError
@@ -605,16 +602,6 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, challenge *mpp.Chal
 	}
 	if !sameOriginURL(req.URL, origin) {
 		return fmt.Errorf("mpp: refusing payment for redirected origin %q", requestOrigin(req.URL))
-	}
-	if state := paymentStateFrom(req.Context()); state != nil {
-		state.mu.Lock()
-		leftOrigin := state.leftOrigin
-		state.mu.Unlock()
-		if leftOrigin {
-			// Another origin redirected back here and so chose which of
-			// this origin's resources to pay for.
-			return fmt.Errorf("mpp: refusing payment for %q after a redirect through another origin", req.URL.Redacted())
-		}
 	}
 	// A zero-amount Tempo proof can authenticate the payer at the realm named
 	// in the challenge. The HTTP server that sent it must own that realm.

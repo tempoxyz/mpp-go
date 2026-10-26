@@ -856,8 +856,8 @@ func TestClient_Do_RejectsCrossOriginRedirect(t *testing.T) {
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
 	c := New([]Method{method})
 	_, err := c.Get(context.Background(), origin.URL)
-	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "refusing payment for redirected origin"),
-		"Get() error = %v, want redirected-origin payment rejection", err) {
+	if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect"),
+		"Get() error = %v, want cross-origin redirect rejection", err) {
 		return
 	}
 	if !assert.Equalf(t, 0, method.calls,
