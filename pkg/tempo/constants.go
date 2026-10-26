@@ -1,6 +1,10 @@
 package tempo
 
-import "time"
+import (
+	"time"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+)
 
 // TODO(tempo-go): move Tempo chain metadata and TIP-20 selectors into tempo-go;
 // these constants are chain-specific primitives rather than MPP-specific state.
@@ -8,8 +12,8 @@ import "time"
 const (
 	// MethodName is the Tempo payment method token.
 	MethodName = "tempo"
-	// IntentCharge is the Tempo charge intent token.
-	IntentCharge = "charge"
+	// IntentCharge is the Tempo charge intent token. It is mpp.IntentCharge.
+	IntentCharge = mpp.IntentCharge
 	// DefaultDecimals is the default TIP-20 decimal precision used for charges.
 	DefaultDecimals = 6
 	// DefaultGasLimit is the fallback gas limit when estimation is unavailable.
