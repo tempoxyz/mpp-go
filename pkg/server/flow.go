@@ -52,7 +52,11 @@ func (f paymentFlow) serveRequest(r *http.Request) (*ChargeResult, error) {
 	}
 	credential, err := composePaymentCredential(f.entries, r.Header)
 	if err != nil {
-		return failedResult(mpp.ErrBadRequest(err.Error()))
+		// The client sent a Payment credential that cannot be read, which a
+		// direct Charge reports to PaymentFailed too.
+		err = mpp.ErrBadRequest(err.Error())
+		f.paymentFailed(r.Context(), nil, err)
+		return failedResult(err)
 	}
 	return f.run(r.Context(), credential, ScopeFromHTTPRequest(r, ""), body)
 }
@@ -103,13 +107,23 @@ func (f paymentFlow) run(ctx context.Context, credential string, scope map[strin
 // paymentFailed reports a Credential the flow rejected before dispatching it
 // to an offer's Charge, to the PaymentFailed hook of every distinct Mpp.
 func (f paymentFlow) paymentFailed(ctx context.Context, credential *mpp.Credential, err error) {
-	seen := make(map[*Mpp]bool, len(f.entries))
+	payments := make([]*Mpp, 0, len(f.entries))
 	for _, entry := range f.entries {
-		if seen[entry.mpp] {
+		payments = append(payments, entry.mpp)
+	}
+	paymentFailedOnce(ctx, payments, credential, err)
+}
+
+// paymentFailedOnce calls the PaymentFailed hook of every distinct, non-nil
+// Mpp in payments once.
+func paymentFailedOnce(ctx context.Context, payments []*Mpp, credential *mpp.Credential, err error) {
+	seen := make(map[*Mpp]bool, len(payments))
+	for _, payment := range payments {
+		if payment == nil || seen[payment] {
 			continue
 		}
-		seen[entry.mpp] = true
-		entry.mpp.paymentFailed(ctx, credential, err)
+		seen[payment] = true
+		payment.paymentFailed(ctx, credential, err)
 	}
 }
 

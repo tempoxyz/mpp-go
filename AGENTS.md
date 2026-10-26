@@ -97,11 +97,19 @@ Each type has one canonical Parse/Format pair; the other spellings
   (MCP) use `Charge(ctx, params)` with the Credential in `params`, or
   `server.Compose(ctx, authorization, offers...)` (`Offer` is an alias of
   `ComposeConfig`; `ComposeCharge` is deprecated).
-- `server.New` defaults an empty realm to `DetectRealm()` and an empty secret
-  to `MPP_SECRET_KEY`. Server-wide options: `WithRequiresAuth`,
-  `WithChallengeNonce` (replaces the deprecated per-call
-  `ChargeParams.EnableChallengeNonce`, which still forces it on) and
-  `WithEvents` (mppx's onChallengeCreated/onPaymentSuccess/onPaymentFailed).
+- `server.New` defaults an empty secret to `MPP_SECRET_KEY`. An empty realm
+  stays empty: the realm is bound into every Challenge, so defaulting it would
+  make upgraded and older replicas reject each other's Challenges; callers
+  who want the environment's realm pass `server.DetectRealm()`.
+- Server-wide options: `WithRequiresAuth`, `WithChallengeNonce` (replaces the
+  deprecated per-call `ChargeParams.EnableChallengeNonce`, which still forces
+  it on) and `WithEvents` (mppx's onChallengeCreated/onPaymentSuccess/
+  onPaymentFailed). PaymentFailed fires once per distinct `Mpp` for every
+  submitted Credential that is rejected, including one that cannot be parsed
+  (nil Credential), whether it arrives through `Charge`, `ChargeRequest`,
+  the middlewares, `Compose` or MCP `_meta`. Transports in this module
+  report a Credential they reject before `Charge` through
+  `internal/serverevents`.
 - `_mppx_scope` stays a `{route, resource, query}` map inside the challenge
   request. mppx binds a `"GET /route"` string in the opaque metadata instead;
   aligning them is a wire change older Go verifiers reject, so it needs a

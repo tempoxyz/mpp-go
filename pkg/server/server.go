@@ -222,17 +222,16 @@ func WithChallengeNonce(enabled bool) Option {
 
 // New creates an Mpp instance.
 //
-// An empty realm defaults to DetectRealm, and an empty secretKey to
-// DetectSecretKey (MPP_SECRET_KEY). New returns an error when method is nil,
+// An empty secretKey defaults to DetectSecretKey (MPP_SECRET_KEY). An empty
+// realm stays empty, as before, because the realm is bound into every
+// Challenge and replicas with different realms reject each other's
+// Challenges; pass DetectRealm() for the environment's realm. New returns an error when method is nil,
 // when secretKey is empty and MPP_SECRET_KEY is unset, or when the secret key
 // is shorter than 32 bytes, since a weak secret yields forgeable, HMAC-bound
 // challenge IDs.
 func New(method Method, realm, secretKey string, opts ...Option) (*Mpp, error) {
 	if isNilMethod(method) {
 		return nil, fmt.Errorf("server: payment method is required")
-	}
-	if realm == "" {
-		realm = DetectRealm()
 	}
 	if secretKey == "" {
 		// An unset MPP_SECRET_KEY leaves the key empty, which the length

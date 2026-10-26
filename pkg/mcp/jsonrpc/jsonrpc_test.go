@@ -160,6 +160,45 @@ func TestChargeRejectionsAndMalformedCredentials(t *testing.T) {
 	assert.Equal(t, []string{"A"}, method.recorded())
 }
 
+func TestMalformedCredentialReportsPaymentFailedOncePerHandler(t *testing.T) {
+	var mu sync.Mutex
+	failures := map[string][]error{}
+	newPayment := func(name string) *server.Mpp {
+		payment, err := server.New(&testMethod{}, realm, secretKey, server.WithEvents(server.Events{
+			PaymentFailed: func(_ context.Context, credential *mpp.Credential, err error) {
+				assert.Nil(t, credential)
+				mu.Lock()
+				defer mu.Unlock()
+				failures[name] = append(failures[name], err)
+			},
+		}))
+		require.NoError(t, err)
+		return payment
+	}
+	alpha, beta := newPayment("alpha"), newPayment("beta")
+	params := server.ChargeParams{Amount: "1", Currency: "A"}
+
+	malformed, err := jsonrpc.Charge(context.Background(), alpha, paidRequest(t, "1", "invalid"), params)
+	require.NoError(t, err)
+	assert.EqualValues(t, mpp.MCPInvalidParamsCode, malformed.Challenge.Error.Code)
+	require.Len(t, failures["alpha"], 1)
+	assert.ErrorIs(t, failures["alpha"][0], mpp.ErrorTypeMalformedCredential)
+
+	configs := []server.ComposeConfig{
+		{Mpp: alpha, Params: params},
+		{Mpp: alpha, Params: server.ChargeParams{Amount: "1", Currency: "B"}},
+		{Mpp: beta, Params: server.ChargeParams{Amount: "1", Currency: "C"}},
+	}
+	malformed, err = jsonrpc.Compose(context.Background(), paidRequest(t, "2", "invalid"), configs...)
+	require.NoError(t, err)
+	assert.EqualValues(t, mpp.MCPInvalidParamsCode, malformed.Challenge.Error.Code)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, failures["alpha"], 2, "once per call for the Mpp shared by two offers")
+	require.Len(t, failures["beta"], 1)
+	assert.ErrorIs(t, failures["beta"][0], mpp.ErrorTypeMalformedCredential)
+}
+
 func TestRequestKeepsLargeIntegersExact(t *testing.T) {
 	req := decodeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"n":9007199254740993}}}`)
 	encoded, err := json.Marshal(req.Meta())

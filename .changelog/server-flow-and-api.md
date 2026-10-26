@@ -9,5 +9,5 @@ Unified the server charge flow and added server APIs.
 - Added `ComposeMiddleware` to the Gin, Echo and Fiber adapters.
 - Added `server.WithChallengeNonce`; `ChargeParams.EnableChallengeNonce` is deprecated and still enables the nonce for its call.
 - Added `server.WithEvents` with `ChallengeCreated`, `PaymentSucceeded` and `PaymentFailed` hooks, like mppx's `onChallengeCreated`, `onPaymentSuccess` and `onPaymentFailed`.
-- `server.New` now defaults an empty realm to `DetectRealm()` and an empty secret key to `MPP_SECRET_KEY`, and rejects a typed nil `Method`.
+- `server.New` now defaults an empty secret key to `MPP_SECRET_KEY` and rejects a typed nil `Method`. An empty realm stays empty; pass `server.DetectRealm()` for the environment's realm.
 - Behavior changes: the initial `402` from `ComposeMiddleware` and the Fiber `ChargeMiddleware` no longer carries a problem body, like `ChargeMiddleware` (`fiberadapter.WritePaymentResponse` still writes one). `ChargeMiddleware` and the adapters answer a Credential for a payment method the route does not offer with `400` method-unsupported, like `ComposeMiddleware`, instead of a `402` invalid-challenge with a retry offer.

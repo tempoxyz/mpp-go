@@ -3,8 +3,21 @@ package server
 import (
 	"context"
 
+	"github.com/tempoxyz/mpp-go/internal/serverevents"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
+
+func init() {
+	serverevents.PaymentFailed = func(ctx context.Context, payments []any, credential *mpp.Credential, err error) {
+		handlers := make([]*Mpp, 0, len(payments))
+		for _, payment := range payments {
+			if m, ok := payment.(*Mpp); ok {
+				handlers = append(handlers, m)
+			}
+		}
+		paymentFailedOnce(ctx, handlers, credential, err)
+	}
+}
 
 // Events are hooks a handler calls as payments progress, like mppx's
 // onChallengeCreated, onPaymentSuccess and onPaymentFailed. Every hook is

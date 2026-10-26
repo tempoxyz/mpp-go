@@ -241,6 +241,45 @@ func TestWithEvents(t *testing.T) {
 	assert.Nil(t, failedCredentials[0])
 }
 
+func TestUnreadableCredentialHeaderReportsPaymentFailed(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var failed []error
+	payment := apiTestServer(t, WithEvents(Events{
+		PaymentFailed: func(_ context.Context, credential *mpp.Credential, err error) {
+			assert.Nil(t, credential)
+			mu.Lock()
+			defer mu.Unlock()
+			failed = append(failed, err)
+		},
+	}))
+	issued, err := payment.Charge(context.Background(), ChargeParams{Amount: "1.00"})
+	require.NoError(t, err)
+	header := paymentFor(issued.Challenge) + ", " + paymentFor(issued.Challenge)
+
+	// A direct Charge and the HTTP flow report the same unreadable header.
+	_, directErr := payment.Charge(context.Background(), ChargeParams{Amount: "1.00", Authorization: header})
+	require.Error(t, directErr)
+
+	r := httptest.NewRequest(http.MethodGet, "/premium", nil)
+	r.Header.Set(mpp.HeaderAuthorization, header)
+	_, requestErr := payment.ChargeRequest(r, ChargeParams{Amount: "1.00"})
+	require.Error(t, requestErr)
+
+	handler := ChargeMiddleware(payment, ChargeParams{Amount: "1.00"})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, failed, 3, "one PaymentFailed per call")
+	assert.Equal(t, directErr.Error(), failed[0].Error())
+	assert.Equal(t, requestErr, failed[1])
+	assert.Equal(t, requestErr.Error(), failed[2].Error())
+}
+
 type nilPointerMethod struct{}
 
 func (*nilPointerMethod) Name() string               { return "nil" }
@@ -254,13 +293,27 @@ func TestNewRejectsTypedNilMethod(t *testing.T) {
 	assert.EqualError(t, err, "server: payment method is required")
 }
 
-func TestNewDefaultsRealmAndSecretFromEnvironment(t *testing.T) {
+func TestNewDefaultsSecretButNotRealmFromEnvironment(t *testing.T) {
 	t.Setenv("MPP_REALM", "env.example.com")
 	t.Setenv("MPP_SECRET_KEY", composeSecret)
 
+	// An empty realm stays empty, so replicas upgraded during a rolling
+	// deploy keep accepting each other's Challenges.
 	payment, err := New(composeTestMethod{name: "alpha"}, "", "")
 	require.NoError(t, err)
-	assert.Equal(t, "env.example.com", payment.Realm())
+	assert.Equal(t, "", payment.Realm())
+	legacy, err := New(composeTestMethod{name: "alpha"}, "", composeSecret)
+	require.NoError(t, err)
+	assert.Equal(t, "", legacy.Realm())
+	issued, err := legacy.Charge(context.Background(), ChargeParams{Amount: "1.00"})
+	require.NoError(t, err)
+	paid, err := payment.Charge(context.Background(), ChargeParams{Amount: "1.00", Authorization: paymentFor(issued.Challenge)})
+	require.NoError(t, err)
+	assert.NotNil(t, paid.Receipt)
+
+	detected, err := New(composeTestMethod{name: "alpha"}, DetectRealm(), "")
+	require.NoError(t, err)
+	assert.Equal(t, "env.example.com", detected.Realm())
 	res, err := payment.Charge(context.Background(), ChargeParams{Amount: "1.00"})
 	require.NoError(t, err)
 	assert.True(t, res.Challenge.VerifyID(composeSecret))

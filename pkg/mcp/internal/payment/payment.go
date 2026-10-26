@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/tempoxyz/mpp-go/internal/serverevents"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 )
@@ -30,6 +31,9 @@ type Outcome struct {
 // Charge runs payment.Charge with the Credential in meta.
 func Charge(ctx context.Context, payment *server.Mpp, meta map[string]any, params server.ChargeParams) (*Outcome, error) {
 	authorization, credentialErr := Authorization(meta)
+	if credentialErr != nil {
+		reportMalformed(ctx, credentialErr, payment)
+	}
 	params.Authorization = authorization
 	params.PaymentAuthorization = authorization
 	result, err := payment.Charge(ctx, params)
@@ -42,11 +46,32 @@ func Charge(ctx context.Context, payment *server.Mpp, meta map[string]any, param
 // Compose runs server.Compose with the Credential in meta.
 func Compose(ctx context.Context, meta map[string]any, configs ...server.ComposeConfig) (*Outcome, error) {
 	authorization, credentialErr := Authorization(meta)
+	if credentialErr != nil {
+		payments := make([]*server.Mpp, 0, len(configs))
+		for _, config := range configs {
+			payments = append(payments, config.Mpp)
+		}
+		reportMalformed(ctx, credentialErr, payments...)
+	}
 	result, err := server.Compose(ctx, authorization, configs...)
 	if credentialErr != nil && err == nil {
 		return rejected(result, credentialErr), nil
 	}
 	return outcome(result, err)
+}
+
+// reportMalformed reports a Credential in _meta that cannot be read to the
+// PaymentFailed hook of every distinct handler, as the HTTP flow does for a
+// malformed Authorization header. The charge then runs without a Credential,
+// so it does not report it again.
+func reportMalformed(ctx context.Context, err error, payments ...*server.Mpp) {
+	handlers := make([]any, 0, len(payments))
+	for _, payment := range payments {
+		if payment != nil {
+			handlers = append(handlers, payment)
+		}
+	}
+	serverevents.PaymentFailed(ctx, handlers, nil, err)
 }
 
 // Authorization reads the Credential from meta and formats it as a Payment
