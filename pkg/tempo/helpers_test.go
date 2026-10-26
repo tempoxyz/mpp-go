@@ -406,3 +406,37 @@ func TestParseChargeCredentialPayload_RoundTripsPayloadShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestParseChargeRequest_CanonicalizesSplitAmounts(t *testing.T) {
+	t.Parallel()
+
+	// The total amount is already canonicalized; split amounts must be too,
+	// because verifiers compare them as strings with decoded transfer amounts.
+	request, err := ParseChargeRequest(map[string]any{
+		"amount":    "0500",
+		"currency":  "0x20c0000000000000000000000000000000000001",
+		"recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		"methodDetails": map[string]any{
+			"splits": []any{
+				map[string]any{
+					"amount":    "0100",
+					"recipient": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+				},
+				map[string]any{
+					"amount":    " 50 ",
+					"recipient": "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+				},
+			},
+		},
+	})
+	if !assert.NoErrorf(t, err,
+		"ParseChargeRequest() error = %v", err) {
+		return
+	}
+	assert.Equal(t, "500", request.Amount)
+	if !assert.Len(t, request.MethodDetails.Splits, 2) {
+		return
+	}
+	assert.Equal(t, "100", request.MethodDetails.Splits[0].Amount)
+	assert.Equal(t, "50", request.MethodDetails.Splits[1].Amount)
+}

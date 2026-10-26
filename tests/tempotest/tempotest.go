@@ -9,11 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +26,9 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-// StartupTimeout bounds pulling and booting the image and waiting for the
-// node to be ready.
+// StartupTimeout bounds waiting for a started container's RPC endpoint and
+// for the node to be ready. Pulling and creating the container run under the
+// caller's context alone, so a slow image pull is not cut short.
 const StartupTimeout = 2 * time.Minute
 
 const rpcPort = "8545/tcp"
@@ -43,11 +44,42 @@ type Spec struct {
 	Command []string
 }
 
+// rootModule is the module path the repository root's go.mod declares.
+const rootModule = "github.com/tempoxyz/mpp-go"
+
+var goModModulePattern = regexp.MustCompile(`(?m)^\s*module\s+(\S+)\s*$`)
+
 // ComposeFile returns the path of the repository's docker-compose.yml, the
-// single source of truth for the pinned localnet image and its command.
-func ComposeFile() string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "..", "..", "docker-compose.yml")
+// single source of truth for the pinned localnet image and its command. It
+// finds the repository root by walking up from the working directory (the
+// package's directory under go test) to the directory whose go.mod declares
+// module github.com/tempoxyz/mpp-go, so it works under -trimpath too.
+func ComposeFile() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return findComposeFile(dir)
+}
+
+// findComposeFile returns docker-compose.yml in the nearest of dir and its
+// parents whose go.mod declares rootModule.
+func findComposeFile(dir string) (string, error) {
+	for start := dir; ; {
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil {
+			if m := goModModulePattern.FindSubmatch(data); m != nil && string(m[1]) == rootModule {
+				return filepath.Join(dir, "docker-compose.yml"), nil
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod declaring module %s in %s or its parents", rootModule, start)
+		}
+		dir = parent
+	}
 }
 
 // ReadSpec reads the tempo-node image and command from the compose file at
@@ -92,12 +124,16 @@ type Localnet struct {
 // timestamp 0, and rejects transactions until it is not. Call Terminate when
 // done; on error nothing is left running.
 func Start(ctx context.Context) (*Localnet, error) {
-	spec, err := ReadSpec(ComposeFile())
+	composeFile, err := ComposeFile()
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, StartupTimeout)
-	defer cancel()
+	spec, err := ReadSpec(composeFile)
+	if err != nil {
+		return nil, err
+	}
+	// Pull and create the container under ctx alone: StartupTimeout bounds
+	// only the wait for the started node, not a slow image pull.
 	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        spec.Image,
@@ -112,6 +148,8 @@ func Start(ctx context.Context) (*Localnet, error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("start %s: %w", spec.Image, err), l.Terminate(context.Background()))
 	}
+	ctx, cancel := context.WithTimeout(ctx, StartupTimeout)
+	defer cancel()
 	if l.RPCURL, err = ctr.PortEndpoint(ctx, rpcPort, "http"); err != nil {
 		return nil, errors.Join(err, l.Terminate(context.Background()))
 	}

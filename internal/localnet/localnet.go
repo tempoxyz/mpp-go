@@ -15,8 +15,11 @@ const (
 	// MaxClockSkew is how far the latest block's timestamp may be from the
 	// local clock for the node to count as ready. Clients set an expiring
 	// nonce's valid_before from the local clock, and the node rejects one
-	// more than 300s past its latest block.
-	MaxClockSkew = 10 * time.Second
+	// more than 300s past its latest block, so the bound stays below that
+	// limit with room for valid_before's own offset. It is wide enough for a
+	// node whose clock drifts from the host's (a Docker Desktop VM, a remote
+	// node at TEMPO_RPC_URL) while still rejecting genesis, at timestamp 0.
+	MaxClockSkew = 240 * time.Second
 
 	pollInterval = 250 * time.Millisecond
 )

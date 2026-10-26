@@ -561,8 +561,10 @@ func parseSplits(value any) ([]Split, error) {
 	}
 	splits := make([]Split, 0, len(rawSplits))
 	for _, splitMap := range rawSplits {
-		amount := asString(splitMap["amount"])
-		if _, err := parseBaseUnitAmount(amount); err != nil {
+		// Canonicalize like the total amount in ParseChargeRequest: verifiers
+		// compare split amounts as decimal strings against decoded transfers.
+		amount, err := parseBaseUnitAmount(asString(splitMap["amount"]))
+		if err != nil {
 			return nil, err
 		}
 		recipient, err := normalizeAddress("split recipient", asString(splitMap["recipient"]))
@@ -573,7 +575,7 @@ func parseSplits(value any) ([]Split, error) {
 		if err != nil {
 			return nil, err
 		}
-		splits = append(splits, Split{Amount: amount, Recipient: recipient, Memo: memo})
+		splits = append(splits, Split{Amount: amount.String(), Recipient: recipient, Memo: memo})
 	}
 	return splits, nil
 }
