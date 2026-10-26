@@ -32,7 +32,9 @@ func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.Middlewa
 			chargeParams := params
 			chargeParams.Authorization = c.Request().Header.Get(mpp.HeaderAuthorization)
 			chargeParams.PaymentAuthorization = c.Request().Header.Get(mpp.HeaderPaymentAuthorization)
-			chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
+			if len(chargeParams.MppxScope) == 0 {
+				chargeParams.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
+			}
 			body, err := server.ReadRequestBody(c.Request())
 			if err != nil {
 				server.WritePaymentError(c.Response(), server.RequestBodyError(err))

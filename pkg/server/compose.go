@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -87,7 +88,7 @@ func ComposeMiddleware(configs ...ComposeConfig) func(http.Handler) http.Handler
 			params := entry.params
 			params.Authorization = r.Header.Get(mpp.HeaderAuthorization)
 			params.PaymentAuthorization = r.Header.Get(mpp.HeaderPaymentAuthorization)
-			if len(scope) > 0 {
+			if len(scope) > 0 && len(params.MppxScope) == 0 {
 				params.MppxScope = scope
 			}
 			if len(body) > 0 {
@@ -135,7 +136,7 @@ func newComposedEntries(configs []ComposeConfig, buildRequests bool) ([]composed
 		}
 		if buildRequests {
 			if _, err := cfg.Mpp.buildChargeRequests(cfg.Params); err != nil {
-				return nil, "", fmt.Errorf("server: ComposeConfig[%d] buildChargeRequest: %v", i, err)
+				return nil, "", fmt.Errorf("server: ComposeConfig[%d] buildChargeRequest: %w", i, err)
 			}
 		}
 		entries[i] = composedEntry{
@@ -214,7 +215,7 @@ func composeMalformedCredentialResult(
 		var collectErr error
 		challenges, collectErr = collectComposeChallenges(ctx, entries, nil, nil)
 		if collectErr != nil {
-			return nil, err
+			return nil, composeChallengeCollectionError(err, collectErr)
 		}
 	}
 	return &ChargeResult{Challenge: challenges[0], Challenges: challenges}, err
@@ -241,7 +242,7 @@ func collectComposeChallenges(ctx context.Context, entries []composedEntry, body
 		challenges = append(challenges, offered...)
 	}
 	if len(challenges) == 0 {
-		return nil, mpp.ErrBadRequest("no challenges could be generated")
+		return nil, errNoChallenges
 	}
 	return challenges, nil
 }
@@ -250,7 +251,7 @@ func collectComposeChallenges(ctx context.Context, entries []composedEntry, body
 func freshComposeChallenges(ctx context.Context, entry composedEntry, body []byte, scope map[string]string) ([]*mpp.Challenge, error) {
 	params := entry.params
 	params.Authorization = ""
-	if len(scope) > 0 {
+	if len(scope) > 0 && len(params.MppxScope) == 0 {
 		params.MppxScope = scope
 	}
 	if len(body) > 0 {
@@ -288,11 +289,19 @@ func writeComposeMalformedCredentialError(
 		var collectErr error
 		challenges, collectErr = collectComposeChallenges(r.Context(), entries, body, scope)
 		if collectErr != nil {
-			WritePaymentError(w, err)
+			WritePaymentError(w, composeChallengeCollectionError(err, collectErr))
 			return
 		}
 	}
 	writeComposeChallengeResponse(w, challenges, realm, err)
+}
+
+// composeChallengeCollectionError reports that no challenge could be issued in
+// answer to a malformed credential. The collection failure is the primary
+// error: the client's malformed-credential PaymentError is kept only as text,
+// so the response is the server failure, not a client error with no offer.
+func composeChallengeCollectionError(malformed, collectErr error) error {
+	return fmt.Errorf("server: issuing challenges after malformed credential (%v): %w", malformed, collectErr)
 }
 
 func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Challenge, realm string, err error) {
@@ -302,7 +311,7 @@ func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Chal
 	for _, challenge := range challenges {
 		header, headerErr := challenge.ToAuthenticateStrict(realm)
 		if headerErr != nil {
-			WritePaymentError(w, mpp.ErrBadRequest(headerErr.Error()))
+			WritePaymentError(w, ChallengeSerializationError(challenge, realm, headerErr))
 			return
 		}
 		headers = append(headers, header)
@@ -325,8 +334,8 @@ func writeComposeChallengeResponse(w http.ResponseWriter, challenges []*mpp.Chal
 }
 
 func isMalformedCredential(err error) bool {
-	pe, ok := err.(*mpp.PaymentError)
-	return ok && pe.Type == mpp.ErrorTypeMalformedCredential
+	var pe *mpp.PaymentError
+	return errors.As(err, &pe) && pe.Type == mpp.ErrorTypeMalformedCredential
 }
 
 // findEntriesByMethodIntent returns every compose entry whose method and intent
@@ -354,7 +363,7 @@ func findEntriesByMethodIntent(entries []composedEntry, cred *mpp.Credential) []
 func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[string]string) (composedEntry, bool, error) {
 	echoedRequest, err := echoedRequestMap(cred)
 	if err != nil {
-		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err))
+		return composedEntry{}, false, mpp.ErrMalformedCredential(fmt.Sprintf("invalid echoed request: %v", err)).WithCause(err)
 	}
 
 	// Prefer an exact match on method + intent + request.
@@ -400,7 +409,7 @@ func findMatchingEntry(entries []composedEntry, cred *mpp.Credential, scope map[
 // sponsored-expiry floor, that do not apply to verifying a Credential.
 func (entry composedEntry) scopedRequests(scope map[string]string, cred *mpp.Credential) ([]map[string]any, error) {
 	params := entry.params
-	if len(scope) > 0 {
+	if len(scope) > 0 && len(params.MppxScope) == 0 {
 		params.MppxScope = scope
 	}
 	if cred != nil {

@@ -259,3 +259,21 @@ func TestOversizedBodyRejectedBeforePayment(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 }
+
+func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
+	t.Parallel()
+
+	e := echofw.New()
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	e.GET("/paid/:id", func(c echofw.Context) error { return nil }, ChargeMiddleware(payment, server.ChargeParams{
+		Amount:    "0.50",
+		MppxScope: map[string]string{"route": "custom"},
+	}))
+
+	resp := httptest.NewRecorder()
+	e.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/paid/one?view=full", nil))
+	require.Equal(t, http.StatusPaymentRequired, resp.Code)
+	challenge, err := mpp.ParseChallenge(resp.Header().Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"route": "custom"}, challenge.Request["_mppx_scope"])
+}

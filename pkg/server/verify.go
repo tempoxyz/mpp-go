@@ -78,15 +78,13 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 
 	// Build the challenge from server-side parameters. Used both for
 	// issuing a fresh 402 and for verifying echoed credentials.
-	var opts []mpp.ChallengeOption
-	if expires != "" {
-		opts = append(opts, mpp.WithExpires(expires))
-	}
+	opts := []mpp.ChallengeOption{mpp.WithExpires(expires)}
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
 	if _, reserved := params.Meta["_mpp_nonce"]; reserved {
-		return nil, mpp.ErrBadRequest("_mpp_nonce is reserved for challenge issuance")
+		// Meta is server configuration: a reserved key is a server bug.
+		return nil, errors.New("server: _mpp_nonce is reserved for challenge issuance")
 	}
 	meta := maps.Clone(params.Meta)
 	if params.EnableChallengeNonce {
@@ -119,7 +117,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		opts...,
 	)
 	if err != nil {
-		return nil, mpp.ErrBadRequest(fmt.Sprintf("invalid challenge request: %v", err))
+		return nil, fmt.Errorf("server: invalid challenge request: %w", err)
 	}
 
 	// 1. No authorization header — issue challenge.
@@ -200,17 +198,15 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	}
 	// 7. Check expiry before body-digest validation so expired credentials
 	// consistently return the payment-expired 402 path.
-	if echoed.Expires != "" {
-		expiresTime, err := parseChallengeExpiry(echoed.Expires)
-		if err != nil {
-			return challengeResultError(
-				challenge,
-				mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
-			)
-		}
-		if challengeExpired(expiresTime, time.Now()) {
-			return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
-		}
+	expiresTime, err := parseChallengeExpiry(echoed.Expires)
+	if err != nil {
+		return challengeResultError(
+			challenge,
+			mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
+		)
+	}
+	if challengeExpired(expiresTime, time.Now()) {
+		return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 	}
 	// The nonce is authenticated by the echoed HMAC, not compared with the
 	// fresh challenge. Application metadata must still match exactly.
@@ -219,9 +215,6 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			echoed.ID,
 			"credential opaque metadata does not match this route's requirements",
 		))
-	}
-	if params.Body != nil && echoed.Digest == "" {
-		return &VerifyResult{Challenge: challenge}, nil
 	}
 	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
 		return challengeResultError(challenge, err)

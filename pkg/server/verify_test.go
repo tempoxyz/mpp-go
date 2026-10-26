@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -109,10 +110,12 @@ func TestVerifyOrChallengeRejectsLossyJCSRequest(t *testing.T) {
 	})
 
 	assert.Nil(t, result)
+	// The request is server configuration: report it as an internal error,
+	// not a client 400.
+	require.Error(t, err)
 	var paymentErr *mpp.PaymentError
-	require.ErrorAs(t, err, &paymentErr)
-	assert.Equal(t, http.StatusBadRequest, paymentErr.Status)
-	assert.Contains(t, paymentErr.Detail, "invalid challenge request")
+	assert.False(t, errors.As(err, &paymentErr))
+	assert.Contains(t, err.Error(), "invalid challenge request")
 }
 
 func TestVerifyOrChallengeRejectsLossyEchoedJCSRequest(t *testing.T) {
@@ -337,10 +340,10 @@ func TestVerifyOrChallenge_ReissuesChallengeForLegacyCredentialOnBodyRequest(t *
 		Method:        "tempo",
 		Expires:       challenge.Expires,
 	})
-	if !assert.NoErrorf(t, err,
-		"VerifyOrChallenge() error = %v", err) {
-		return
-	}
+	var paymentErr *mpp.PaymentError
+	require.ErrorAs(t, err, &paymentErr)
+	assert.Equal(t, mpp.ErrorTypeInvalidChallenge, paymentErr.Type)
+	assert.Contains(t, paymentErr.Detail, "missing body digest")
 	if !assert.NotNilf(t, result.Challenge,
 		"expected fresh body-digest challenge, got %#v", result) {
 		return
