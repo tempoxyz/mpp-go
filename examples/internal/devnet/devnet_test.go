@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,8 +28,8 @@ func TestWaitForRPCHonorsContext(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("WaitForRPC() error = %v, want context.DeadlineExceeded", err)
 	}
-	if errors.Unwrap(err) == nil || err.Error() == context.DeadlineExceeded.Error() {
-		t.Fatalf("WaitForRPC() error = %v, want the last RPC error wrapped too", err)
+	if !strings.Contains(err.Error(), "503") {
+		t.Fatalf("WaitForRPC() error = %v, want the last RPC error (503) wrapped too", err)
 	}
 }
 
