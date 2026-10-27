@@ -3,9 +3,11 @@ package chargeserver
 import (
 	"context"
 	"encoding/json"
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,8 +309,14 @@ func TestRelayBoundaryFailuresAreGeneric(t *testing.T) {
 			_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}), nil)
 			var paymentErr *mpp.PaymentError
 			require.ErrorAs(t, err, &paymentErr)
-			assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
-			assert.Empty(t, paymentErr.Details)
+			if tt.broadcast != nil {
+				assert.Equal(t, mpp.ErrorTypePaymentOutcomeUnknown, paymentErr.Type)
+				assert.Equal(t, http.StatusInternalServerError, paymentErr.Status)
+				assert.Equal(t, map[string]any{"code": "settlement_unknown"}, paymentErr.Details)
+			} else {
+				assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
+				assert.Empty(t, paymentErr.Details)
+			}
 		})
 	}
 }
@@ -341,8 +349,9 @@ func TestRelayBroadcastExchangeFailureIsSettlementUnknown(t *testing.T) {
 			_, err := newRelayIntentForTest(t, server.URL).Verify(context.Background(), relayTestCredential(map[string]any{"type": "proof"}), nil)
 			var paymentErr *mpp.PaymentError
 			require.ErrorAs(t, err, &paymentErr)
-			assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
+			assert.Equal(t, mpp.ErrorTypePaymentOutcomeUnknown, paymentErr.Type)
 			assert.Equal(t, map[string]any{"code": "settlement_unknown"}, paymentErr.Details)
+			assert.Equal(t, http.StatusInternalServerError, paymentErr.Status)
 			assert.NotContains(t, paymentErr.Error(), "private relay detail")
 		})
 	}
@@ -468,4 +477,62 @@ func TestNewRelayClientDefaultsToTimeout(t *testing.T) {
 	relay, err = newRelayClient(&RelayConfig{APIKey: relayTestAPIKey, HTTPClient: custom})
 	require.NoError(t, err)
 	assert.Equal(t, time.Second, relay.httpClient.Timeout)
+}
+
+// The mock relay settles once but loses its response. Even with multiple
+// currencies available, the automatic transport must not create another payment.
+func TestRelayUnknownSettlementStopsAutomaticPayment(t *testing.T) {
+	for _, body := range []string{
+		"lost response",
+		`{"success":true}`,
+		`{"success":true,"receipt":{"method":"tempo","reference":"0xabc","timestamp":"invalid"}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			var settlements atomic.Int32
+			relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/mpp/validate" {
+					_, _ = w.Write([]byte(`{"success":true}`))
+					return
+				}
+				settlements.Add(1)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer relay.Close()
+			method, err := New(Config{Store: tempo.NewMemoryStore(), ChainID: 42431,
+				Currencies: []string{ousdAddress, usdceAddress}, Recipient: testRecipient,
+				Relay: &RelayConfig{APIKey: relayTestAPIKey, APIBaseURL: relay.URL}})
+			require.NoError(t, err)
+			payment := newTestServer(t, method, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+			var served atomic.Int32
+			endpoint := httptest.NewServer(mppserver.ChargeMiddleware(payment, mppserver.ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				served.Add(1)
+				w.WriteHeader(http.StatusOK)
+			})))
+			defer endpoint.Close()
+			payer := &relayCountingPayer{}
+			httpClient, err := client.NewHTTPClient([]client.Method{payer})
+			require.NoError(t, err)
+			response, err := httpClient.Get(endpoint.URL)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+			assert.Empty(t, response.Header.Values(mpp.HeaderWWWAuthenticate))
+			var problem mpp.PaymentError
+			require.NoError(t, json.NewDecoder(response.Body).Decode(&problem))
+			assert.Equal(t, mpp.ErrorTypePaymentOutcomeUnknown, problem.Type)
+			assert.Equal(t, "settlement_unknown", problem.Details["code"])
+			assert.EqualValues(t, 1, payer.calls.Load())
+			assert.EqualValues(t, 1, settlements.Load())
+			assert.Zero(t, served.Load())
+		})
+	}
+}
+
+type relayCountingPayer struct{ calls atomic.Int32 }
+
+func (*relayCountingPayer) Name() string   { return "tempo" }
+func (*relayCountingPayer) Intent() string { return "charge" }
+func (p *relayCountingPayer) CreateCredential(_ context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
+	p.calls.Add(1)
+	return challenge.NewCredential(map[string]any{"type": "transaction", "signature": "0x1234"}), nil
 }

@@ -189,12 +189,19 @@ func (r *relayClient) broadcast(ctx context.Context, credential *mpp.Credential)
 		// The relay may have settled the payment before the exchange failed.
 		// Without an idempotency key a retry cannot recover the receipt, so tell
 		// the app the outcome is unknown and must be reconciled separately.
-		return nil, relaySettlementUnknown()
+		return nil, relaySettlementUnknown(credential.Challenge.ID)
 	}
-	if !broadcast.Success || broadcast.Receipt == nil {
+	if !broadcast.Success {
 		return nil, relayFailure(credential, broadcast.Error)
 	}
-	return parseRelayReceipt(broadcast.Receipt)
+	if broadcast.Receipt == nil {
+		return nil, relaySettlementUnknown(credential.Challenge.ID)
+	}
+	receipt, err := parseRelayReceipt(broadcast.Receipt)
+	if err != nil {
+		return nil, relaySettlementUnknown(credential.Challenge.ID)
+	}
+	return receipt, nil
 }
 
 func marshalRelayInput(credential *mpp.Credential) ([]byte, error) {
@@ -288,8 +295,9 @@ func relayFailure(credential *mpp.Credential, relayErr *relayError) error {
 // the relay exchange failed after the request may have been sent.
 const relaySettlementUnknownCode = "settlement_unknown"
 
-func relaySettlementUnknown() error {
-	err := mpp.ErrVerificationFailed("payment verification failed")
+func relaySettlementUnknown(challengeID string) error {
+	err := mpp.ErrPaymentOutcomeUnknown(challengeID)
+	err.Status = http.StatusInternalServerError
 	err.Details = map[string]any{"code": relaySettlementUnknownCode}
 	return err
 }
