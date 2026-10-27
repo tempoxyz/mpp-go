@@ -311,7 +311,7 @@ func TestRelayBoundaryFailuresAreGeneric(t *testing.T) {
 			require.ErrorAs(t, err, &paymentErr)
 			if tt.broadcast != nil {
 				assert.Equal(t, mpp.ErrorTypePaymentOutcomeUnknown, paymentErr.Type)
-				assert.Equal(t, http.StatusInternalServerError, paymentErr.Status)
+				assert.Equal(t, http.StatusPaymentRequired, paymentErr.Status)
 				assert.Equal(t, map[string]any{"code": "settlement_unknown"}, paymentErr.Details)
 			} else {
 				assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
@@ -351,7 +351,7 @@ func TestRelayBroadcastExchangeFailureIsSettlementUnknown(t *testing.T) {
 			require.ErrorAs(t, err, &paymentErr)
 			assert.Equal(t, mpp.ErrorTypePaymentOutcomeUnknown, paymentErr.Type)
 			assert.Equal(t, map[string]any{"code": "settlement_unknown"}, paymentErr.Details)
-			assert.Equal(t, http.StatusInternalServerError, paymentErr.Status)
+			assert.Equal(t, http.StatusPaymentRequired, paymentErr.Status)
 			assert.NotContains(t, paymentErr.Error(), "private relay detail")
 		})
 	}
@@ -484,6 +484,10 @@ func TestNewRelayClientDefaultsToTimeout(t *testing.T) {
 func TestRelayUnknownSettlementStopsAutomaticPayment(t *testing.T) {
 	for _, body := range []string{
 		"lost response",
+		`{"success":false}`,
+		`{"success":false,"error":{"code":"broadcast_failed"}}`,
+		`{"success":false,"error":{"code":"unknown"}}`,
+		`{"success":false,"error":{"code":"unrecognized"}}`,
 		`{"success":true}`,
 		`{"success":true,"receipt":{"method":"tempo","reference":"0xabc","timestamp":"invalid"}}`,
 	} {
@@ -515,7 +519,7 @@ func TestRelayUnknownSettlementStopsAutomaticPayment(t *testing.T) {
 			response, err := httpClient.Get(endpoint.URL)
 			require.NoError(t, err)
 			defer response.Body.Close()
-			assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+			assert.Equal(t, http.StatusPaymentRequired, response.StatusCode)
 			assert.Empty(t, response.Header.Values(mpp.HeaderWWWAuthenticate))
 			var problem mpp.PaymentError
 			require.NoError(t, json.NewDecoder(response.Body).Decode(&problem))

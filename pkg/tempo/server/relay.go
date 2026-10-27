@@ -192,7 +192,16 @@ func (r *relayClient) broadcast(ctx context.Context, credential *mpp.Credential)
 		return nil, relaySettlementUnknown(credential.Challenge.ID)
 	}
 	if !broadcast.Success {
-		return nil, relayFailure(credential, broadcast.Error)
+		if broadcast.Error != nil {
+			switch broadcast.Error.Code {
+			case RelayErrorAlreadyUsed, RelayErrorExpired, RelayErrorInvalidPayment,
+				RelayErrorInsufficientFunds, RelayErrorPolicyDenied, RelayErrorScreenRejected,
+				RelayErrorSimulationFailed, RelayErrorTemporarilyUnavailable, RelayErrorUnsupported:
+				return nil, relayFailure(credential, broadcast.Error)
+			}
+		}
+		// Confirmation failures and unrecognized errors do not prove non-settlement.
+		return nil, relaySettlementUnknown(credential.Challenge.ID)
 	}
 	if broadcast.Receipt == nil {
 		return nil, relaySettlementUnknown(credential.Challenge.ID)
@@ -297,7 +306,6 @@ const relaySettlementUnknownCode = "settlement_unknown"
 
 func relaySettlementUnknown(challengeID string) error {
 	err := mpp.ErrPaymentOutcomeUnknown(challengeID)
-	err.Status = http.StatusInternalServerError
 	err.Details = map[string]any{"code": relaySettlementUnknownCode}
 	return err
 }
