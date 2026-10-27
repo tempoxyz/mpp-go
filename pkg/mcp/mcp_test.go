@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -30,8 +31,9 @@ const (
 // testMethod settles a "test" charge when the Credential's token is "valid"
 // and records the currency of every verification attempt.
 type testMethod struct {
-	mu       sync.Mutex
-	payments []string
+	mu              sync.Mutex
+	payments        []string
+	verificationErr error
 }
 
 func (m *testMethod) Name() string { return "test" }
@@ -43,6 +45,9 @@ func (m *testMethod) Intents() map[string]server.Intent {
 			m.mu.Lock()
 			m.payments = append(m.payments, currency)
 			m.mu.Unlock()
+			if m.verificationErr != nil {
+				return nil, m.verificationErr
+			}
 			if credential.Payload["token"] != "valid" {
 				return nil, mpp.ErrVerificationFailed("Payment was declined")
 			}
@@ -500,4 +505,25 @@ func (otherClientMethod) Name() string   { return "other" }
 func (otherClientMethod) Intent() string { return "charge" }
 func (otherClientMethod) CreateCredential(context.Context, *mpp.Challenge) (*mpp.Credential, error) {
 	return nil, errors.New("unexpected payment")
+}
+
+func TestUnknownSettlementStopsAutomaticMCPPayment(t *testing.T) {
+	for _, status := range []int{402, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			unknown := mpp.ErrPaymentOutcomeUnknown("settled-challenge")
+			unknown.Status = status
+			method := &testMethod{verificationErr: fmt.Errorf("relay: %w", unknown)}
+			payer := &testClientMethod{token: "valid"}
+			c := mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{payer}})
+			session := connect(t, newServer(chargeHandler(newPayment(t, method))), c)
+			result, err := callPremium(context.Background(), session, nil)
+			require.Nil(t, result)
+			_, data := paymentData(t, err)
+			assert.Equal(t, status, data.HTTPStatus)
+			assert.Empty(t, data.Challenges)
+			assert.Equal(t, string(mpp.ErrorTypePaymentOutcomeUnknown), data.Problem["type"])
+			assert.Len(t, payer.credentials(), 1)
+			assert.Len(t, method.recorded(), 1, "an uncertain settlement must not be resubmitted")
+		})
+	}
 }

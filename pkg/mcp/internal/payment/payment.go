@@ -134,6 +134,9 @@ func outcome(result *server.ChargeResult, err error) (*Outcome, error) {
 // the one it echoed or else the first, as mppx does, so the client does not
 // pay another offer for the same failure.
 func rejected(result *server.ChargeResult, err error) *Outcome {
+	if server.IsPaymentOutcomeUnknown(err) {
+		return &Outcome{Challenged: true, Err: err}
+	}
 	return &Outcome{Challenged: true, Challenges: []*mpp.Challenge{result.Challenge}, Err: err}
 }
 
