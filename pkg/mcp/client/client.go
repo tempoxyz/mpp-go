@@ -52,6 +52,14 @@ type Config struct {
 	OnPaymentRequired OnPaymentRequired
 	// OrderChallenges, when set, filters and sorts payable Challenges.
 	OrderChallenges OrderChallenges
+	// ValidateTempoProofSession must authorize the actual session for a zero-amount
+	// Tempo proof's realm before signing. Nil refuses all such proofs, even if
+	// the payment method trusts the realm. Bind sessions to server identities
+	// using locally configured, authenticated transports; never trust a realm
+	// or server name supplied by the peer. Return an error to refuse.
+	// This check also runs before cached proof reuse and cannot be bypassed by
+	// WithOnPaymentRequired. The method's OriginValidator still applies.
+	ValidateTempoProofSession func(context.Context, *mcp.ClientSession, string) error
 	// PaymentPreferences ranks Challenges by "method/intent" q-values.
 	PaymentPreferences mppclient.PaymentPreferences
 }
@@ -137,7 +145,7 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, payErr := config.pay(ctx, params, data, credentials, cause)
+			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause)
 			if payErr != nil {
 				return nil, payErr
 			}
@@ -156,6 +164,7 @@ type credentialKey struct {
 // with the Credential in their metadata.
 func (config *Config) pay(
 	ctx context.Context,
+	session *mcp.ClientSession,
 	original *mcp.CallToolParams,
 	data *mpp.MCPPaymentRequiredData,
 	credentials map[credentialKey]*mpp.Credential,
@@ -196,7 +205,7 @@ func (config *Config) pay(
 	var rejected error
 	payable := candidates[:0:0]
 	for _, candidate := range candidates {
-		if err := config.checkOrigin(candidate); err != nil {
+		if err := config.checkOrigin(ctx, session, candidate); err != nil {
 			rejected = err
 			continue
 		}
@@ -252,13 +261,22 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 	return &params
 }
 
-// checkOrigin asks the candidate's method, when it implements
+// checkOrigin first authorizes proof requests for the actual session, then
+// asks the candidate's method, when it implements
 // client.OriginValidator, whether it may pay a Challenge from a server without
 // an origin. Other methods keep the built-in rule: a zero-amount tempo/charge
 // Challenge is refused, since an MCP server has no origin that could own its
 // realm.
-func (config *Config) checkOrigin(candidate mppclient.ChallengeCandidate) error {
+func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSession, candidate mppclient.ChallengeCandidate) error {
 	challenge := candidate.Challenge
+	if tempoproof.IsProofChallenge(challenge) {
+		if session == nil || config.ValidateTempoProofSession == nil {
+			return tempoproof.RealmError(challenge.Realm, "", "authorize this session with Config.ValidateTempoProofSession")
+		}
+		if err := config.ValidateTempoProofSession(ctx, session, challenge.Realm); err != nil {
+			return err
+		}
+	}
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
 		return validator.ValidateOrigin(nil, challenge)
 	}

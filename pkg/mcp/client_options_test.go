@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -63,14 +64,60 @@ func TestMCPClientDefersToOriginValidator(t *testing.T) {
 	session := connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{trusted}}))
 	_, err := callPremium(context.Background(), session, nil)
 	require.Error(t, err)
-	assert.Len(t, trusted.credentials(), 1, "the validator trusts the realm, so the proof is created")
-	require.NotEmpty(t, trusted.origins)
-	assert.Nil(t, trusted.origins[0], "MCP has no origin")
+	assert.Empty(t, trusted.credentials(), "realm trust alone must not authorize an MCP session")
+	assert.Empty(t, trusted.origins)
 
 	refused := &validatingProofMethod{trusted: "other.example"}
-	session = connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{refused}}))
+	session = connect(t, zeroTempoChallengeServer(t, "victim.example"), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{refused}, ValidateTempoProofSession: func(context.Context, *mcp.ClientSession, string) error { return nil }}))
 	_, err = callPremium(context.Background(), session, nil)
 	require.ErrorContains(t, err, "validator refused realm")
 	assert.Empty(t, refused.credentials())
 
+}
+
+func TestProofTrustIsScopedToSession(t *testing.T) {
+	payer := &validatingProofMethod{trusted: "victim.example"}
+	c := newClient()
+	trusted := connect(t, zeroTempoChallengeServer(t, "victim.example"), c)
+	untrusted := connect(t, zeroTempoChallengeServer(t, "victim.example"), c)
+	mcpclient.Wrap(c, mcpclient.Config{
+		Methods: []client.Method{payer},
+		ValidateTempoProofSession: func(_ context.Context, session *mcp.ClientSession, realm string) error {
+			if session != trusted || realm != "victim.example" {
+				return errors.New("untrusted proof session")
+			}
+			return nil
+		},
+	})
+	// A per-call payment approval override must not bypass session trust.
+	ctx := mcpclient.WithOnPaymentRequired(context.Background(), nil)
+	_, err := callPremium(ctx, untrusted, nil)
+	require.ErrorContains(t, err, "untrusted proof session")
+	assert.Empty(t, payer.credentials())
+	_, err = callPremium(ctx, trusted, nil)
+	require.Error(t, err) // the mock keeps offering its challenge
+	assert.Len(t, payer.credentials(), 1)
+	_, err = callPremium(ctx, untrusted, nil)
+	require.ErrorContains(t, err, "untrusted proof session")
+	assert.Len(t, payer.credentials(), 1)
+}
+
+func TestCachedProofRechecksSessionTrust(t *testing.T) {
+	payer := &validatingProofMethod{trusted: "victim.example"}
+	checks := 0
+	c := mcpclient.Wrap(newClient(), mcpclient.Config{
+		Methods: []client.Method{payer},
+		ValidateTempoProofSession: func(context.Context, *mcp.ClientSession, string) error {
+			checks++
+			if checks > 1 {
+				return errors.New("session trust revoked")
+			}
+			return nil
+		},
+	})
+	session := connect(t, zeroTempoChallengeServer(t, "victim.example"), c)
+	_, err := callPremium(context.Background(), session, nil)
+	require.ErrorContains(t, err, "session trust revoked")
+	assert.Equal(t, 2, checks)
+	assert.Len(t, payer.credentials(), 1)
 }

@@ -20,4 +20,10 @@
 // yourself, without Wrap's per-client registry:
 //
 //	c.AddSendingMiddleware(mcpclient.Middleware(mcpclient.Config{Methods: methods}))
+//
+// Zero-amount Tempo proofs additionally require Config.ValidateTempoProofSession.
+// Register sessions only after connecting through a locally trusted transport;
+// check the session pointer and its allowed realm in that callback. A peer's
+// advertised server name or challenge realm is not an authenticated identity.
+// A per-call WithOnPaymentRequired override does not bypass this check.
 package client
