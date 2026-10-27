@@ -51,6 +51,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NOTES: ${{ steps.changelog.outputs.notes }}
         run: |
+          # The changelogs action usually creates the release when it pushes the
+          # tag; only create one here if it does not exist yet.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; skipping."
+            exit 0
+          fi
           notes_file="$(mktemp)"
           printf '%s\n' "$NOTES" > "$notes_file"
-          gh release create "$GITHUB_REF_NAME" --notes-file "$notes_file"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file "$notes_file"
