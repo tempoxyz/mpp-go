@@ -3,7 +3,6 @@ package chargeserver
 import (
 	"context"
 	"encoding/json"
-	"github.com/tempoxyz/mpp-go/pkg/client"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
