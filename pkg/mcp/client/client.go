@@ -60,11 +60,13 @@ type Config struct {
 	// zero-amount Tempo proof's realm before a proof is signed or reused;
 	// return an error to refuse. Most clients leave it nil: a proof is then
 	// bound to the session's transport, so only a session the client connected
-	// over mcp.StreamableClientTransport, to an endpoint whose origin the
-	// method trusts for the realm (by default an HTTPS endpoint on the default
-	// port whose hostname is the realm), gets one, whichever session relays the
-	// challenge. Set it for sessions without such an origin (stdio, in-memory
-	// or wrapped transports), which are otherwise refused proofs; compare the
+	// over mcp.StreamableClientTransport with HTTPClient's redirect guard, to
+	// an endpoint whose origin the method trusts for the realm (by default an
+	// HTTPS endpoint on the default port whose hostname is the realm), gets
+	// one, whichever session relays the challenge. Set it for sessions without
+	// an endpoint (stdio, in-memory or wrapped transports), which are otherwise
+	// refused proofs. It cannot authorize a Streamable HTTP session whose
+	// client follows cross-origin redirects, which is always refused; compare the
 	// session pointer with sessions you connected yourself, never with a name
 	// or realm the peer sent. WithOnPaymentRequired does not bypass it, and the
 	// method's OriginValidator still runs with the session's origin.
@@ -303,14 +305,19 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 	// stdio) never matches a Streamable HTTP session.
 	origin, redirectSafe := sessionEndpoint(session)
 	if tempoproof.IsProofChallenge(challenge) {
-		if config.ValidateTempoProofSession != nil {
+		switch {
+		case origin != nil && !redirectSafe:
+			// A redirect could carry the proof to another server, whatever the
+			// hook says, so the hook only vouches for origin-less sessions.
+			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport{HTTPClient: mcpclient.HTTPClient(nil)}")
+		case config.ValidateTempoProofSession != nil:
 			if session == nil {
 				return tempoproof.RealmError(challenge.Realm, "", "the request has no MCP session")
 			}
 			if err := config.ValidateTempoProofSession(ctx, session, challenge.Realm); err != nil {
 				return err
 			}
-		} else if origin == nil || !redirectSafe {
+		case origin == nil:
 			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport{HTTPClient: mcpclient.HTTPClient(nil)}, or authorize the session with Config.ValidateTempoProofSession")
 		}
 	}

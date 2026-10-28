@@ -35,7 +35,8 @@
 //		HTTPClient: mcpclient.HTTPClient(nil),
 //	}, nil)
 //
-// Sessions without an endpoint origin (stdio, in-memory) or whose HTTP client
-// follows cross-origin redirects (http.DefaultClient does) get proofs only
-// when Config.ValidateTempoProofSession authorizes them.
+// Sessions without an endpoint (stdio, in-memory) get proofs only when
+// Config.ValidateTempoProofSession authorizes them. A Streamable HTTP session
+// whose client follows cross-origin redirects (http.DefaultClient does) never
+// gets one, since a redirect could deliver it to another server.
 package client

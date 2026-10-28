@@ -367,6 +367,13 @@ func TestOriginlessTrustedRealmIgnoresRedirectFollowingSession(t *testing.T) {
 	require.ErrorContains(t, err, "refusing to sign Tempo proof")
 	assert.Empty(t, payer.credentials())
 
+	// Nor does the hook let a redirect-following session sign for the realm
+	// its endpoint owns: a redirect could deliver the proof elsewhere.
+	owner := connectHTTPSWith(t, zeroTempoChallengeServer(t, "example.com"), c, "https://example.com/mcp", plain)
+	_, err = callPremium(context.Background(), owner, nil)
+	require.ErrorContains(t, err, "mcpclient.HTTPClient")
+	assert.Empty(t, payer.credentials())
+
 	// The same realm over stdio-like transports is still trusted.
 	local := connect(t, zeroTempoChallengeServer(t, "stdio.example"), c)
 	_, err = callPremium(context.Background(), local, nil)
