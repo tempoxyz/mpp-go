@@ -60,7 +60,7 @@ type Config struct {
 	// zero-amount Tempo proof's realm before a proof is signed or reused;
 	// return an error to refuse. Most clients leave it nil: a proof is then
 	// bound to the session's transport, so only a session the client connected
-	// over mcp.StreamableClientTransport with HTTPClient's redirect guard, to
+	// with Connect (a StreamableClientTransport with HTTPClient's redirect guard), to
 	// an endpoint whose origin the method trusts for the realm (by default an
 	// HTTPS endpoint on the default port whose hostname is the realm), gets
 	// one, whichever session relays the challenge. Set it for sessions without
@@ -309,7 +309,7 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 		case origin != nil && !redirectSafe:
 			// A redirect could carry the proof to another server, whatever the
 			// hook says, so the hook only vouches for origin-less sessions.
-			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport{HTTPClient: mcpclient.HTTPClient(nil)}")
+			return tempoproof.RealmError(challenge.Realm, "", "connect with mcpclient.Connect, or set the transport's HTTPClient to mcpclient.HTTPClient(nil)")
 		case config.ValidateTempoProofSession != nil:
 			if session == nil {
 				return tempoproof.RealmError(challenge.Realm, "", "the request has no MCP session")
@@ -318,7 +318,7 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 				return err
 			}
 		case origin == nil:
-			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport{HTTPClient: mcpclient.HTTPClient(nil)}, or authorize the session with Config.ValidateTempoProofSession")
+			return tempoproof.RealmError(challenge.Realm, "", "connect with mcpclient.Connect (or set the transport's HTTPClient to mcpclient.HTTPClient(nil)), or authorize the session with Config.ValidateTempoProofSession")
 		}
 	}
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
@@ -419,10 +419,28 @@ func Receipt(result *mcp.CallToolResult) (*mpp.MCPReceipt, error) {
 // mcpPackage is the import path of the MCP Go SDK's mcp package.
 var mcpPackage = reflect.TypeFor[mcp.ClientSession]().PkgPath()
 
+// Connect connects c to the Streamable HTTP endpoint of transport, like
+// c.Connect, with the transport's HTTPClient (http.DefaultClient when nil)
+// wrapped by HTTPClient so it refuses cross-origin redirects. Sessions
+// connected this way get zero-amount Tempo proofs for realms their endpoint's
+// origin is trusted for, with no other configuration. transport is copied,
+// not modified.
+func Connect(ctx context.Context, c *mcp.Client, transport *mcp.StreamableClientTransport, opts *mcp.ClientSessionOptions) (*mcp.ClientSession, error) {
+	if transport == nil {
+		return nil, errors.New("mpp: Connect needs a StreamableClientTransport")
+	}
+	safe := *transport
+	if !refusesCrossOriginRedirects(safe.HTTPClient) {
+		safe.HTTPClient = HTTPClient(safe.HTTPClient)
+	}
+	return c.Connect(ctx, &safe, opts)
+}
+
 // HTTPClient returns a copy of base (http.DefaultClient when nil) whose
 // CheckRedirect refuses every redirect away from the origin of the request it
 // follows, after base's own CheckRedirect (or net/http's 10-redirect limit).
-// Give it to mcp.StreamableClientTransport as HTTPClient: zero-amount Tempo
+// Connect sets it for you; otherwise give it to mcp.StreamableClientTransport
+// as HTTPClient: zero-amount Tempo
 // proofs are signed only for Streamable HTTP sessions whose client refuses
 // cross-origin redirects, since a redirect would deliver the proof to another
 // server than the endpoint whose origin vouched for the realm.

@@ -158,11 +158,29 @@ func newRealProofMethod(t *testing.T, trusted ...chargeclient.TrustedProofRealm)
 // is accepted for, whatever host it names.
 func connectHTTPS(t *testing.T, srv *mcp.Server, c *mcp.Client, endpoint string) *mcp.ClientSession {
 	t.Helper()
-	return connectHTTPSWith(t, srv, c, endpoint, mcpclient.HTTPClient)
+	t.Helper()
+	_, transport := httpsTransport(t, srv, endpoint, func(hc *http.Client) *http.Client { return hc })
+	// mcpclient.Connect makes the plain test client redirect-safe.
+	session, err := mcpclient.Connect(context.Background(), c, transport, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	return session
 }
 
-// connectHTTPSWith is connectHTTPS with the HTTP client client builds.
+// connectHTTPSWith is connectHTTPS with c.Connect and the HTTP client
+// client builds.
 func connectHTTPSWith(t *testing.T, srv *mcp.Server, c *mcp.Client, endpoint string, client func(*http.Client) *http.Client) *mcp.ClientSession {
+	t.Helper()
+	_, transport := httpsTransport(t, srv, endpoint, client)
+	session, err := c.Connect(context.Background(), transport, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// httpsTransport serves srv over TLS and returns a transport that reaches it
+// at endpoint, with the HTTP client client builds.
+func httpsTransport(t *testing.T, srv *mcp.Server, endpoint string, client func(*http.Client) *http.Client) (*httptest.Server, *mcp.StreamableClientTransport) {
 	t.Helper()
 	// The test server listens on localhost but is reached under other host names.
 	ts := httptest.NewTLSServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true}))
@@ -173,14 +191,11 @@ func connectHTTPSWith(t *testing.T, srv *mcp.Server, c *mcp.Client, endpoint str
 	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
-	session, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
+	return ts, &mcp.StreamableClientTransport{
 		Endpoint:   endpoint,
 		HTTPClient: client(&http.Client{Transport: transport}),
 		MaxRetries: -1,
-	}, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = session.Close() })
-	return session
+	}
 }
 
 // E11: a shared client signs a realm's proof only for the session connected
@@ -379,4 +394,18 @@ func TestOriginlessTrustedRealmIgnoresRedirectFollowingSession(t *testing.T) {
 	_, err = callPremium(context.Background(), local, nil)
 	require.Error(t, err)
 	assert.Len(t, payer.credentials(), 1)
+}
+
+func TestConnectKeepsTransportAndAddsRedirectGuard(t *testing.T) {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "s", Version: "1.0.0"}, nil)
+	_, transport := httpsTransport(t, srv, "https://example.com/mcp", func(hc *http.Client) *http.Client { return hc })
+	base := transport.HTTPClient
+	session, err := mcpclient.Connect(context.Background(), newClient(), transport, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	assert.Same(t, base, transport.HTTPClient, "Connect must not modify the transport")
+	assert.Nil(t, base.CheckRedirect)
+
+	_, err = mcpclient.Connect(context.Background(), newClient(), nil, nil)
+	require.Error(t, err)
 }
