@@ -21,12 +21,18 @@ func TestSessionOriginReadsStreamableEndpoint(t *testing.T) {
 	t.Cleanup(ts.Close)
 	c := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "1.0.0"}, nil)
 
-	session, err := c.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL + "/mcp"}, nil)
+	session, err := c.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL + "/mcp", HTTPClient: HTTPClient(nil)}, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close() })
 	origin := sessionOrigin(session)
 	require.NotNil(t, origin)
 	assert.Equal(t, ts.URL+"/mcp", origin.String())
+
+	// The default client follows cross-origin redirects.
+	following, err := c.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL + "/mcp"}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = following.Close() })
+	assert.Nil(t, sessionOrigin(following))
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	serverSession, err := srv.Connect(ctx, serverTransport, nil)

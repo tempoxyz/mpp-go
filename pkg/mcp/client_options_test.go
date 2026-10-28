@@ -157,6 +157,12 @@ func newRealProofMethod(t *testing.T, trusted ...chargeclient.TrustedProofRealm)
 // is accepted for, whatever host it names.
 func connectHTTPS(t *testing.T, srv *mcp.Server, c *mcp.Client, endpoint string) *mcp.ClientSession {
 	t.Helper()
+	return connectHTTPSWith(t, srv, c, endpoint, mcpclient.HTTPClient)
+}
+
+// connectHTTPSWith is connectHTTPS with the HTTP client client builds.
+func connectHTTPSWith(t *testing.T, srv *mcp.Server, c *mcp.Client, endpoint string, client func(*http.Client) *http.Client) *mcp.ClientSession {
+	t.Helper()
 	// The test server listens on localhost but is reached under other host names.
 	ts := httptest.NewTLSServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{DisableLocalhostProtection: true}))
 	t.Cleanup(ts.Close)
@@ -168,7 +174,7 @@ func connectHTTPS(t *testing.T, srv *mcp.Server, c *mcp.Client, endpoint string)
 	}
 	session, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint:   endpoint,
-		HTTPClient: &http.Client{Transport: transport},
+		HTTPClient: client(&http.Client{Transport: transport}),
 		MaxRetries: -1,
 	}, nil)
 	require.NoError(t, err)
@@ -285,4 +291,52 @@ func TestChangedAmountReofferDoesNotReuseCachedProof(t *testing.T) {
 	for _, amount := range submitted[1:] {
 		assert.Equal(t, "1", amount, "the zero-amount proof was resubmitted for a changed challenge")
 	}
+}
+
+// A proof sent through a client that follows cross-origin redirects could
+// land on another server than the endpoint, so such a session gets none.
+func TestProofRefusedWhenSessionFollowsCrossOriginRedirects(t *testing.T) {
+	payer := newRealProofMethod(t)
+	c := mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{payer}})
+	following := []func(*http.Client) *http.Client{
+		func(hc *http.Client) *http.Client { return hc },
+		func(hc *http.Client) *http.Client {
+			hc.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
+			return hc
+		},
+	}
+	for _, hc := range following {
+		session := connectHTTPSWith(t, zeroTempoChallengeServer(t, "example.com"), c, "https://example.com/mcp", hc)
+		_, err := callPremium(context.Background(), session, nil)
+		require.ErrorContains(t, err, "mcpclient.HTTPClient")
+	}
+	assert.Empty(t, payer.credentials())
+}
+
+func TestHTTPClientRefusesCrossOriginRedirects(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }))
+	t.Cleanup(other.Close)
+	var same *httptest.Server
+	same = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/away":
+			http.Redirect(w, r, other.URL, http.StatusTemporaryRedirect)
+		case "/here":
+			http.Redirect(w, r, same.URL+"/done", http.StatusTemporaryRedirect)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(same.Close)
+	hc := mcpclient.HTTPClient(nil)
+	resp, err := hc.Post(same.URL+"/away", "application/json", nil)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	require.ErrorContains(t, err, "refusing cross-origin redirect")
+	resp, err = hc.Post(same.URL+"/here", "application/json", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Nil(t, http.DefaultClient.CheckRedirect, "HTTPClient must not modify its base")
 }

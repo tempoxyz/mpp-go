@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"net/url"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 	"weak"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -306,7 +308,7 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 				return err
 			}
 		} else if origin == nil {
-			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport, or authorize the session with Config.ValidateTempoProofSession")
+			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport{HTTPClient: mcpclient.HTTPClient(nil)}, or authorize the session with Config.ValidateTempoProofSession")
 		}
 	}
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
@@ -407,10 +409,66 @@ func Receipt(result *mcp.CallToolResult) (*mpp.MCPReceipt, error) {
 // mcpPackage is the import path of the MCP Go SDK's mcp package.
 var mcpPackage = reflect.TypeFor[mcp.ClientSession]().PkgPath()
 
+// HTTPClient returns a copy of base (http.DefaultClient when nil) whose
+// CheckRedirect refuses every redirect away from the origin of the request it
+// follows, after base's own CheckRedirect (or net/http's 10-redirect limit).
+// Give it to mcp.StreamableClientTransport as HTTPClient: zero-amount Tempo
+// proofs are signed only for Streamable HTTP sessions whose client refuses
+// cross-origin redirects, since a redirect would deliver the proof to another
+// server than the endpoint whose origin vouched for the realm.
+func HTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	c := *base
+	prior := base.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if prior != nil {
+			if err := prior(req, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if len(via) > 0 && tempoproof.Origin(req.URL) != tempoproof.Origin(via[0].URL) {
+			return fmt.Errorf("mpp: refusing cross-origin redirect from %q to %q", tempoproof.Origin(via[0].URL), tempoproof.Origin(req.URL))
+		}
+		return nil
+	}
+	return &c
+}
+
+// redirectProbeURL is the cross-origin target refusesCrossOriginRedirects
+// offers a client's CheckRedirect; nothing is sent to it.
+const redirectProbeURL = "https://mpp-redirect-probe.invalid/"
+
+// refusesCrossOriginRedirects reports whether c refuses a redirect from
+// endpoint to another origin, by asking its CheckRedirect about one. A nil
+// client or hook follows redirects (net/http's default), so it does not.
+func refusesCrossOriginRedirects(c *http.Client, endpoint *url.URL) (refuses bool) {
+	if c == nil || c.CheckRedirect == nil {
+		return false
+	}
+	probe, err := url.Parse(redirectProbeURL)
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			refuses = false
+		}
+	}()
+	via := []*http.Request{{Method: http.MethodPost, URL: endpoint, Host: endpoint.Host, Header: http.Header{}}}
+	req := &http.Request{Method: http.MethodPost, URL: probe, Host: probe.Host, Header: http.Header{}}
+	return c.CheckRedirect(req, via) != nil
+}
+
 // sessionOrigin returns the endpoint URL of the mcp.StreamableClientTransport
 // session was connected with, or nil when it has none: other transports
-// (stdio, in-memory, SSE, a wrapped transport), a nil session, or an SDK
-// version whose layout this does not recognize, so it fails closed.
+// (stdio, in-memory, SSE, a wrapped transport), a transport whose HTTP client
+// follows cross-origin redirects (such as http.DefaultClient; use HTTPClient),
+// a nil session, or an SDK version whose layout this does not recognize, so it
+// fails closed.
 //
 // The endpoint is what this client configured and dialed, not anything the
 // server sent, so it identifies the server the way a request URL does over
@@ -437,6 +495,18 @@ func sessionOrigin(session *mcp.ClientSession) *url.URL {
 	}
 	u, err := url.Parse(endpoint.String())
 	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil
+	}
+	// The connection sends with this client, http.DefaultClient when nil.
+	field := conn.Elem().FieldByName("client")
+	if !field.IsValid() || field.Type() != reflect.TypeFor[*http.Client]() || !field.CanAddr() {
+		return nil
+	}
+	c := *(**http.Client)(unsafe.Pointer(field.UnsafeAddr()))
+	if c == nil {
+		c = http.DefaultClient
+	}
+	if !refusesCrossOriginRedirects(c, u) {
 		return nil
 	}
 	return u

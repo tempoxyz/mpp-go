@@ -24,11 +24,18 @@
 // A zero-amount Tempo proof authenticates the payer at the challenge realm,
 // so the client binds it to the session that received the challenge: it
 // signs one only for a session connected over mcp.StreamableClientTransport
-// whose endpoint origin the payment method trusts for that realm (by default
-// an HTTPS endpoint on the default port whose hostname is the realm; the
-// Tempo method's Config.TrustedProofRealms adds others by origin). No
-// configuration is needed, and a server cannot relay another server's
-// challenge through a shared client. Sessions without an endpoint origin
-// (stdio, in-memory) get proofs only when Config.ValidateTempoProofSession
-// authorizes them.
+// with an HTTPClient that refuses cross-origin redirects (HTTPClient returns
+// one) and whose endpoint origin the payment method trusts for that realm (by
+// default an HTTPS endpoint on the default port whose hostname is the realm; the
+// Tempo method's Config.TrustedProofRealms adds others by origin). A server
+// cannot relay another server's challenge through a shared client:
+//
+//	session, err := c.Connect(ctx, &mcp.StreamableClientTransport{
+//		Endpoint:   "https://service.example/mcp",
+//		HTTPClient: mcpclient.HTTPClient(nil),
+//	}, nil)
+//
+// Sessions without an endpoint origin (stdio, in-memory) or whose HTTP client
+// follows cross-origin redirects (http.DefaultClient does) get proofs only
+// when Config.ValidateTempoProofSession authorizes them.
 package client
