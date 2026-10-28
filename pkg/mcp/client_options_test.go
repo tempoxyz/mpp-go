@@ -409,3 +409,30 @@ func TestConnectKeepsTransportAndAddsRedirectGuard(t *testing.T) {
 	_, err = mcpclient.Connect(context.Background(), newClient(), nil, nil)
 	require.Error(t, err)
 }
+
+// A method that validates origins sees no origin for a session whose client
+// follows cross-origin redirects, whatever the challenge, and the endpoint
+// for one connected with mcpclient.Connect.
+func TestOriginValidatorSeesEndpointOnlyWhenRedirectSafe(t *testing.T) {
+	challenge := mpptest.NewChallenge(secretKey, "example.com", "tempo", "charge", map[string]any{"amount": "1", "currency": "0x20c0"}, mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)))
+	data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}})
+	require.NoError(t, err)
+	paid := func() *mcp.Server {
+		return newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return nil, &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "Payment Required", Data: data}
+		})
+	}
+	payer := &validatingProofMethod{trusted: "example.com"}
+	c := mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{payer}})
+
+	plain := func(hc *http.Client) *http.Client { return hc }
+	_, _ = callPremium(context.Background(), connectHTTPSWith(t, paid(), c, "https://example.com/mcp", plain), nil)
+	require.NotEmpty(t, payer.origins)
+	assert.Nil(t, payer.origins[0])
+
+	payer.origins = nil
+	_, _ = callPremium(context.Background(), connectHTTPS(t, paid(), c, "https://example.com/mcp"), nil)
+	require.NotEmpty(t, payer.origins)
+	require.NotNil(t, payer.origins[0])
+	assert.Equal(t, "https://example.com/mcp", payer.origins[0].String())
+}

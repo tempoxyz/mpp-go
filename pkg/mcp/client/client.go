@@ -301,8 +301,8 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSession, candidate mppclient.ChallengeCandidate) error {
 	challenge := candidate.Challenge
 	// origin is the session's endpoint even when its HTTP client follows
-	// cross-origin redirects, so an origin-less TrustedProofRealm (meant for
-	// stdio) never matches a Streamable HTTP session.
+	// cross-origin redirects, so such a session is told apart from stdio and
+	// refused proofs even when the hook approves it.
 	origin, redirectSafe := sessionEndpoint(session)
 	if tempoproof.IsProofChallenge(challenge) {
 		switch {
@@ -320,6 +320,12 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 		case origin == nil:
 			return tempoproof.RealmError(challenge.Realm, "", "connect with mcpclient.Connect (or set the transport's HTTPClient to mcpclient.HTTPClient(nil)), or authorize the session with Config.ValidateTempoProofSession")
 		}
+	}
+	if !redirectSafe {
+		// A redirect could carry any Credential to another server, so a
+		// method sees no origin (as on stdio) rather than the endpoint's. A
+		// proof from such an endpoint was refused above.
+		origin = nil
 	}
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
 		return validator.ValidateOrigin(origin, challenge)

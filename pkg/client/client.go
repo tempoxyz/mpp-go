@@ -34,8 +34,9 @@ type ChallengeMatcher interface {
 // implements it: a zero-amount Tempo proof authenticates the payer at the
 // realm the Challenge names, so it is signed only for a realm the sending
 // server owns. The HTTP Transport calls ValidateOrigin with the request URL
-// and skips a Challenge it rejects; the MCP client calls it with a nil URL,
-// since an MCP server has no origin.
+// and skips a Challenge it rejects; the MCP client calls it with the endpoint
+// URL of a Streamable HTTP session whose HTTP client refuses cross-origin
+// redirects (mcpclient.Connect), and with a nil URL for any other session.
 //
 // A Method that does not implement it gets the Transport's built-in check for
 // zero-amount tempo/charge Challenges.
