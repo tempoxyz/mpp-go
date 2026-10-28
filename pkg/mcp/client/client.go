@@ -416,6 +416,11 @@ var mcpPackage = reflect.TypeFor[mcp.ClientSession]().PkgPath()
 // proofs are signed only for Streamable HTTP sessions whose client refuses
 // cross-origin redirects, since a redirect would deliver the proof to another
 // server than the endpoint whose origin vouched for the realm.
+//
+// It is not inlined, so every client it returns shares one CheckRedirect code
+// pointer, which refusesCrossOriginRedirects recognizes.
+//
+//go:noinline
 func HTTPClient(base *http.Client) *http.Client {
 	if base == nil {
 		base = http.DefaultClient
@@ -438,35 +443,23 @@ func HTTPClient(base *http.Client) *http.Client {
 	return &c
 }
 
-// redirectProbeURL is the cross-origin target refusesCrossOriginRedirects
-// offers a client's CheckRedirect; nothing is sent to it.
-const redirectProbeURL = "https://mpp-redirect-probe.invalid/"
+// sameOriginHook is the code pointer of the CheckRedirect closure HTTPClient
+// installs; every client HTTPClient returns shares it.
+var sameOriginHook = reflect.ValueOf(HTTPClient(nil).CheckRedirect).Pointer()
 
-// refusesCrossOriginRedirects reports whether c refuses a redirect from
-// endpoint to another origin, by asking its CheckRedirect about one. A nil
-// client or hook follows redirects (net/http's default), so it does not.
-func refusesCrossOriginRedirects(c *http.Client, endpoint *url.URL) (refuses bool) {
-	if c == nil || c.CheckRedirect == nil {
-		return false
-	}
-	probe, err := url.Parse(redirectProbeURL)
-	if err != nil {
-		return false
-	}
-	defer func() {
-		if recover() != nil {
-			refuses = false
-		}
-	}()
-	via := []*http.Request{{Method: http.MethodPost, URL: endpoint, Host: endpoint.Host, Header: http.Header{}}}
-	req := &http.Request{Method: http.MethodPost, URL: probe, Host: probe.Host, Header: http.Header{}}
-	return c.CheckRedirect(req, via) != nil
+// refusesCrossOriginRedirects reports whether c's CheckRedirect is the one
+// HTTPClient installs, which refuses every cross-origin redirect whatever
+// hook it wraps. Any other hook could allow some origins, so it does not
+// count, nor does a nil client or hook (net/http follows redirects).
+func refusesCrossOriginRedirects(c *http.Client) bool {
+	return c != nil && c.CheckRedirect != nil && reflect.ValueOf(c.CheckRedirect).Pointer() == sameOriginHook
 }
 
 // sessionOrigin returns the endpoint URL of the mcp.StreamableClientTransport
 // session was connected with, or nil when it has none: other transports
 // (stdio, in-memory, SSE, a wrapped transport), a transport whose HTTP client
-// follows cross-origin redirects (such as http.DefaultClient; use HTTPClient),
+// was not built by HTTPClient (such as http.DefaultClient, which follows
+// cross-origin redirects),
 // a nil session, or an SDK version whose layout this does not recognize, so it
 // fails closed.
 //
@@ -506,7 +499,7 @@ func sessionOrigin(session *mcp.ClientSession) *url.URL {
 	if c == nil {
 		c = http.DefaultClient
 	}
-	if !refusesCrossOriginRedirects(c, u) {
+	if !refusesCrossOriginRedirects(c) {
 		return nil
 	}
 	return u

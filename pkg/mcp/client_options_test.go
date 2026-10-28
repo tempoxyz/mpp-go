@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -302,6 +303,16 @@ func TestProofRefusedWhenSessionFollowsCrossOriginRedirects(t *testing.T) {
 		func(hc *http.Client) *http.Client { return hc },
 		func(hc *http.Client) *http.Client {
 			hc.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
+			return hc
+		},
+		// A selective hook that refuses some origins but not others.
+		func(hc *http.Client) *http.Client {
+			hc.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+				if strings.HasSuffix(req.URL.Hostname(), ".invalid") {
+					return errors.New("refused")
+				}
+				return nil
+			}
 			return hc
 		},
 	}
