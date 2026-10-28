@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -52,13 +54,18 @@ type Config struct {
 	OnPaymentRequired OnPaymentRequired
 	// OrderChallenges, when set, filters and sorts payable Challenges.
 	OrderChallenges OrderChallenges
-	// ValidateTempoProofSession must authorize the actual session for a zero-amount
-	// Tempo proof's realm before signing. Nil refuses all such proofs, even if
-	// the payment method trusts the realm. Bind sessions to server identities
-	// using locally configured, authenticated transports; never trust a realm
-	// or server name supplied by the peer. Return an error to refuse.
-	// This check also runs before cached proof reuse and cannot be bypassed by
-	// WithOnPaymentRequired. The method's OriginValidator still applies.
+	// ValidateTempoProofSession, when set, also authorizes the session for a
+	// zero-amount Tempo proof's realm before a proof is signed or reused;
+	// return an error to refuse. Most clients leave it nil: a proof is then
+	// bound to the session's transport, so only a session the client connected
+	// over mcp.StreamableClientTransport, to an endpoint whose origin the
+	// method trusts for the realm (by default an HTTPS endpoint on the default
+	// port whose hostname is the realm), gets one, whichever session relays the
+	// challenge. Set it for sessions without such an origin (stdio, in-memory
+	// or wrapped transports), which are otherwise refused proofs; compare the
+	// session pointer with sessions you connected yourself, never with a name
+	// or realm the peer sent. WithOnPaymentRequired does not bypass it, and the
+	// method's OriginValidator still runs with the session's origin.
 	ValidateTempoProofSession func(context.Context, *mcp.ClientSession, string) error
 	// PaymentPreferences ranks Challenges by "method/intent" q-values.
 	PaymentPreferences mppclient.PaymentPreferences
@@ -155,8 +162,21 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
+// credentialKey identifies a Credential by the whole Challenge it pays, so a
+// re-offer that keeps the ID but changes the request (such as a proof
+// challenge re-offered with a nonzero amount) never reuses it.
 type credentialKey struct {
 	id, method, intent string
+	challenge          string
+}
+
+func newCredentialKey(challenge *mpp.Challenge) (credentialKey, error) {
+	// The echo is what a Credential for challenge carries.
+	encoded, err := json.Marshal(challenge.ToEcho())
+	if err != nil {
+		return credentialKey{}, fmt.Errorf("mpp: encoding challenge: %w", err)
+	}
+	return credentialKey{id: challenge.ID, method: challenge.Method, intent: challenge.Intent, challenge: string(encoded)}, nil
 }
 
 // pay selects a Challenge, approves and pays it (or reuses the Credential
@@ -215,7 +235,10 @@ func (config *Config) pay(
 		return nil, credentialKey{}, fmt.Errorf("%w: %w", rejected, cause)
 	}
 	selected := payable[0]
-	key := credentialKey{id: selected.Challenge.ID, method: selected.Challenge.Method, intent: selected.Challenge.Intent}
+	key, err := newCredentialKey(selected.Challenge)
+	if err != nil {
+		return nil, credentialKey{}, err
+	}
 	if credential, ok := credentials[key]; ok {
 		return withCredential(original, credential), key, nil
 	}
@@ -261,29 +284,38 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 	return &params
 }
 
-// checkOrigin first authorizes proof requests for the actual session, then
-// asks the candidate's method, when it implements
-// client.OriginValidator, whether it may pay a Challenge from a server without
-// an origin. Other methods keep the built-in rule: a zero-amount tempo/charge
-// Challenge is refused, since an MCP server has no origin that could own its
-// realm.
+// checkOrigin asks the candidate's method, when it implements
+// client.OriginValidator, whether it may pay a Challenge from the server at
+// the session's transport origin (see sessionOrigin), nil when the session
+// has none. Other methods keep the built-in rule: a zero-amount tempo/charge
+// Challenge is paid only when that origin owns its realm.
+//
+// A proof authenticates the payer at the realm, so it is bound to the session
+// that received the challenge: a session without a transport origin gets one
+// only when Config.ValidateTempoProofSession authorizes it, so a server cannot
+// relay another server's challenge through a shared client.
 func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSession, candidate mppclient.ChallengeCandidate) error {
 	challenge := candidate.Challenge
+	origin := sessionOrigin(session)
 	if tempoproof.IsProofChallenge(challenge) {
-		if session == nil || config.ValidateTempoProofSession == nil {
-			return tempoproof.RealmError(challenge.Realm, "", "authorize this session with Config.ValidateTempoProofSession")
-		}
-		if err := config.ValidateTempoProofSession(ctx, session, challenge.Realm); err != nil {
-			return err
+		if config.ValidateTempoProofSession != nil {
+			if session == nil {
+				return tempoproof.RealmError(challenge.Realm, "", "the request has no MCP session")
+			}
+			if err := config.ValidateTempoProofSession(ctx, session, challenge.Realm); err != nil {
+				return err
+			}
+		} else if origin == nil {
+			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport, or authorize the session with Config.ValidateTempoProofSession")
 		}
 	}
 	if validator, ok := candidate.Method.(mppclient.OriginValidator); ok {
-		return validator.ValidateOrigin(nil, challenge)
+		return validator.ValidateOrigin(origin, challenge)
 	}
-	if !tempoproof.IsProofChallenge(challenge) {
+	if !tempoproof.IsProofChallenge(challenge) || tempoproof.OriginOwnsRealm(origin, challenge.Realm) {
 		return nil
 	}
-	return tempoproof.RealmError(challenge.Realm, "", "trust it with the Tempo method's Config.TrustedProofRealms")
+	return tempoproof.RealmError(challenge.Realm, tempoproof.Origin(origin), "trust it with the Tempo method's Config.TrustedProofRealms")
 }
 
 // IsPaymentRequiredError reports whether err is an MCP payment-required or
@@ -370,4 +402,42 @@ func Receipt(result *mcp.CallToolResult) (*mpp.MCPReceipt, error) {
 		return nil, err
 	}
 	return &receipt, nil
+}
+
+// mcpPackage is the import path of the MCP Go SDK's mcp package.
+var mcpPackage = reflect.TypeFor[mcp.ClientSession]().PkgPath()
+
+// sessionOrigin returns the endpoint URL of the mcp.StreamableClientTransport
+// session was connected with, or nil when it has none: other transports
+// (stdio, in-memory, SSE, a wrapped transport), a nil session, or an SDK
+// version whose layout this does not recognize, so it fails closed.
+//
+// The endpoint is what this client configured and dialed, not anything the
+// server sent, so it identifies the server the way a request URL does over
+// HTTP. The SDK does not export a session's transport, so it is read with
+// reflection; TestSessionOriginReadsStreamableEndpoint pins the layout.
+func sessionOrigin(session *mcp.ClientSession) *url.URL {
+	if session == nil {
+		return nil
+	}
+	conn := reflect.ValueOf(session).Elem().FieldByName("mcpConn")
+	if conn.Kind() != reflect.Interface || conn.IsNil() {
+		return nil
+	}
+	conn = conn.Elem()
+	if conn.Kind() != reflect.Pointer || conn.IsNil() {
+		return nil
+	}
+	if typ := conn.Type().Elem(); typ.PkgPath() != mcpPackage || typ.Name() != "streamableClientConn" {
+		return nil
+	}
+	endpoint := conn.Elem().FieldByName("url")
+	if endpoint.Kind() != reflect.String {
+		return nil
+	}
+	u, err := url.Parse(endpoint.String())
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil
+	}
+	return u
 }

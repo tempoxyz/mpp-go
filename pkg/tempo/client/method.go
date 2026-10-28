@@ -63,15 +63,18 @@ type Config struct {
 	// that differs from the hostname of the server sending the challenge. A
 	// proof authenticates the payer at the challenge realm, so by default
 	// the method signs one only when an HTTPS server on the default port
-	// names its own hostname as the realm, and never over MCP.
+	// names its own hostname as the realm, which over MCP is the HTTPS
+	// endpoint the session connected to.
 	TrustedProofRealms []TrustedProofRealm
 }
 
 // TrustedProofRealm trusts a server to request zero-amount proofs for Realm.
 type TrustedProofRealm struct {
-	// Origin is the scheme://host[:port] origin of the HTTP server, such as
-	// "http://localhost:8080". Empty trusts Realm on transports without an
-	// origin, such as MCP.
+	// Origin is the scheme://host[:port] origin of the HTTP server or MCP
+	// Streamable HTTP endpoint, such as "http://localhost:8080". Empty trusts
+	// Realm on transports without an origin, such as MCP over stdio, which the
+	// MCP client pays proofs on only when its Config.ValidateTempoProofSession
+	// authorizes the session.
 	Origin string
 	// Realm is the challenge realm, compared exactly.
 	Realm string
@@ -161,7 +164,7 @@ func New(config Config) (*Method, error) {
 // the payer at the challenge realm, unless origin is an HTTPS URL on the
 // default port whose hostname is the realm, or Config.TrustedProofRealms
 // trusts the realm for origin. origin is nil on transports without one, such
-// as MCP. Other challenges pass.
+// as MCP over stdio. Other challenges pass.
 func (m *Method) ValidateOrigin(origin *url.URL, challenge *mpp.Challenge) error {
 	if !tempoproof.IsProofChallenge(challenge) || tempoproof.OriginOwnsRealm(origin, challenge.Realm) {
 		return nil

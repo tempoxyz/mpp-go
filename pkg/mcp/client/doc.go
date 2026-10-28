@@ -21,9 +21,14 @@
 //
 //	c.AddSendingMiddleware(mcpclient.Middleware(mcpclient.Config{Methods: methods}))
 //
-// Zero-amount Tempo proofs additionally require Config.ValidateTempoProofSession.
-// Register sessions only after connecting through a locally trusted transport;
-// check the session pointer and its allowed realm in that callback. A peer's
-// advertised server name or challenge realm is not an authenticated identity.
-// A per-call WithOnPaymentRequired override does not bypass this check.
+// A zero-amount Tempo proof authenticates the payer at the challenge realm,
+// so the client binds it to the session that received the challenge: it
+// signs one only for a session connected over mcp.StreamableClientTransport
+// whose endpoint origin the payment method trusts for that realm (by default
+// an HTTPS endpoint on the default port whose hostname is the realm; the
+// Tempo method's Config.TrustedProofRealms adds others by origin). No
+// configuration is needed, and a server cannot relay another server's
+// challenge through a shared client. Sessions without an endpoint origin
+// (stdio, in-memory) get proofs only when Config.ValidateTempoProofSession
+// authorizes them.
 package client
