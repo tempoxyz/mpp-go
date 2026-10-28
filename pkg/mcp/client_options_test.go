@@ -351,3 +351,25 @@ func TestHTTPClientRefusesCrossOriginRedirects(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	assert.Nil(t, http.DefaultClient.CheckRedirect, "HTTPClient must not modify its base")
 }
+
+// A hook that approves a Streamable HTTP session whose client follows
+// redirects must not make an origin-less TrustedProofRealm, meant for stdio,
+// cover it: the method still sees the session's endpoint.
+func TestOriginlessTrustedRealmIgnoresRedirectFollowingSession(t *testing.T) {
+	payer := newRealProofMethod(t, chargeclient.TrustedProofRealm{Realm: "stdio.example"})
+	c := mcpclient.Wrap(newClient(), mcpclient.Config{
+		Methods:                   []client.Method{payer},
+		ValidateTempoProofSession: func(context.Context, *mcp.ClientSession, string) error { return nil },
+	})
+	plain := func(hc *http.Client) *http.Client { return hc }
+	session := connectHTTPSWith(t, zeroTempoChallengeServer(t, "stdio.example"), c, "https://attacker.test/", plain)
+	_, err := callPremium(context.Background(), session, nil)
+	require.ErrorContains(t, err, "refusing to sign Tempo proof")
+	assert.Empty(t, payer.credentials())
+
+	// The same realm over stdio-like transports is still trusted.
+	local := connect(t, zeroTempoChallengeServer(t, "stdio.example"), c)
+	_, err = callPremium(context.Background(), local, nil)
+	require.Error(t, err)
+	assert.Len(t, payer.credentials(), 1)
+}

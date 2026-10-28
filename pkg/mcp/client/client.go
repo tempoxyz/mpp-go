@@ -298,7 +298,10 @@ func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *m
 // relay another server's challenge through a shared client.
 func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSession, candidate mppclient.ChallengeCandidate) error {
 	challenge := candidate.Challenge
-	origin := sessionOrigin(session)
+	// origin is the session's endpoint even when its HTTP client follows
+	// cross-origin redirects, so an origin-less TrustedProofRealm (meant for
+	// stdio) never matches a Streamable HTTP session.
+	origin, redirectSafe := sessionEndpoint(session)
 	if tempoproof.IsProofChallenge(challenge) {
 		if config.ValidateTempoProofSession != nil {
 			if session == nil {
@@ -307,7 +310,7 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 			if err := config.ValidateTempoProofSession(ctx, session, challenge.Realm); err != nil {
 				return err
 			}
-		} else if origin == nil {
+		} else if origin == nil || !redirectSafe {
 			return tempoproof.RealmError(challenge.Realm, "", "connect with mcp.StreamableClientTransport{HTTPClient: mcpclient.HTTPClient(nil)}, or authorize the session with Config.ValidateTempoProofSession")
 		}
 	}
@@ -455,52 +458,58 @@ func refusesCrossOriginRedirects(c *http.Client) bool {
 	return c != nil && c.CheckRedirect != nil && reflect.ValueOf(c.CheckRedirect).Pointer() == sameOriginHook
 }
 
-// sessionOrigin returns the endpoint URL of the mcp.StreamableClientTransport
+// sessionOrigin returns sessionEndpoint's endpoint when its HTTP client
+// refuses cross-origin redirects, and nil otherwise.
+func sessionOrigin(session *mcp.ClientSession) *url.URL {
+	if endpoint, redirectSafe := sessionEndpoint(session); redirectSafe {
+		return endpoint
+	}
+	return nil
+}
+
+// sessionEndpoint returns the endpoint URL of the mcp.StreamableClientTransport
 // session was connected with, or nil when it has none: other transports
-// (stdio, in-memory, SSE, a wrapped transport), a transport whose HTTP client
-// was not built by HTTPClient (such as http.DefaultClient, which follows
-// cross-origin redirects),
-// a nil session, or an SDK version whose layout this does not recognize, so it
-// fails closed.
+// (stdio, in-memory, SSE, a wrapped transport), a nil session, or an SDK
+// version whose layout this does not recognize, so it fails closed.
+// redirectSafe reports whether the transport's HTTP client was built by
+// HTTPClient, so it refuses cross-origin redirects; http.DefaultClient, the
+// SDK's default, follows them.
 //
 // The endpoint is what this client configured and dialed, not anything the
 // server sent, so it identifies the server the way a request URL does over
 // HTTP. The SDK does not export a session's transport, so it is read with
 // reflection; TestSessionOriginReadsStreamableEndpoint pins the layout.
-func sessionOrigin(session *mcp.ClientSession) *url.URL {
+func sessionEndpoint(session *mcp.ClientSession) (endpoint *url.URL, redirectSafe bool) {
 	if session == nil {
-		return nil
+		return nil, false
 	}
 	conn := reflect.ValueOf(session).Elem().FieldByName("mcpConn")
 	if conn.Kind() != reflect.Interface || conn.IsNil() {
-		return nil
+		return nil, false
 	}
 	conn = conn.Elem()
 	if conn.Kind() != reflect.Pointer || conn.IsNil() {
-		return nil
+		return nil, false
 	}
 	if typ := conn.Type().Elem(); typ.PkgPath() != mcpPackage || typ.Name() != "streamableClientConn" {
-		return nil
+		return nil, false
 	}
-	endpoint := conn.Elem().FieldByName("url")
-	if endpoint.Kind() != reflect.String {
-		return nil
+	raw := conn.Elem().FieldByName("url")
+	if raw.Kind() != reflect.String {
+		return nil, false
 	}
-	u, err := url.Parse(endpoint.String())
+	u, err := url.Parse(raw.String())
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil
+		return nil, false
 	}
 	// The connection sends with this client, http.DefaultClient when nil.
 	field := conn.Elem().FieldByName("client")
 	if !field.IsValid() || field.Type() != reflect.TypeFor[*http.Client]() || !field.CanAddr() {
-		return nil
+		return u, false
 	}
 	c := *(**http.Client)(unsafe.Pointer(field.UnsafeAddr()))
 	if c == nil {
 		c = http.DefaultClient
 	}
-	if !refusesCrossOriginRedirects(c) {
-		return nil
-	}
-	return u
+	return u, refusesCrossOriginRedirects(c)
 }
