@@ -2000,31 +2000,6 @@ func (i *Intent) resolveFeeToken(ctx context.Context, rpc tempo.RPCClient, allow
 // coSignWithFeeToken co-signs a copy of the sender-signed transaction with
 // the local fee payer, paying gas in feeToken, and returns it with its
 // canonical broadcast encoding and hash.
-// sponsoredTransactionIncluded reports whether a local fee payer's co-signed
-// envelope of the sender-signed tx, for the selected or any other allowed fee
-// token, is already on chain. A remote fee payer's envelope cannot be rebuilt
-// without asking it to sign, so it reports false.
-func (i *Intent) sponsoredTransactionIncluded(ctx context.Context, validated *validatedChargeCredential, tx *tempotx.Tx) bool {
-	if i.feePayerSigner == nil {
-		return false
-	}
-	tokens := append([]common.Address{validated.feeToken}, validated.altFeeTokens...)
-	for _, token := range tokens {
-		_, _, hash, err := i.coSignWithFeeToken(*tx, token)
-		if err == nil && lookupIncludedReceipt(ctx, validated.rpc, hash) != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func (i *Intent) clock() time.Time {
-	if i.now != nil {
-		return i.now()
-	}
-	return time.Now()
-}
-
 func (i *Intent) coSignWithFeeToken(senderSigned tempotx.Tx, feeToken common.Address) (*tempotx.Tx, string, string, error) {
 	tx := &senderSigned
 	tx.FeeToken = feeToken
@@ -2046,6 +2021,32 @@ func (i *Intent) coSignWithFeeToken(senderSigned tempotx.Tx, feeToken common.Add
 		return nil, "", "", err
 	}
 	return tx, serialized, hash.Hex(), nil
+}
+
+// sponsoredTransactionIncluded reports whether a local fee payer's co-signed
+// envelope of the sender-signed tx, for the selected or any other allowed fee
+// token, is already on chain. A remote fee payer's envelope cannot be rebuilt
+// without asking it to sign, so it reports false.
+func (i *Intent) sponsoredTransactionIncluded(ctx context.Context, validated *validatedChargeCredential, tx *tempotx.Tx) bool {
+	if i.feePayerSigner == nil {
+		return false
+	}
+	tokens := append([]common.Address{validated.feeToken}, validated.altFeeTokens...)
+	for _, token := range tokens {
+		_, _, hash, err := i.coSignWithFeeToken(*tx, token)
+		if err == nil && lookupIncludedReceipt(ctx, validated.rpc, hash) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// clock returns i.now() when set, else time.Now().
+func (i *Intent) clock() time.Time {
+	if i.now != nil {
+		return i.now()
+	}
+	return time.Now()
 }
 
 // hasTokenBalance reports whether account holds a nonzero TIP-20 balance.
