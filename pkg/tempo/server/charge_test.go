@@ -1653,6 +1653,10 @@ func TestChargeFlow_FeePayerRetryRecoversAfterDeadline(t *testing.T) {
 	// Less than 15 seconds of the 60-second window are left.
 	intent.now = func() time.Time { return time.Now().Add(50 * time.Second) }
 	rpc.onCall = drainedBalanceCall
+	// Validate must not co-sign to look the transaction up, so it still
+	// reports the deadline.
+	_, err = intent.Validate(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "remaining validity")
 	receipt, err := intent.Verify(ctx, credential, request.Map())
 	require.NoError(t, err)
 	require.Len(t, rpc.sentRawTxs, 1)

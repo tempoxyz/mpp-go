@@ -164,10 +164,10 @@ type validatedChargeCredential struct {
 	// includedReceipt is the receipt of an unsponsored transaction credential
 	// that is already on chain, found before its simulation.
 	includedReceipt map[string]any
-	// sponsoredIncluded is set when a sponsored transaction whose fee payer
-	// deadline has passed is already on chain, so its retry settles from the
-	// receipt instead of failing the deadline.
-	sponsoredIncluded bool
+	// settling is set when the credential is validated by Broadcast, which
+	// rechecks a local fee payer's deadline itself so that it can first look
+	// up whether a late retry's transaction already landed.
+	settling bool
 }
 
 func hasReplayStore(store tempo.Store) bool {
@@ -252,7 +252,7 @@ func (i *Intent) Validate(
 	credential *mpp.Credential,
 	requestMap map[string]any,
 ) (*mppserver.Validation, error) {
-	validated, err := i.validateCredential(ctx, credential, requestMap)
+	validated, err := i.validateCredential(ctx, credential, requestMap, false)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +309,7 @@ func (i *Intent) Broadcast(
 	credential *mpp.Credential,
 	requestMap map[string]any,
 ) (*mpp.Receipt, error) {
-	validated, err := i.validateCredential(ctx, credential, requestMap)
+	validated, err := i.validateCredential(ctx, credential, requestMap, true)
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +332,7 @@ func (i *Intent) validateCredential(
 	ctx context.Context,
 	credential *mpp.Credential,
 	requestMap map[string]any,
+	settling bool,
 ) (*validatedChargeCredential, error) {
 	if credential == nil {
 		return nil, mpp.ErrMalformedCredential("credential is required")
@@ -370,10 +371,11 @@ func (i *Intent) validateCredential(
 	}
 
 	validated := &validatedChargeCredential{
-		payload: payload,
-		request: request,
-		rpc:     rpc,
-		source:  source,
+		payload:  payload,
+		request:  request,
+		rpc:      rpc,
+		settling: settling,
+		source:   source,
 	}
 	switch payload.Type {
 	case tempo.CredentialTypeHash:
@@ -527,13 +529,13 @@ func (i *Intent) validateTransaction(
 		if !tx.AwaitingFeePayer {
 			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
-		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
-			// A retry of a sponsored payment that already landed can arrive
-			// after its validity window: settle it from its receipt.
-			if !i.sponsoredTransactionIncluded(ctx, validated, tx) {
+		// Broadcast rechecks a local fee payer's deadline after it looks up
+		// whether a late retry already landed; Validate must not co-sign to
+		// do that lookup.
+		if !validated.settling || i.feePayerSigner == nil {
+			if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
 				return err
 			}
-			validated.sponsoredIncluded = true
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
@@ -703,8 +705,11 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrCredentialReplayed("sponsored transaction already used")
 		}
 		claimedKeys = append(claimedKeys, sponsoredClaimKey)
-		if !validated.sponsoredIncluded {
-			if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
+		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
+			// A retry of a sponsored payment that already landed can arrive
+			// after its validity window: settle it from its receipt, which
+			// the lookup below finds.
+			if !i.sponsoredTransactionIncluded(ctx, validated, tx) {
 				return nil, err
 			}
 		}
