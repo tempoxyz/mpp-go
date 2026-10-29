@@ -887,6 +887,10 @@ func (i *Intent) broadcastTransaction(
 	if request.MethodDetails.FeePayer {
 		accepted, err := i.claimReplayKey(storeCtx, credential, tempo.ChargeStoreKey(txHash), txHash)
 		if err != nil {
+			// The payment is on chain but unrecorded: release the sponsored
+			// claim so a retry finds the included transaction and recovers
+			// its receipt, as after a failed receipt fetch.
+			included = false
 			return nil, err
 		}
 		if !accepted {
