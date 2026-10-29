@@ -1,5 +1,19 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.7.0`
+
+### Minor Changes
+
+- Bind zero-amount Tempo proofs on MCP to the session that received the challenge: the client signs or reuses one only when the session's Streamable HTTP endpoint origin is trusted for the realm (by default an HTTPS endpoint whose hostname is the realm) and its HTTP client refuses cross-origin redirects (connect with the new mcpclient.Connect, or pass the new mcpclient.HTTPClient as the transport's HTTPClient), so a server can no longer relay another server's challenge through a shared client. Sessions without an endpoint (stdio, in-memory) need the optional Config.ValidateTempoProofSession, and sessions whose client follows cross-origin redirects are refused; origin-less Config.TrustedProofRealms entries no longer cover Streamable HTTP sessions. A cached Credential is reused only for an identical re-offered challenge. (by @brendanjryan, [#272](https://github.com/tempoxyz/mpp-go/pull/272))
+
+### Patch Changes
+
+- Updated the release workflow to tempoxyz/changelogs v0.11.0. (by @brendanjryan, [#265](https://github.com/tempoxyz/mpp-go/pull/265))
+- Fixed a sponsored charge retry being rejected as `sponsored transaction already used` when the final replay claim failed after the transaction was included; the retry now recovers its receipt. (by @brendanjryan, [#276](https://github.com/tempoxyz/mpp-go/pull/276))
+- Fixed a sponsored charge retry that arrives after its fee payer deadline being rejected for lack of remaining validity although its transaction was already included; with a local fee payer, the retry now recovers its receipt. (by @brendanjryan, [#278](https://github.com/tempoxyz/mpp-go/pull/278))
+- Return ambiguous relay settlement as a terminal payment-outcome-unknown response without retry offers, including unusable successful receipts. Preserve settlement_unknown metadata for application reconciliation. (by @brendanjryan, [#273](https://github.com/tempoxyz/mpp-go/pull/273))
+- Updated echo to v4.16.1, chi to v5.4.0 and compress to v1.18.7. (by @grandizzy, [#275](https://github.com/tempoxyz/mpp-go/pull/275))
+
 ## `github.com/tempoxyz/mpp-go@0.6.0`
 
 ### Minor Changes
