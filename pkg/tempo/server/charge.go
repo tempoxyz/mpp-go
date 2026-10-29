@@ -143,6 +143,8 @@ type Intent struct {
 	// rpcClients holds the RPC clients built from URLs, so each is built
 	// once rather than per credential.
 	rpcClients *rpccache.Cache
+	// now is the clock for fee payer deadlines; nil means time.Now.
+	now func() time.Time
 }
 
 var _ mppserver.BroadcastingIntent = (*Intent)(nil)
@@ -162,6 +164,10 @@ type validatedChargeCredential struct {
 	// includedReceipt is the receipt of an unsponsored transaction credential
 	// that is already on chain, found before its simulation.
 	includedReceipt map[string]any
+	// sponsoredIncluded is set when a sponsored transaction whose fee payer
+	// deadline has passed is already on chain, so its retry settles from the
+	// receipt instead of failing the deadline.
+	sponsoredIncluded bool
 }
 
 func hasReplayStore(store tempo.Store) bool {
@@ -521,8 +527,13 @@ func (i *Intent) validateTransaction(
 		if !tx.AwaitingFeePayer {
 			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
-		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
-			return err
+		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
+			// A retry of a sponsored payment that already landed can arrive
+			// after its validity window: settle it from its receipt.
+			if !i.sponsoredTransactionIncluded(ctx, validated, tx) {
+				return err
+			}
+			validated.sponsoredIncluded = true
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
@@ -692,8 +703,10 @@ func (i *Intent) broadcastTransaction(
 			return nil, mpp.ErrCredentialReplayed("sponsored transaction already used")
 		}
 		claimedKeys = append(claimedKeys, sponsoredClaimKey)
-		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
-			return nil, err
+		if !validated.sponsoredIncluded {
+			if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
+				return nil, err
+			}
 		}
 		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
@@ -818,7 +831,7 @@ func (i *Intent) broadcastTransaction(
 		return nil, err
 	}
 	if request.MethodDetails.FeePayer && includedReceipt == nil {
-		if err := validateFeePayerDeadline(tx.ValidBefore, time.Now()); err != nil {
+		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
 			return nil, err
 		}
 	}
@@ -1982,6 +1995,31 @@ func (i *Intent) resolveFeeToken(ctx context.Context, rpc tempo.RPCClient, allow
 // coSignWithFeeToken co-signs a copy of the sender-signed transaction with
 // the local fee payer, paying gas in feeToken, and returns it with its
 // canonical broadcast encoding and hash.
+// sponsoredTransactionIncluded reports whether a local fee payer's co-signed
+// envelope of the sender-signed tx, for the selected or any other allowed fee
+// token, is already on chain. A remote fee payer's envelope cannot be rebuilt
+// without asking it to sign, so it reports false.
+func (i *Intent) sponsoredTransactionIncluded(ctx context.Context, validated *validatedChargeCredential, tx *tempotx.Tx) bool {
+	if i.feePayerSigner == nil {
+		return false
+	}
+	tokens := append([]common.Address{validated.feeToken}, validated.altFeeTokens...)
+	for _, token := range tokens {
+		_, _, hash, err := i.coSignWithFeeToken(*tx, token)
+		if err == nil && lookupIncludedReceipt(ctx, validated.rpc, hash) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (i *Intent) clock() time.Time {
+	if i.now != nil {
+		return i.now()
+	}
+	return time.Now()
+}
+
 func (i *Intent) coSignWithFeeToken(senderSigned tempotx.Tx, feeToken common.Address) (*tempotx.Tx, string, string, error) {
 	tx := &senderSigned
 	tx.FeeToken = feeToken

@@ -1627,6 +1627,49 @@ func TestChargeFlow_FeePayerRetryRecoversAfterReceiptFailure(t *testing.T) {
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
+// A sponsored payment that landed is recovered by a retry that arrives after
+// its fee payer deadline, while a transaction that never landed still fails it.
+func TestChargeFlow_FeePayerRetryRecoversAfterDeadline(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	failReceiptFetch := true
+	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		if failReceiptFetch && len(rpc.sentRawTxs) > 0 {
+			failReceiptFetch = false
+			return nil, fmt.Errorf("temporary receipt rpc failure")
+		}
+		return &temporpc.JSONRPCResponse{Result: rpc.receipts[hash]}, nil
+	}
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "outcome is unknown")
+	require.Len(t, rpc.sentRawTxs, 1)
+
+	// Less than 15 seconds of the 60-second window are left.
+	intent.now = func() time.Time { return time.Now().Add(50 * time.Second) }
+	rpc.onCall = drainedBalanceCall
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	require.Len(t, rpc.sentRawTxs, 1)
+	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
+
+	// The same late credential is rejected when its transaction never landed.
+	unsentRPC := newMockRPC(request)
+	unsent, err := newClientMethod(t, unsentRPC, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	late, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: unsentRPC, FeePayerPrivateKey: feePayerKey})
+	require.NoError(t, err)
+	late.now = intent.now
+	_, err = late.Verify(ctx, unsent, request.Map())
+	require.ErrorContains(t, err, "remaining validity")
+	assert.Empty(t, unsentRPC.sentRawTxs)
+}
+
 // failNthPutIfAbsentStore fails its failOn-th PutIfAbsent call.
 type failNthPutIfAbsentStore struct {
 	tempo.Store
