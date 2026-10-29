@@ -1627,6 +1627,51 @@ func TestChargeFlow_FeePayerRetryRecoversAfterReceiptFailure(t *testing.T) {
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
+// failNthPutIfAbsentStore fails its failOn-th PutIfAbsent call.
+type failNthPutIfAbsentStore struct {
+	tempo.Store
+	failOn int
+	calls  int
+}
+
+func (s *failNthPutIfAbsentStore) PutIfAbsent(ctx context.Context, key, value string) (bool, error) {
+	s.calls++
+	if s.calls == s.failOn {
+		return false, errors.New("store unavailable")
+	}
+	return s.Store.PutIfAbsent(ctx, key, value)
+}
+
+// A sponsored payment whose final replay claim fails after the transaction is
+// included must recover its receipt on retry instead of being rejected as used.
+func TestChargeFlow_FeePayerRetryAfterFinalClaimStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, true, nil)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+
+	// Call 1 claims the sponsored transaction, call 2 the included transaction hash.
+	store := &failNthPutIfAbsentStore{Store: tempo.NewMemoryStore(), failOn: 2}
+	intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc, FeePayerPrivateKey: feePayerKey})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "store unavailable")
+	require.Len(t, rpc.sentRawTxs, 1)
+
+	// The transaction is on chain and the payer's balance is spent.
+	rpc.onCall = drainedBalanceCall
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	require.Len(t, rpc.sentRawTxs, 1)
+	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
+
+	// The payment is now consumed.
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.Error(t, err)
+}
+
 func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailure(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
