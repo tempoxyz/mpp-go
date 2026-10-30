@@ -199,6 +199,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
+		if sent && sentCred != nil && sentCred.Payload["type"] == "hash" {
+			// A hash credential's transfer is already on chain: resending it
+			// is safe, but paying a new challenge would pay twice.
+			key := credentialKey{id: selected.challenge.ID, method: methodKey{name: selected.challenge.Method, intent: selected.challenge.Intent}}
+			if credentials[key] == nil || problem == mpp.ErrorTypeInvalidPayload {
+				return resp, nil
+			}
+		}
 		if problem == mpp.ErrorTypeInvalidPayload {
 			delete(credentials, sentCredential)
 		}

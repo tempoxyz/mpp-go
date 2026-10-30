@@ -456,3 +456,45 @@ func TestRoutesSponsorByDefaultWithAFeePayer(t *testing.T) {
 	}
 	_ = mpp.IntentCharge
 }
+
+// An AllowedFeeTokens list is checked against the token the hosted fee
+// payer fills, not against the client's unfilled (zero) fee token.
+func TestHostedFeePayerSponsorsWithAnAllowedFeeToken(t *testing.T) {
+	ctx := context.Background()
+	payer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	request := buildRequest(t, true, nil)
+	rpc := sponsoredBroadcastRPC(request, payer.Address())
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	feeToken := common.HexToAddress("0x20c0000000000000000000000000000000000002")
+	fake, sponsor := newFakeHostedFeePayer(t, 42431, feeToken)
+	intent, err := NewIntent(IntentConfig{
+		RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerURL: sponsor.URL,
+		AllowedFeeTokens: []string{tempo.PathUSDAddress, feeToken.Hex()},
+	})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
+	require.Len(t, fake.requests, 1)
+	require.Len(t, rpc.sentRawTxs, 1)
+}
+
+func TestHostedFeePayerURLIsValidatedAtConstruction(t *testing.T) {
+	for _, url := range []string{"ftp://sponsor.example", "sponsor.example", "https://", "://bad"} {
+		_, err := NewIntent(IntentConfig{RPC: newMockRPC(buildRequest(t, true, nil)), Store: tempo.NewMemoryStore(), HostedFeePayer: &HostedFeePayer{URL: url}})
+		require.ErrorContains(t, err, "invalid hosted fee payer URL", url)
+	}
+}
+
+func TestFeePayerPolicyDoesNotAliasCallerLimits(t *testing.T) {
+	maxFee := big.NewInt(1_000_000_000)
+	intent, err := NewIntent(IntentConfig{
+		RPC: newMockRPC(buildRequest(t, true, nil)), Store: tempo.NewMemoryStore(), FeePayerURL: "https://sponsor.example",
+		FeePayerPolicy: &FeePayerPolicy{MaxFeePerGas: maxFee},
+	})
+	require.NoError(t, err)
+	maxFee.SetInt64(1)
+	assert.Equal(t, int64(1_000_000_000), intent.sponsorPolicy.MaxFeePerGas.Int64())
+}

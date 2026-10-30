@@ -867,3 +867,35 @@ func TestTransport_PayRedirects_RefusesBrokenRedirectChain(t *testing.T) {
 	sameOrigin.Response = &http.Response{StatusCode: http.StatusFound, Request: original}
 	require.NoError(t, transport.validatePaymentOrigin(sameOrigin, candidate))
 }
+
+// A hash credential's transfer is already on chain: a 402 to it is final,
+// and the Transport never pays again.
+func TestTransport_RoundTrip_DoesNotRepayAfterHashCredential(t *testing.T) {
+	var challenges []*mpp.Challenge
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		challenge := challenges[min(callCount, len(challenges))-1]
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+
+	challenges = []*mpp.Challenge{
+		challengeForURL(t, srv.URL, "tempo", map[string]any{"attempt": 1}),
+		challengeForURL(t, srv.URL, "tempo", map[string]any{"attempt": 2}),
+	}
+	cred := newTestCredential("tempo")
+	cred.Payload = map[string]any{"type": "hash", "hash": "0x01"}
+	method := &mockMethod{name: "tempo", cred: cred}
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Equal(t, 2, callCount)
+	assert.Equal(t, 1, method.calls)
+}

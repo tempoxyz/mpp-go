@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -235,6 +236,9 @@ func newIntent(config IntentConfig) (*Intent, error) {
 	if hosted != nil {
 		if hosted.URL == "" {
 			return nil, fmt.Errorf("tempo server: HostedFeePayer requires a URL")
+		}
+		if parsed, err := url.Parse(hosted.URL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return nil, fmt.Errorf("tempo server: invalid hosted fee payer URL %q", hosted.URL)
 		}
 		if feePayerSigner != nil {
 			return nil, fmt.Errorf("tempo server: configure either a local fee payer (FeePayerSigner or FeePayerPrivateKey) or a hosted fee payer (FeePayerURL or HostedFeePayer), not both")
@@ -1839,17 +1843,17 @@ func resolveSponsorPolicy(config IntentConfig) FeePayerPolicy {
 	policy := defaultFeePayerPolicy()
 	if config.FeePayerPolicy != nil {
 		if config.FeePayerPolicy.MaxFeePerGas != nil {
-			policy.MaxFeePerGas = config.FeePayerPolicy.MaxFeePerGas
+			policy.MaxFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxFeePerGas)
 		}
 		if config.FeePayerPolicy.MaxPriorityFeePerGas != nil {
-			policy.MaxPriorityFeePerGas = config.FeePayerPolicy.MaxPriorityFeePerGas
+			policy.MaxPriorityFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxPriorityFeePerGas)
 		} else if config.FeePayerPolicy.MaxFeePerGas != nil && policy.MaxPriorityFeePerGas.Cmp(config.FeePayerPolicy.MaxFeePerGas) > 0 {
 			// A priority fee can never exceed the max fee, so lower the
 			// default to a MaxFeePerGas set below it.
 			policy.MaxPriorityFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxFeePerGas)
 		}
 		if config.FeePayerPolicy.MaxTotalFee != nil {
-			policy.MaxTotalFee = config.FeePayerPolicy.MaxTotalFee
+			policy.MaxTotalFee = new(big.Int).Set(config.FeePayerPolicy.MaxTotalFee)
 		}
 		policy.RejectKeyAuthorization = config.FeePayerPolicy.RejectKeyAuthorization
 	}
@@ -1864,9 +1868,11 @@ func (i *Intent) usesHostedFeePayer() bool {
 
 // sponsorPolicyFor returns the sponsorship policy for a fee token. A hosted
 // fee payer without an AllowedFeeTokens list may pick any fee token, which
-// then gets the shared policy.
+// then gets the shared policy, as does a transaction it has not filled yet.
 func (i *Intent) sponsorPolicyFor(feeToken common.Address) (FeePayerPolicy, error) {
-	if i.usesHostedFeePayer() && i.feeTokens == nil {
+	// Before the hosted fee payer fills the fee token, every allowed token
+	// shares this policy; the filled token is checked after co-signing.
+	if i.usesHostedFeePayer() && (i.feeTokens == nil || feeToken == (common.Address{})) {
 		policy := i.sponsorPolicy
 		return FeePayerPolicy{
 			MaxFeePerGas:           new(big.Int).Set(policy.MaxFeePerGas),
