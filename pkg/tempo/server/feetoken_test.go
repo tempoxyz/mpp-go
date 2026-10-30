@@ -2,10 +2,7 @@ package chargeserver
 
 import (
 	"context"
-	"encoding/json"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
@@ -14,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
-	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -315,16 +311,13 @@ func TestSponsoredChargeCustomFeePayerPolicies(t *testing.T) {
 func TestSponsoredDefaultsEmitEveryOffer(t *testing.T) {
 	t.Parallel()
 
-	for _, config := range []methodConfig{
-		{ChainID: tempotx.ChainIdMainnet, FeePayer: true},
-		{ChainID: tempotx.ChainIdMainnet, FeePayerURL: "https://fee-payer.example.com"},
-	} {
-		config.Recipient = testRecipient
-		config.Intent = testStoredIntent()
-		method := newMethod(config)
+	hosted, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerURL: "https://fee-payer.example.com"})
+	require.NoError(t, err)
+	for _, intent := range []*Intent{testSponsoringIntent(), hosted} {
+		method := newMethod(methodConfig{ChainID: tempotx.ChainIdMainnet, Recipient: testRecipient, Intent: intent})
 		assert.Equal(t, checksummed(ousdAddress, usdceAddress), offerCurrencies(t, method, mppserver.ChargeParams{Amount: "1"}, tempotx.ChainIdMainnet))
 	}
-	moderato := newMethod(methodConfig{Intent: testStoredIntent(), ChainID: tempotx.ChainIdModerato, FeePayer: true, Recipient: testRecipient})
+	moderato := newMethod(methodConfig{Intent: testSponsoringIntent(), ChainID: tempotx.ChainIdModerato, Recipient: testRecipient})
 	assert.Equal(t, checksummed(ousdAddress, pathUSDAddress), offerCurrencies(t, moderato, mppserver.ChargeParams{Amount: "1", FeePayer: true}, tempotx.ChainIdModerato))
 }
 
@@ -397,36 +390,12 @@ func TestRemoteSponsoredOUSDUsesIndependentFeeToken(t *testing.T) {
 		{"moderato pathUSD", tempotx.ChainIdModerato, pathUSDToken},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			signer, err := temposigner.NewSigner(feePayerKey)
-			require.NoError(t, err)
-			calls := 0
-			sponsor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
-				var body struct {
-					Method string
-					Params []string
-				}
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-				require.Equal(t, "eth_signRawTransaction", body.Method)
-				require.Len(t, body.Params, 1)
-				tx, err := tempotx.Deserialize(body.Params[0])
-				require.NoError(t, err)
-				tx.From, err = tempotx.VerifySignature(tx)
-				require.NoError(t, err)
-				tx.FeeToken = tt.feeToken
-				tx.AwaitingFeePayer = false
-				require.NoError(t, tempotx.AddFeePayerSignature(tx, signer))
-				raw, err := tempotx.Serialize(tx, nil)
-				require.NoError(t, err)
-				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": raw}))
-			}))
-			defer sponsor.Close()
+			fake, sponsor := newFakeHostedFeePayer(t, tt.chainID, tt.feeToken)
 			rpc := newOffersRPC(tt.chainID)
-			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc, FeePayerURL: sponsor.URL})
 			require.NoError(t, err)
 			payment := newTestServer(t, newMethod(methodConfig{
 				Intent: intent, Recipient: testRecipient, ChainID: tt.chainID,
-				FeePayer: true, FeePayerURL: sponsor.URL,
 			}), testRealm, offersSecret)
 			offers := issueOffers(t, payment, mppserver.ChargeParams{Amount: "0.50"})
 			require.Equal(t, checksummed(ousdAddress)[0], offers[0].Request["currency"])
@@ -436,7 +405,7 @@ func TestRemoteSponsoredOUSDUsesIndependentFeeToken(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.False(t, result.IsChallenge())
-			assert.Equal(t, 1, calls)
+			assert.Len(t, fake.requests, 1)
 			assert.Equal(t, tt.feeToken, broadcastFeeToken(t, rpc))
 			assert.Equal(t, []common.Address{ousdToken}, sentTokens(t, rpc.sentRawTxs[0]))
 		})

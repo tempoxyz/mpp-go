@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"math/big"
 	"net/url"
 	"strings"
@@ -47,7 +48,9 @@ type Config struct {
 	// CredentialType selects transaction, hash, or proof credentials.
 	CredentialType tempo.CredentialType
 	// PaymentPolicy must authorize every nonzero payment before signing or broadcasting.
-	// Nil rejects paid challenges. Check the normalized amount (including splits),
+	// Nil rejects paid challenges. When set, it also authorizes zero-amount
+	// proofs (with amount "0"), as mppx's client policy does, so a chain,
+	// currency or recipient allowlist applies to them too. Check the normalized amount (including splits),
 	// currency, recipient, and verified RPC chain; enforce cumulative budgets atomically if needed.
 	// The callback may run concurrently and must not mutate the request.
 	//
@@ -281,10 +284,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, err
 	}
 
-	credentialType := m.credentialType
-	if credentialType == "" {
-		credentialType = tempo.CredentialTypeTransaction
-	}
+	credentialType := m.resolveCredentialType(request)
 	expectedChainID, err := m.expectedChainID(request)
 	if err != nil {
 		return nil, err
@@ -298,15 +298,30 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		rpc = m.rpcClients.Get(rpcURL)
 	}
 
-	chainID, err := rpc.GetChainID(ctx)
+	rpcChainID, err := rpc.GetChainID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tempo client: get chain id: %w", err)
 	}
-	if expectedChainID != 0 && int64(chainID) != expectedChainID {
+	if rpcChainID > math.MaxInt64 {
+		return nil, fmt.Errorf("tempo client: invalid chain id %d", rpcChainID)
+	}
+	chainID := int64(rpcChainID)
+	if expectedChainID != 0 && chainID != expectedChainID {
 		return nil, fmt.Errorf("tempo client: chain id mismatch (rpc=%d, expected=%d)", chainID, expectedChainID)
 	}
 	if request.Amount == "0" {
-		signature, err := m.signProof(int64(chainID), challenge.ID, challenge.Realm)
+		// As mppx's assertChallengePolicy, a configured policy (chain,
+		// currency, recipient) also gates zero-amount proofs; without one
+		// they are signed.
+		if m.paymentPolicy != nil {
+			policyRequest := request
+			verifiedChainID := chainID
+			policyRequest.MethodDetails.ChainID = &verifiedChainID
+			if err := m.paymentPolicy(ctx, policyRequest); err != nil {
+				return nil, fmt.Errorf("tempo client: payment rejected by policy: %w", err)
+			}
+		}
+		signature, err := m.signProof(chainID, challenge.ID, challenge.Realm)
 		if err != nil {
 			return nil, err
 		}
@@ -316,7 +331,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 				Type:      tempo.CredentialTypeProof,
 				Signature: signature,
 			}.Map(),
-			Source: tempo.ProofSource(int64(chainID), m.signer.Address()),
+			Source: tempo.ProofSource(chainID, m.signer.Address()),
 		}, nil
 	}
 	if !request.Allows(credentialType) {
@@ -325,11 +340,11 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	if credentialType == tempo.CredentialTypeProof {
 		return nil, fmt.Errorf("tempo client: proof credentials are only valid for zero-amount challenges")
 	}
-	if credentialType == tempo.CredentialTypeHash && request.MethodDetails.FeePayer {
-		return nil, fmt.Errorf("tempo client: hash credentials cannot be used with fee payer challenges")
-	}
-
-	if request.MethodDetails.FeePayer {
+	// Only a pull (transaction) credential is sponsored: a push credential's
+	// transaction is broadcast, and its fees paid, by the client itself, as in
+	// mppx.
+	sponsored := request.MethodDetails.FeePayer && credentialType == tempo.CredentialTypeTransaction
+	if sponsored {
 		// Refuse a too-short sponsored challenge before authorizing payment.
 		// valid_before itself is computed just before signing, after the
 		// payment policy and gas RPCs, so their latency does not eat into it.
@@ -342,14 +357,14 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
 	}
 	policyRequest := request
-	verifiedChainID := int64(chainID)
+	verifiedChainID := chainID
 	policyRequest.MethodDetails.ChainID = &verifiedChainID
 	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
 		return nil, fmt.Errorf("tempo client: payment rejected by policy: %w", err)
 	}
 	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 
-	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, int64(chainID), challenge.Expires)
+	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, chainID, challenge.Expires, sponsored)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +380,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		preflight := &mpp.Credential{
 			Challenge: challenge.ToEcho(),
 			Payload:   tempo.ChargeCredentialPayload{Type: credentialType, Hash: "0x" + strings.Repeat("0", 64)}.Map(),
-			Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
+			Source:    tempo.ProofSource(chainID, m.signer.Address()),
 		}
 		if _, err := mpp.FormatCredential(preflight); err != nil {
 			return nil, err
@@ -382,7 +397,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   payload.Map(),
-		Source:    tempo.ProofSource(int64(chainID), m.signer.Address()),
+		Source:    tempo.ProofSource(chainID, m.signer.Address()),
 	}
 	if _, err := mpp.FormatCredential(credential); err != nil {
 		return nil, err
@@ -397,6 +412,7 @@ func (m *Method) buildTransfer(
 	memo string,
 	chainID int64,
 	challengeExpires string,
+	sponsored bool,
 ) (string, error) {
 	transfers, err := buildTransfers(request, memo)
 	if err != nil {
@@ -425,7 +441,7 @@ func (m *Method) buildTransfer(
 		builder.AddCall(token, big.NewInt(0), common.FromHex(transferDataHex(transfer)))
 	}
 
-	if request.MethodDetails.FeePayer {
+	if sponsored {
 		validBefore, err := sponsoredValidBefore(challengeExpires, m.clock())
 		if err != nil {
 			return "", err
@@ -455,7 +471,7 @@ func (m *Method) buildTransfer(
 	if err != nil {
 		return "", fmt.Errorf("tempo client: serialize transaction: %w", err)
 	}
-	if request.MethodDetails.FeePayer {
+	if sponsored {
 		return serialized + strings.TrimPrefix(strings.ToLower(m.signer.Address().Hex()), "0x") + feePayerMarker, nil
 	}
 	return serialized, nil
@@ -472,11 +488,29 @@ var ErrSponsoredChallengeExpiresTooSoon = errors.New("tempo client: sponsored ch
 // instead of failing on this one.
 func (m *Method) CanHandleChallenge(challenge *mpp.Challenge) bool {
 	request, err := tempo.ParseChargeRequest(challenge.Request)
-	if err != nil || !request.MethodDetails.FeePayer || request.Amount == "0" {
+	if err != nil || !request.MethodDetails.FeePayer || request.Amount == "0" ||
+		m.resolveCredentialType(request) != tempo.CredentialTypeTransaction {
 		return true
 	}
 	_, err = sponsoredValidBefore(challenge.Expires, m.clock())
 	return !errors.Is(err, ErrSponsoredChallengeExpiresTooSoon)
+}
+
+// resolveCredentialType returns the credential type to pay request with:
+// Config.CredentialType when set, otherwise a pull (transaction) credential,
+// or the first mode the challenge's methodDetails.supportedModes lists when
+// it does not allow pull, as mppx's client chooses its mode.
+func (m *Method) resolveCredentialType(request tempo.ChargeRequest) tempo.CredentialType {
+	if m.credentialType != "" {
+		return m.credentialType
+	}
+	if request.Allows(tempo.CredentialTypeTransaction) {
+		return tempo.CredentialTypeTransaction
+	}
+	if request.MethodDetails.SupportedModes[0] == tempo.ChargeModePush {
+		return tempo.CredentialTypeHash
+	}
+	return tempo.CredentialTypeTransaction
 }
 
 func (m *Method) clock() time.Time {

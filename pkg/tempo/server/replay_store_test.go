@@ -51,6 +51,16 @@ func TestTypedNilReplayStoresRejectedBeforeChallenge(t *testing.T) {
 	}
 }
 
+// testSponsoringIntent is a test Intent with a local fee payer, whose routes
+// are sponsored by default.
+func testSponsoringIntent() *Intent {
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
+	if err != nil {
+		panic(err)
+	}
+	return intent
+}
+
 func testStoredIntent() *Intent {
 	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore()})
 	if err != nil {

@@ -63,7 +63,11 @@ type MethodDetails struct {
 	ChainID *int64
 	// FeePayer enables the sponsored transaction flow.
 	FeePayer bool
-	// FeePayerURL points at a remote fee-payer signer.
+	// FeePayerURL is the remote fee-payer URL older servers put in
+	// challenges. It still parses, but servers ignore it.
+	//
+	// Deprecated: the fee payer is configured on the server (the Tempo
+	// method's Config.FeePayerURL or Config.HostedFeePayer), as in mppx.
 	FeePayerURL string
 	// Splits lists any additional transfers included in the charge.
 	Splits []Split
@@ -105,7 +109,11 @@ type ChargeRequestParams struct {
 	ChainID int64
 	// FeePayer enables the sponsored transaction flow.
 	FeePayer bool
-	// FeePayerURL points at a remote fee-payer signer.
+	// FeePayerURL puts a remote fee-payer URL in the challenge, which
+	// servers ignore.
+	//
+	// Deprecated: the fee payer is configured on the server (the Tempo
+	// method's Config.FeePayerURL or Config.HostedFeePayer), as in mppx.
 	FeePayerURL string
 	// Splits lists any additional transfers included in the charge.
 	Splits []SplitParams

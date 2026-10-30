@@ -127,12 +127,12 @@ func TestWithOrderChallengesPicksTheFirstReturned(t *testing.T) {
 	assert.Zero(t, first.calls)
 	assert.Equal(t, 1, second.calls)
 
-	// An empty order pays nothing and returns the 402; an error fails.
+	// An empty order pays nothing and fails with ErrNoMethodFound, as in
+	// mppx; an error fails with it.
 	none := func(context.Context, []ChallengeCandidate) ([]ChallengeCandidate, error) { return nil, nil }
-	resp, err = New([]Method{first, second}, WithOrderChallenges(none)).Get(context.Background(), srv.URL+"/paid")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	_, err = New([]Method{first, second}, WithOrderChallenges(none)).Get(context.Background(), srv.URL+"/paid")
+	require.ErrorIs(t, err, ErrNoMethodFound)
+	assert.ErrorContains(t, err, "No method found for challenges: first.payment, second.payment. Available: first.payment, second.payment")
 	boom := errors.New("boom")
 	failing := func(context.Context, []ChallengeCandidate) ([]ChallengeCandidate, error) { return nil, boom }
 	_, err = New([]Method{first, second}, WithOrderChallenges(failing)).Get(context.Background(), srv.URL+"/paid")

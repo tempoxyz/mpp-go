@@ -297,17 +297,41 @@ func TestTransport_RoundTrip_402NoMatchingMethod(t *testing.T) {
 	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if !assert.NoErrorf(t, err,
-		"unexpected error: %v", err) {
-		return
-	}
+	// The unpaid request's 402 offers nothing the client pays: an error with
+	// mppx's message, not the 402.
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrNoMethodFound)
+	assert.EqualError(t, err, "No method found for challenges: stripe.payment. Available: tempo.payment")
+	var noMethod *NoMethodFoundError
+	require.ErrorAs(t, err, &noMethod)
+	require.Len(t, noMethod.Challenges, 1)
+	assert.Equal(t, challenge.ID, noMethod.Challenges[0].ID)
+	assert.Equal(t, []string{"tempo.payment"}, noMethod.Available)
+}
 
+func TestTransport_RoundTrip_402AfterPaidRetryIsReturned(t *testing.T) {
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		} else {
+			// The credential is rejected with a challenge the client cannot pay.
+			w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(mpptest.NewChallenge("secret", "realm", "stripe", "payment", nil)))
+		}
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	parsedURL, err := urlpkg.Parse(srv.URL)
+	require.NoError(t, err)
+	challenge = mpptest.NewChallenge("secret", parsedURL.Host, "tempo", "payment", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
+	require.NoError(t, err)
 	defer resp.Body.Close()
-	if !assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
-		"expected 402, got %d", resp.StatusCode) {
-		return
-	}
-
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
 }
 
 func TestTransport_RoundTrip_MatchesMethodAndIntent(t *testing.T) {
@@ -369,19 +393,10 @@ func TestTransport_RoundTrip_402ExpiredChallenge(t *testing.T) {
 	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if !assert.NoErrorf(t, err,
-		"unexpected error: %v", err) {
-		return
-	}
-
-	defer resp.Body.Close()
-	if !
-	// Expired challenge → no matching method → return original 402.
-	assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
-		"expected 402 for expired challenge, got %d", resp.StatusCode) {
-		return
-	}
-
+	// Expired challenge → no payable challenge → error, nothing paid.
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrNoMethodFound)
+	assert.Zero(t, method.calls)
 }
 
 func TestTransport_RoundTrip_402UnparseableExpiresIsSkipped(t *testing.T) {
@@ -401,12 +416,9 @@ func TestTransport_RoundTrip_402UnparseableExpiresIsSkipped(t *testing.T) {
 	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if !assert.NoErrorf(t, err, "unexpected error: %v", err) {
-		return
-	}
-	defer resp.Body.Close()
-	// No parseable/valid challenge → original 402 returned, no payment made.
-	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	// No parseable/valid challenge → error, no payment made.
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrNoMethodFound)
 	assert.Equalf(t, 0, method.calls,
 		"CreateCredential() calls = %d, want 0 for unparseable expires", method.calls)
 }
@@ -541,19 +553,10 @@ func TestTransport_RoundTrip_NonPaymentAuthScheme(t *testing.T) {
 	tr := newTestTransport([]Method{method}, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, err := tr.RoundTrip(req)
-	if !assert.NoErrorf(t, err,
-		"unexpected error: %v", err) {
-		return
-	}
-
-	defer resp.Body.Close()
-	if !
-	// Non-Payment scheme → no matching method → return original 402.
-	assert.Equalf(t, http.StatusPaymentRequired, resp.StatusCode,
-		"expected 402, got %d", resp.StatusCode) {
-		return
-	}
-
+	// A 402 without Payment challenges is unpayable, as in mppx.
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrNoMethodFound)
+	assert.EqualError(t, err, "No method found for challenges: . Available: tempo.payment")
 }
 
 func TestTransport_RoundTrip_RejectsOriginMismatchFromContext(t *testing.T) {

@@ -967,7 +967,9 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		Currencies: []string{integrationCurrency},
 		Recipient:  integrationRecipient,
 		ChainID:    int64(chainID),
-		FeePayer:   true,
+		// New refuses FeePayer without a fee payer; with one, every route
+		// is sponsored unless it sets DisableFeePayer (see paidHandler).
+		FeePayer: feePayerSigner != nil,
 	})
 	hashMethod := mustNewMethod(t, chargeserver.Config{
 		Intent:         intent,
@@ -1010,9 +1012,10 @@ func paidHandler(t *testing.T, payment *server.Mpp, feePayer bool) http.HandlerF
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		result, err := payment.Charge(r.Context(), server.ChargeParams{
-			Authorization: r.Header.Get("Authorization"),
-			Amount:        "1.00",
-			FeePayer:      feePayer,
+			Authorization:   r.Header.Get("Authorization"),
+			Amount:          "1.00",
+			FeePayer:        feePayer,
+			DisableFeePayer: !feePayer,
 		})
 		if err != nil {
 			writeIntegrationPaymentError(w, err)

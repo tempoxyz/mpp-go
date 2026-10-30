@@ -12,6 +12,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,24 +74,6 @@ func TestCreateCredentialScenarios(t *testing.T) {
 		wantErr        string
 		wantBroadcasts int
 	}{
-		{
-			name: "hash credential rejected for fee payer challenge",
-			config: Config{
-				ChainID:        42431,
-				CredentialType: tempo.CredentialTypeHash,
-			},
-			rpc: &mockRPC{chainID: 42431},
-			params: tempo.ChargeRequestParams{
-				Amount:    "0.50",
-				Currency:  testCurrency,
-				Recipient: testRecipient,
-				Decimals:  6,
-				ChainID:   42431,
-				FeePayer:  true,
-			},
-			wantErr:        "hash credentials cannot be used with fee payer challenges",
-			wantBroadcasts: 0,
-		},
 		{
 			name: "chain id mismatch",
 			config: Config{
@@ -564,4 +547,118 @@ func TestCreateCredentialDoesNotShareAcrossDifferentChallenges(t *testing.T) {
 	close(release)
 	wg.Wait()
 	assert.Equal(t, int32(2), policyCalls.Load())
+}
+
+// A push credential on a sponsored challenge is broadcast, and its fees paid,
+// by the client itself, as mppx does: the transaction is not marked for a fee
+// payer and pays fees in the charge currency.
+func TestCreateCredentialPushOnSponsoredChallengeIsUnsponsored(t *testing.T) {
+	t.Parallel()
+
+	rpc := &mockRPC{chainID: 42431}
+	method, err := New(Config{
+		PaymentPolicy:  func(context.Context, tempo.ChargeRequest) error { return nil },
+		ChainID:        42431,
+		CredentialType: tempo.CredentialTypeHash,
+		PrivateKey:     testPrivateKey,
+		RPC:            rpc,
+	})
+	require.NoError(t, err)
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, FeePayer: true,
+	})
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, string(tempo.CredentialTypeHash), credential.Payload["type"])
+	require.Len(t, rpc.sentRawTxs, 1)
+	tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	require.NoError(t, err)
+	assert.False(t, tx.AwaitingFeePayer)
+	assert.Equal(t, common.HexToAddress(testCurrency), tx.FeeToken)
+}
+
+// Without a configured CredentialType the client pulls, and pushes when the
+// challenge's supportedModes allows only push (mppx picks supportedModes[0]).
+func TestCreateCredentialFollowsSupportedModes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		modes []tempo.ChargeMode
+		want  tempo.CredentialType
+	}{
+		{name: "unset pulls", want: tempo.CredentialTypeTransaction},
+		{name: "pull and push pulls", modes: []tempo.ChargeMode{tempo.ChargeModePush, tempo.ChargeModePull}, want: tempo.CredentialTypeTransaction},
+		{name: "push only pushes", modes: []tempo.ChargeMode{tempo.ChargeModePush}, want: tempo.CredentialTypeHash},
+		{name: "pull only pulls", modes: []tempo.ChargeMode{tempo.ChargeModePull}, want: tempo.CredentialTypeTransaction},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rpc := &mockRPC{chainID: 42431}
+			method, err := New(Config{
+				PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
+				ChainID:       42431,
+				PrivateKey:    testPrivateKey,
+				RPC:           rpc,
+			})
+			require.NoError(t, err)
+			challenge := buildChallenge(t, tempo.ChargeRequestParams{
+				Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431, SupportedModes: tt.modes,
+			})
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			require.NoError(t, err)
+			assert.Equal(t, string(tt.want), credential.Payload["type"])
+		})
+	}
+
+	// An explicit mode the challenge does not support fails before paying.
+	rpc := &mockRPC{chainID: 42431}
+	method, err := New(Config{
+		PaymentPolicy:  func(context.Context, tempo.ChargeRequest) error { return nil },
+		ChainID:        42431,
+		CredentialType: tempo.CredentialTypeTransaction,
+		PrivateKey:     testPrivateKey,
+		RPC:            rpc,
+	})
+	require.NoError(t, err)
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431,
+		SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush},
+	})
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.ErrorContains(t, err, "not allowed for this challenge")
+	assert.Empty(t, rpc.sentRawTxs)
+}
+
+// A configured PaymentPolicy also gates zero-amount proofs, as mppx's
+// assertChallengePolicy does, against the chain the RPC verified.
+func TestCreateCredentialProofHonoursPaymentPolicy(t *testing.T) {
+	t.Parallel()
+
+	challenge := buildChallenge(t, tempo.ChargeRequestParams{
+		Amount: "0", Currency: testCurrency, Recipient: testRecipient, Decimals: 6, ChainID: 42431,
+	})
+	for _, tt := range []struct {
+		name    string
+		policy  func(context.Context, tempo.ChargeRequest) error
+		wantErr string
+	}{
+		{name: "no policy signs"},
+		{name: "allowed chain signs", policy: AllowChainIDs(42431)},
+		{name: "other chain refused", policy: AllowChainIDs(tempo.ChainIDMainnet), wantErr: "payment rejected by policy"},
+		{name: "other currency refused", policy: MaxAmount(tempo.OUSDAddress, "1", 6), wantErr: "payment rejected by policy"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			method, err := New(Config{PrivateKey: testPrivateKey, RPC: &mockRPC{chainID: 42431}, PaymentPolicy: tt.policy})
+			require.NoError(t, err)
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, string(tempo.CredentialTypeProof), credential.Payload["type"])
+		})
+	}
 }

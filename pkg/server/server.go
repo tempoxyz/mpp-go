@@ -353,8 +353,17 @@ type ChargeParams struct {
 	// Splits adds Tempo split-payment transfers under methodDetails.splits.
 	Splits []tempo.SplitParams
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
+	// A Tempo method with a fee payer sponsors every route without it.
 	FeePayer bool
-	// FeePayerURL points at a remote fee-payer signer.
+	// DisableFeePayer opts this route out of sponsorship (mppx's
+	// feePayer: false): its Tempo challenge does not offer the fee payer.
+	DisableFeePayer bool
+	// FeePayerURL is no longer supported: the Tempo charge method returns an
+	// error when it is set.
+	//
+	// Deprecated: configure the fee payer on the server with the Tempo
+	// method's Config.FeePayerURL or Config.HostedFeePayer; challenges no
+	// longer carry it, as in mppx.
 	FeePayerURL string
 	// SupportedModes advertises the Tempo submission modes allowed for this challenge.
 	SupportedModes []tempo.ChargeMode
