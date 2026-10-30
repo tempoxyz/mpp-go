@@ -1602,35 +1602,28 @@ func resolveChallengeChainID(ctx context.Context, rpc tempo.RPCClient, request t
 	return int64(chainID), nil
 }
 
-// recoverProofSigner recovers the key that signed a proof: a secp256k1
-// signature over the proof digest, or a Keychain envelope naming source whose
-// inner secp256k1 signature signs the digest (Keychain V1, type 0x03) or
-// keccak256(0x04 || digest || source) (Keychain V2, type 0x04), as mppx's
-// recoverAuthorizedProofSigner does.
+// recoverProofSigner recovers the key that signed a proof: a secp256k1, P256
+// or WebAuthn signature over the proof digest, or a Keychain envelope naming
+// source whose inner signature (any of those) signs the digest (Keychain V1,
+// type 0x03) or keccak256(0x04 || digest || source) (Keychain V2, type 0x04),
+// as mppx's recoverAuthorizedProofSigner does.
 func recoverProofSigner(proofHash common.Hash, encoded string, source common.Address) (common.Address, error) {
 	raw, err := hexutil.Decode(encoded)
 	if err != nil {
 		return common.Address{}, err
 	}
-	if len(raw) == keychain.KeychainSignatureLength && (raw[0] == keychainV1SignatureType || raw[0] == keychain.KeychainSignatureType) {
+	if len(raw) > 21 && len(raw) != 65 && (raw[0] == keychainV1SignatureType || raw[0] == keychain.KeychainSignatureType) {
 		rootAccount := common.BytesToAddress(raw[1:21])
 		if rootAccount != source {
 			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
 		}
 		payload := proofHash
 		if raw[0] == keychain.KeychainSignatureType {
-			wrapped := make([]byte, 0, 1+common.HashLength+common.AddressLength)
-			wrapped = append(wrapped, keychain.KeychainSignatureType)
-			wrapped = append(wrapped, proofHash.Bytes()...)
-			wrapped = append(wrapped, rootAccount.Bytes()...)
-			payload = crypto.Keccak256Hash(wrapped)
+			payload = crypto.Keccak256Hash([]byte{keychain.KeychainSignatureType}, proofHash.Bytes(), rootAccount.Bytes())
 		}
-		return recoverSecp256k1(payload, raw[21:])
+		return recoverPrimitiveSigner(payload, raw[21:])
 	}
-	if len(raw) != 65 {
-		return common.Address{}, fmt.Errorf("unexpected proof signature length %d", len(raw))
-	}
-	return recoverSecp256k1(proofHash, raw)
+	return recoverPrimitiveSigner(proofHash, raw)
 }
 
 // recoverSecp256k1 recovers the signer of a 65-byte r || s || v signature,
