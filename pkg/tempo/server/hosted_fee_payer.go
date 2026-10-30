@@ -46,7 +46,14 @@ func (h *HostedFeePayer) client() *http.Client {
 	if h.HTTPClient != nil {
 		return h.HTTPClient
 	}
-	return &http.Client{Timeout: defaultRelayTimeout}
+	// Never follow a redirect: it would carry Headers, such as credentials,
+	// to another endpoint.
+	return &http.Client{
+		Timeout: defaultRelayTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 type hostedFillReply struct {

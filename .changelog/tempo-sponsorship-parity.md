@@ -9,3 +9,4 @@ Aligned Tempo fee sponsorship with mppx:
 - Local co-signing accepts every Tempo sender signature (secp256k1, P256, WebAuthn, Keychain V1 and V2 with any inner signature, and multisig) and transactions carrying a keyAuthorization, and refuses any transaction with a non-empty authorizationList.
 - Pre-broadcast simulations (`eth_call`) now carry the transaction's keyAuthorization as viem formats it.
 - A Go client configured with `Config.CredentialType = tempo.CredentialTypeHash` now pays sponsored (`feePayer`) challenges in push mode, paying its own fees, as mppx does. Servers released before this change reject such a credential after the transfer is on chain, so upgrade servers before clients. The Transport no longer pays again after a 402 to a hash credential: it returns that response.
+- The hosted fee payer's default HTTP client does not follow redirects, so its headers never reach another endpoint.

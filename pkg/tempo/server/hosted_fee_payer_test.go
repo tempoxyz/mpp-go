@@ -498,3 +498,19 @@ func TestFeePayerPolicyDoesNotAliasCallerLimits(t *testing.T) {
 	maxFee.SetInt64(1)
 	assert.Equal(t, int64(1_000_000_000), intent.sponsorPolicy.MaxFeePerGas.Int64())
 }
+
+func TestHostedFeePayerDoesNotFollowRedirects(t *testing.T) {
+	var reached bool
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+	t.Cleanup(target.Close)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirect.Close)
+
+	response, err := (&HostedFeePayer{URL: redirect.URL}).client().Post(redirect.URL, "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	_ = response.Body.Close()
+	assert.Equal(t, http.StatusTemporaryRedirect, response.StatusCode)
+	assert.False(t, reached)
+}
