@@ -80,8 +80,8 @@ func verifyP256(digest, r, s, x, y []byte) (common.Address, error) {
 	if sInt.Cmp(p256HalfOrder) > 0 {
 		return common.Address{}, errors.New("P256 signature has high s value")
 	}
-	key := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-	if !key.Curve.IsOnCurve(key.X, key.Y) {
+	key, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{0x04}, x...), y...))
+	if err != nil {
 		return common.Address{}, errors.New("invalid P256 public key")
 	}
 	if !ecdsa.Verify(key, digest, rInt, sInt) {

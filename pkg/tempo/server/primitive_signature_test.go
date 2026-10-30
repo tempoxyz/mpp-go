@@ -23,8 +23,9 @@ func newP256Key(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	x, y := key.X.FillBytes(make([]byte, 32)), key.Y.FillBytes(make([]byte, 32))
-	return key, common.BytesToAddress(crypto.Keccak256(x, y)[12:])
+	public, err := key.PublicKey.Bytes()
+	require.NoError(t, err)
+	return key, common.BytesToAddress(crypto.Keccak256(public[1:])[12:])
 }
 
 // signP256 signs digest with a low-s signature and returns r || s || x || y.
@@ -38,8 +39,9 @@ func signP256(t *testing.T, key *ecdsa.PrivateKey, digest []byte) []byte {
 	out := make([]byte, 0, 128)
 	out = append(out, r.FillBytes(make([]byte, 32))...)
 	out = append(out, s.FillBytes(make([]byte, 32))...)
-	out = append(out, key.X.FillBytes(make([]byte, 32))...)
-	return append(out, key.Y.FillBytes(make([]byte, 32))...)
+	public, err := key.PublicKey.Bytes()
+	require.NoError(t, err)
+	return append(out, public[1:]...)
 }
 
 func signedP256Envelope(t *testing.T, key *ecdsa.PrivateKey, hash common.Hash, preHash bool) []byte {
