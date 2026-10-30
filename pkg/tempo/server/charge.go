@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/url"
 	"reflect"
@@ -244,6 +245,7 @@ func newIntent(config IntentConfig) (*Intent, error) {
 			return nil, fmt.Errorf("tempo server: configure either a local fee payer (FeePayerSigner or FeePayerPrivateKey) or a hosted fee payer (FeePayerURL or HostedFeePayer), not both")
 		}
 		copied := *hosted
+		copied.Headers = maps.Clone(hosted.Headers)
 		hosted = &copied
 	}
 	var feeToken common.Address
@@ -441,6 +443,15 @@ func (i *Intent) validateHash(
 	source := validated.source
 	if source == nil {
 		return mpp.ErrInvalidPayload("hash credential must include a source")
+	}
+	// A challenge without a chainId is bound to the chain the RPC serves, as
+	// in mppx.
+	chainID, err := resolveChallengeChainID(ctx, validated.rpc, request)
+	if err != nil {
+		return err
+	}
+	if source.chainID != chainID {
+		return mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
 	receiptMap, err := fetchReceipt(ctx, validated.rpc, validated.payload.Hash)
 	if err != nil {

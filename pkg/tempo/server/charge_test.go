@@ -2731,3 +2731,25 @@ func mustTxHash(raw string) string {
 	}
 	return hash.Hex()
 }
+
+// A hash credential's source must name the chain the challenge is bound to,
+// as for transaction credentials and in mppx, also when the challenge omits
+// chainId and is bound to the chain the RPC serves.
+func TestChargeFlow_HashCredentialRejectsSourceOnAnotherChain(t *testing.T) {
+	ctx := context.Background()
+	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+		Amount: "0.50", Currency: testCurrency, Recipient: testRecipient, Decimals: 6,
+	})
+	require.NoError(t, err)
+	require.Nil(t, request.MethodDetails.ChainID)
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	credential.Source = strings.Replace(credential.Source, ":42431:", ":4217:", 1)
+	require.Contains(t, credential.Source, ":4217:")
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "source chain id does not match")
+}
