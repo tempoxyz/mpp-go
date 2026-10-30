@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -94,11 +96,11 @@ type IntentConfig struct {
 	FeePayerPrivateKey string
 	// AllowedFeeTokens lists the fee tokens this verifier will sponsor, as in
 	// mppx. With a local fee payer, they are the fee tokens it may pay gas in,
-	// tried in this order and independent of the charge currency. Remote fee
-	// payers (FeePayerURL) pay in the charge currency, which must be listed.
-	// When nil, the verifier sponsors pathUSD, AlphaUSD and USDC.e, and a
-	// local fee payer pays in pathUSD or, on mainnet, USDC.e. A non-nil list
-	// must name at least one valid address.
+	// tried in this order and independent of the charge currency. A hosted fee
+	// payer chooses its own fee token, which must be listed when this list is
+	// set; when nil, a hosted fee payer's choice is not restricted, as in
+	// mppx. When nil, a local fee payer pays in pathUSD or, on mainnet,
+	// USDC.e. A non-nil list must name at least one valid address.
 	AllowedFeeTokens []string
 	// FeePayerPolicy sets the sponsorship limits applied to every allowed fee
 	// token, as mppx's feePayerPolicy does. Nil fields keep the defaults
@@ -109,8 +111,17 @@ type IntentConfig struct {
 	// the local fee payer uses the first allowed fee token it holds a balance
 	// of, or the first allowed fee token. It must be an allowed fee token (New
 	// and NewIntent reject one missing from AllowedFeeTokens) and is ignored
-	// for remote fee payers (FeePayerURL).
+	// for a hosted fee payer.
 	FeeToken string
+	// FeePayerURL sponsors charges through a hosted fee-payer service at this
+	// JSON-RPC URL; it is shorthand for HostedFeePayer{URL: FeePayerURL}, as
+	// mppx's feePayer: '<url>'. It cannot be combined with HostedFeePayer or
+	// a local FeePayerSigner.
+	FeePayerURL string
+	// HostedFeePayer sponsors charges through a hosted fee-payer service, as
+	// mppx's feePayer: {url, headers}; see HostedFeePayer. It cannot be
+	// combined with FeePayerURL or a local FeePayerSigner.
+	HostedFeePayer *HostedFeePayer
 	// Store is required to verify payments. Use a persistent store shared by all
 	// replicas, with atomic PutIfAbsent and no eviction of replay keys.
 	// An explicit tempo.NewMemoryStore() is only suitable for single-process development.
@@ -136,7 +147,11 @@ type Intent struct {
 	// nil selects the per-chain defaults.
 	feeTokens []common.Address
 	feeToken  common.Address
-	store     tempo.Store
+	// hostedFeePayer sponsors charges when no local feePayerSigner is set.
+	hostedFeePayer *HostedFeePayer
+	// sponsorPolicy is the sponsorship policy every fee token shares.
+	sponsorPolicy FeePayerPolicy
+	store         tempo.Store
 	// expireReplayKeys claims replay keys with tempo.ExpiringStore; see
 	// IntentConfig.ExpireReplayKeys.
 	expireReplayKeys bool
@@ -212,6 +227,27 @@ func newIntent(config IntentConfig) (*Intent, error) {
 	if err != nil {
 		return nil, err
 	}
+	hosted := config.HostedFeePayer
+	if config.FeePayerURL != "" {
+		if hosted != nil {
+			return nil, fmt.Errorf("tempo server: configure either FeePayerURL or HostedFeePayer, not both")
+		}
+		hosted = &HostedFeePayer{URL: config.FeePayerURL}
+	}
+	if hosted != nil {
+		if hosted.URL == "" {
+			return nil, fmt.Errorf("tempo server: HostedFeePayer requires a URL")
+		}
+		if parsed, err := url.Parse(hosted.URL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return nil, fmt.Errorf("tempo server: invalid hosted fee payer URL %q", hosted.URL)
+		}
+		if feePayerSigner != nil {
+			return nil, fmt.Errorf("tempo server: configure either a local fee payer (FeePayerSigner or FeePayerPrivateKey) or a hosted fee payer (FeePayerURL or HostedFeePayer), not both")
+		}
+		copied := *hosted
+		copied.Headers = maps.Clone(hosted.Headers)
+		hosted = &copied
+	}
 	var feeToken common.Address
 	if config.FeeToken != "" {
 		if !common.IsHexAddress(config.FeeToken) {
@@ -235,6 +271,8 @@ func newIntent(config IntentConfig) (*Intent, error) {
 		feePayerPolicy:   feePayerPolicy,
 		feeTokens:        feeTokens,
 		feeToken:         feeToken,
+		hostedFeePayer:   hosted,
+		sponsorPolicy:    resolveSponsorPolicy(config),
 		store:            store,
 		expireReplayKeys: config.ExpireReplayKeys,
 	}, nil
@@ -355,11 +393,11 @@ func (i *Intent) validateCredential(
 	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	if request.MethodDetails.FeePayer && request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
-		return nil, mpp.ErrInvalidPayload("zero-amount fee payer challenges require a proof credential")
-	}
-	if request.MethodDetails.FeePayer && request.Amount != "0" && payload.Type != tempo.CredentialTypeTransaction {
-		return nil, mpp.ErrInvalidPayload("fee payer challenges require a transaction credential")
+	// As in mppx, a zero-amount charge is paid only with a proof, sponsored
+	// or not; a sponsored charge accepts a push (hash) credential, which the
+	// client broadcast and paid fees for itself.
+	if request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
+		return nil, mpp.ErrInvalidPayload("zero-amount challenges require a proof credential")
 	}
 	if !request.Allows(payload.Type) {
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("credential type %q is not allowed for this challenge", payload.Type))
@@ -405,6 +443,15 @@ func (i *Intent) validateHash(
 	source := validated.source
 	if source == nil {
 		return mpp.ErrInvalidPayload("hash credential must include a source")
+	}
+	// A challenge without a chainId is bound to the chain the RPC serves, as
+	// in mppx.
+	chainID, err := resolveChallengeChainID(ctx, validated.rpc, request)
+	if err != nil {
+		return err
+	}
+	if source.chainID != chainID {
+		return mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
 	receiptMap, err := fetchReceipt(ctx, validated.rpc, validated.payload.Hash)
 	if err != nil {
@@ -492,34 +539,47 @@ func (i *Intent) validateTransaction(
 	tx.From = sender
 
 	if request.MethodDetails.FeePayer {
-		allowed, err := i.allowedFeeTokens(ctx, validated.rpc, request)
-		if err != nil {
-			return err
-		}
-		if feePayerForm && tx.FeeToken != (common.Address{}) && !slices.Contains(allowed, tx.FeeToken) {
-			return mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
-		}
-		feeToken := allowed[0]
-		if tx.FeeToken != (common.Address{}) {
-			feeToken = tx.FeeToken
-		}
-		if i.feePayerSigner != nil {
-			feeToken, err = i.resolveFeeToken(ctx, validated.rpc, allowed)
+		var policy FeePayerPolicy
+		if i.usesHostedFeePayer() {
+			// A hosted fee payer picks the fee token; only an explicit
+			// AllowedFeeTokens list restricts it, as in mppx.
+			if feePayerForm && tx.FeeToken != (common.Address{}) && i.feeTokens != nil && !slices.Contains(i.feeTokens, tx.FeeToken) {
+				return mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+			}
+			policy, err = i.sponsorPolicyFor(tx.FeeToken)
 			if err != nil {
 				return err
 			}
-			validated.feeToken = feeToken
-			if i.feeToken == (common.Address{}) {
-				for _, token := range allowed {
-					if token != feeToken {
-						validated.altFeeTokens = append(validated.altFeeTokens, token)
+		} else {
+			allowed, err := i.allowedFeeTokens(ctx, validated.rpc, request)
+			if err != nil {
+				return err
+			}
+			if feePayerForm && tx.FeeToken != (common.Address{}) && !slices.Contains(allowed, tx.FeeToken) {
+				return mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
+			}
+			feeToken := allowed[0]
+			if tx.FeeToken != (common.Address{}) {
+				feeToken = tx.FeeToken
+			}
+			if i.feePayerSigner != nil {
+				feeToken, err = i.resolveFeeToken(ctx, validated.rpc, allowed)
+				if err != nil {
+					return err
+				}
+				validated.feeToken = feeToken
+				if i.feeToken == (common.Address{}) {
+					for _, token := range allowed {
+						if token != feeToken {
+							validated.altFeeTokens = append(validated.altFeeTokens, token)
+						}
 					}
 				}
 			}
-		}
-		policy, err := i.feePayerPolicyFor(feeToken.Hex())
-		if err != nil {
-			return err
+			policy, err = i.feePayerPolicyFor(feeToken.Hex())
+			if err != nil {
+				return err
+			}
 		}
 		// tempo-go exposes the signing primitives already; this package keeps the
 		// sponsor policy checks local until a shared helper exists upstream.
@@ -722,30 +782,29 @@ func (i *Intent) broadcastTransaction(
 			if err := tempotx.AddFeePayerSignature(tx, i.feePayerSigner); err != nil {
 				return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer transaction")
 			}
-		} else if request.MethodDetails.FeePayerURL != "" {
-			coSignedRaw, err := signWithRemoteFeePayer(ctx, i.rpcClients.Get(request.MethodDetails.FeePayerURL), validated.payload.Signature)
+		} else if i.hostedFeePayer != nil {
+			// As mppx's fillHostedFeePayerTransaction: only the sponsor's
+			// signature and fee token are taken from its answer; every
+			// sender-committed field stays the client's, and the sponsor is
+			// recovered from the signature below.
+			signature, hostedFeeToken, err := i.hostedFeePayer.fill(ctx, tx)
 			if err != nil {
 				return nil, err
 			}
-			tx, err = tempotx.Deserialize(coSignedRaw)
-			if err != nil {
-				return nil, mpp.ErrVerificationFailed("fee payer returned an invalid transaction")
-			}
-			allowed, err := i.allowedFeeTokens(ctx, rpc, request)
-			if err != nil {
-				return nil, err
-			}
-			if !slices.Contains(allowed, tx.FeeToken) {
+			if i.feeTokens != nil && !slices.Contains(i.feeTokens, hostedFeeToken) {
 				return nil, mpp.ErrInvalidPayload("fee payer transaction fee token is not supported")
 			}
-			feeToken = tx.FeeToken
+			tx.FeeToken = hostedFeeToken
+			tx.AwaitingFeePayer = false
+			tx.FeePayerSignature = signature
+			feeToken = hostedFeeToken
 		} else {
-			return nil, mpp.ErrVerificationFailed("fee payer challenge requires a configured fee payer signer or fee payer URL")
+			return nil, mpp.ErrVerificationFailed("fee payer challenge requires a configured fee payer (FeePayerSigner, FeePayerPrivateKey, FeePayerURL or HostedFeePayer)")
 		}
 		if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
 			return nil, mpp.ErrVerificationFailed("co-signed transaction does not contain a matching Tempo transfer")
 		}
-		policy, err := i.feePayerPolicyFor(feeToken.Hex())
+		policy, err := i.sponsorPolicyFor(feeToken)
 		if err != nil {
 			return nil, err
 		}
@@ -1143,118 +1202,6 @@ func sponsoredTransactionHash(tx *tempotx.Tx, sender common.Address) (string, er
 		return "", err
 	}
 	return crypto.Keccak256Hash(sender.Bytes(), payload.Bytes()).Hex(), nil
-}
-
-// deserializeTransactionCredential accepts both the broadcast transaction
-// envelope (0x76) and the fee-payer signing form (0x78). tempo-go v0.5 only
-// decodes 0x76, so the 0x78 body is validated and converted to the equivalent
-// awaiting-fee-payer shape before delegating the remaining decoding.
-func deserializeTransactionCredential(serialized string) (*tempotx.Tx, bool, error) {
-	hexValue := serialized
-	if strings.HasPrefix(hexValue, "0x") || strings.HasPrefix(hexValue, "0X") {
-		hexValue = hexValue[2:]
-	}
-	encoded, err := hex.DecodeString(hexValue)
-	if err != nil {
-		return nil, false, fmt.Errorf("decode transaction: %w", err)
-	}
-	if len(encoded) < 2 {
-		return nil, false, fmt.Errorf("transaction is too short")
-	}
-
-	switch encoded[0] {
-	case 0x76:
-		tx, err := tempotx.Deserialize("0x" + hex.EncodeToString(encoded))
-		return tx, false, err
-	case 0x78:
-		var fields []rlp.RawValue
-		if err := rlp.DecodeBytes(encoded[1:], &fields); err != nil {
-			return nil, false, fmt.Errorf("decode fee-payer transaction body: %w", err)
-		}
-		if len(fields) != 13 && len(fields) != 14 && len(fields) != 15 {
-			return nil, false, fmt.Errorf("invalid fee-payer transaction field count %d", len(fields))
-		}
-
-		var senderBytes []byte
-		if err := rlp.DecodeBytes(fields[11], &senderBytes); err != nil {
-			return nil, false, fmt.Errorf("decode fee-payer transaction sender: %w", err)
-		}
-		if len(senderBytes) != common.AddressLength {
-			return nil, false, fmt.Errorf("invalid fee-payer transaction sender length %d", len(senderBytes))
-		}
-		sender := common.BytesToAddress(senderBytes)
-		if sender == (common.Address{}) {
-			return nil, false, fmt.Errorf("fee-payer transaction sender is required")
-		}
-
-		awaitingFeePayer, err := rlp.EncodeToBytes([]byte{0})
-		if err != nil {
-			return nil, false, fmt.Errorf("encode fee-payer marker: %w", err)
-		}
-		fields[11] = awaitingFeePayer
-		body, err := rlp.EncodeToBytes(fields)
-		if err != nil {
-			return nil, false, fmt.Errorf("encode transaction body: %w", err)
-		}
-
-		tx, err := tempotx.Deserialize("0x76" + hex.EncodeToString(body))
-		if err != nil {
-			return nil, false, err
-		}
-		tx.AwaitingFeePayer = true
-		tx.From = sender
-		return tx, true, nil
-	default:
-		return nil, false, fmt.Errorf("unsupported transaction prefix 0x%02x", encoded[0])
-	}
-}
-
-// verifyTransactionSender verifies a transaction's sender signature and
-// returns the authorizing account. Keychain signatures are made by an access
-// key but authorize the root account embedded in the envelope.
-func verifyTransactionSender(tx *tempotx.Tx) (common.Address, error) {
-	if tx.Signature == nil {
-		return common.Address{}, fmt.Errorf("transaction has no sender signature")
-	}
-
-	if tx.Signature.Type != "keychain" {
-		sender, err := tempotx.VerifySignature(tx)
-		if err != nil {
-			return common.Address{}, err
-		}
-		if tx.From != (common.Address{}) && tx.From != sender {
-			return common.Address{}, fmt.Errorf("transaction sender does not match signature")
-		}
-		return sender, nil
-	}
-
-	_, rootAccount, innerSignature, err := keychain.ParseKeychainSignature(tx.Signature.Raw)
-	if err != nil {
-		return common.Address{}, err
-	}
-	switch innerSignature.YParity {
-	case 0, 1:
-	case 27, 28:
-		innerSignature.YParity -= 27
-	default:
-		return common.Address{}, fmt.Errorf("invalid keychain signature y parity %d", innerSignature.YParity)
-	}
-
-	txForVerify := *tx
-	signatureForVerify := *tx.Signature
-	signatureForVerify.Raw = keychain.BuildKeychainSignature(innerSignature, rootAccount)
-	txForVerify.Signature = &signatureForVerify
-	_, verifiedRoot, err := keychain.VerifyAccessKeySignature(&txForVerify)
-	if err != nil {
-		return common.Address{}, err
-	}
-	if verifiedRoot != rootAccount {
-		return common.Address{}, fmt.Errorf("keychain signature root account mismatch")
-	}
-	if tx.From != (common.Address{}) && tx.From != rootAccount {
-		return common.Address{}, fmt.Errorf("transaction sender does not match keychain root account")
-	}
-	return rootAccount, nil
 }
 
 // TODO(tempo-go): extract the Tempo transaction/receipt matching and fee-payer
@@ -1655,35 +1602,35 @@ func resolveChallengeChainID(ctx context.Context, rpc tempo.RPCClient, request t
 	return int64(chainID), nil
 }
 
+// recoverProofSigner recovers the key that signed a proof: a secp256k1, P256
+// or WebAuthn signature over the proof digest, or a Keychain envelope naming
+// source whose inner signature (any of those) signs the digest (Keychain V1,
+// type 0x03) or keccak256(0x04 || digest || source) (Keychain V2, type 0x04),
+// as mppx's recoverAuthorizedProofSigner does.
 func recoverProofSigner(proofHash common.Hash, encoded string, source common.Address) (common.Address, error) {
 	raw, err := hexutil.Decode(encoded)
 	if err != nil {
 		return common.Address{}, err
 	}
-	if keychain.IsKeychainSignature(raw) {
-		_, rootAccount, innerSignature, err := keychain.ParseKeychainSignature(raw)
-		if err != nil {
-			return common.Address{}, err
-		}
+	if len(raw) > 21 && len(raw) != 65 && (raw[0] == keychainV1SignatureType || raw[0] == keychain.KeychainSignatureType) {
+		rootAccount := common.BytesToAddress(raw[1:21])
 		if rootAccount != source {
 			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
 		}
-		// Normalize the inner recovery id to 0/1, as RecoverAddress requires
-		// (the encoded byte may be a legacy 27/28 v value).
-		if innerSignature.YParity >= 27 {
-			innerSignature.YParity -= 27
+		payload := proofHash
+		if raw[0] == keychain.KeychainSignatureType {
+			payload = crypto.Keccak256Hash([]byte{keychain.KeychainSignatureType}, proofHash.Bytes(), rootAccount.Bytes())
 		}
-		if innerSignature.YParity > 1 {
-			return common.Address{}, fmt.Errorf("invalid recovery id")
-		}
-		payload := make([]byte, 0, 1+len(proofHash.Bytes())+len(rootAccount.Bytes()))
-		payload = append(payload, keychain.KeychainSignatureType)
-		payload = append(payload, proofHash.Bytes()...)
-		payload = append(payload, rootAccount.Bytes()...)
-		return temposigner.RecoverAddress(crypto.Keccak256Hash(payload), innerSignature)
+		return recoverPrimitiveSigner(payload, raw[21:])
 	}
+	return recoverPrimitiveSigner(proofHash, raw)
+}
+
+// recoverSecp256k1 recovers the signer of a 65-byte r || s || v signature,
+// v being 0, 1, 27 or 28.
+func recoverSecp256k1(hash common.Hash, raw []byte) (common.Address, error) {
 	if len(raw) != 65 {
-		return common.Address{}, fmt.Errorf("unexpected proof signature length %d", len(raw))
+		return common.Address{}, fmt.Errorf("unexpected signature length %d", len(raw))
 	}
 	v := raw[64]
 	if v >= 27 {
@@ -1692,7 +1639,7 @@ func recoverProofSigner(proofHash common.Hash, encoded string, source common.Add
 	if v > 1 {
 		return common.Address{}, fmt.Errorf("invalid recovery id")
 	}
-	return temposigner.RecoverAddress(proofHash, temposigner.NewSignature(
+	return temposigner.RecoverAddress(hash, temposigner.NewSignature(
 		new(big.Int).SetBytes(raw[:32]),
 		new(big.Int).SetBytes(raw[32:64]),
 		v,
@@ -1726,8 +1673,11 @@ func isActiveAccessKey(ctx context.Context, rpc tempo.RPCClient, account, access
 	if keyID != accessKey {
 		return false, nil
 	}
+	// As mppx (Actions.accessKey.getMetadata): a key is active while it is
+	// not revoked and its expiry is in the future, so a stored expiry of 0
+	// (an unknown key) is inactive.
 	expiry := new(big.Int).SetBytes(resultBytes[64:96])
-	if expiry.Sign() > 0 && expiry.Cmp(big.NewInt(time.Now().Unix())) <= 0 {
+	if expiry.Cmp(big.NewInt(time.Now().Unix())) <= 0 {
 		return false, nil
 	}
 	for _, value := range resultBytes[128:160] {
@@ -1740,21 +1690,6 @@ func isActiveAccessKey(ctx context.Context, rpc tempo.RPCClient, account, access
 
 func addressToWord(address common.Address) string {
 	return strings.Repeat("0", 24) + strings.TrimPrefix(strings.ToLower(address.Hex()), "0x")
-}
-
-func signWithRemoteFeePayer(ctx context.Context, feePayer tempo.RPCClient, raw string) (string, error) {
-	response, err := feePayer.SendRequest(ctx, "eth_signRawTransaction", raw)
-	if err != nil {
-		return "", mpp.ErrVerificationFailed("fee payer signing failed")
-	}
-	if err := response.CheckError(); err != nil {
-		return "", mpp.ErrVerificationFailed(err.Error())
-	}
-	serialized, ok := response.Result.(string)
-	if !ok || serialized == "" {
-		return "", mpp.ErrVerificationFailed("fee payer returned no signed transaction")
-	}
-	return serialized, nil
 }
 
 func simulateSponsoredSenderExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
@@ -1770,13 +1705,20 @@ func simulateSponsoredTransactionExecution(
 	tx *tempotx.Tx,
 	feePayer common.Address,
 ) error {
-	callObject := transactionCallObject(tx)
+	callObject, err := transactionCallObject(tx)
+	if err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
 	callObject["feePayer"] = feePayer.Hex()
 	return simulateCall(ctx, rpc, callObject)
 }
 
 func simulateTransactionExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
-	return simulateCall(ctx, rpc, transactionCallObject(tx))
+	callObject, err := transactionCallObject(tx)
+	if err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	return simulateCall(ctx, rpc, callObject)
 }
 
 func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[string]any) error {
@@ -1790,7 +1732,10 @@ func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[strin
 	return nil
 }
 
-func transactionCallObject(tx *tempotx.Tx) map[string]any {
+// transactionCallObject renders tx as an eth_call request without its
+// signatures, with its keyAuthorization as viem formats it (ox
+// KeyAuthorization.toRpc), as mppx simulates a transaction.
+func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
 	callObject := map[string]any{
 		"accessList":           accessListCallObject(tx.AccessList),
 		"calls":                callsCallObject(tx.Calls),
@@ -1813,7 +1758,14 @@ func transactionCallObject(tx *tempotx.Tx) map[string]any {
 	if tx.FeeToken != (common.Address{}) {
 		callObject["feeToken"] = tx.FeeToken.Hex()
 	}
-	return callObject
+	if tx.KeyAuthorization != nil {
+		keyAuthorization, err := keyAuthorizationRPC(tx.KeyAuthorization)
+		if err != nil {
+			return nil, err
+		}
+		callObject["keyAuthorization"] = keyAuthorization
+	}
+	return callObject, nil
 }
 
 func callsCallObject(calls []tempotx.Call) []map[string]any {
@@ -1857,23 +1809,7 @@ func hexBig(value *big.Int) string {
 // ordered fee tokens a local fee payer may pay gas in (nil for the per-chain
 // defaults) from AllowedFeeTokens and FeePayerPolicy.
 func resolveFeePayerPolicies(config IntentConfig) (map[string]FeePayerPolicy, []common.Address, error) {
-	policy := defaultFeePayerPolicy()
-	if config.FeePayerPolicy != nil {
-		if config.FeePayerPolicy.MaxFeePerGas != nil {
-			policy.MaxFeePerGas = config.FeePayerPolicy.MaxFeePerGas
-		}
-		if config.FeePayerPolicy.MaxPriorityFeePerGas != nil {
-			policy.MaxPriorityFeePerGas = config.FeePayerPolicy.MaxPriorityFeePerGas
-		} else if config.FeePayerPolicy.MaxFeePerGas != nil && policy.MaxPriorityFeePerGas.Cmp(config.FeePayerPolicy.MaxFeePerGas) > 0 {
-			// A priority fee can never exceed the max fee, so lower the
-			// default to a MaxFeePerGas set below it.
-			policy.MaxPriorityFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxFeePerGas)
-		}
-		if config.FeePayerPolicy.MaxTotalFee != nil {
-			policy.MaxTotalFee = config.FeePayerPolicy.MaxTotalFee
-		}
-		policy.RejectKeyAuthorization = config.FeePayerPolicy.RejectKeyAuthorization
-	}
+	policy := resolveSponsorPolicy(config)
 	if config.AllowedFeeTokens == nil {
 		configured := defaultFeePayerPolicies()
 		for token := range configured {
@@ -1903,6 +1839,58 @@ func resolveFeePayerPolicies(config IntentConfig) (map[string]FeePayerPolicy, []
 		return nil, nil, err
 	}
 	return policies, feeTokens, nil
+}
+
+// resolveSponsorPolicy returns the sponsorship policy FeePayerPolicy sets
+// over the defaults; every fee token shares it.
+func resolveSponsorPolicy(config IntentConfig) FeePayerPolicy {
+	policy := defaultFeePayerPolicy()
+	if config.FeePayerPolicy != nil {
+		if config.FeePayerPolicy.MaxFeePerGas != nil {
+			policy.MaxFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxFeePerGas)
+		}
+		if config.FeePayerPolicy.MaxPriorityFeePerGas != nil {
+			policy.MaxPriorityFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxPriorityFeePerGas)
+		} else if config.FeePayerPolicy.MaxFeePerGas != nil && policy.MaxPriorityFeePerGas.Cmp(config.FeePayerPolicy.MaxFeePerGas) > 0 {
+			// A priority fee can never exceed the max fee, so lower the
+			// default to a MaxFeePerGas set below it.
+			policy.MaxPriorityFeePerGas = new(big.Int).Set(config.FeePayerPolicy.MaxFeePerGas)
+		}
+		if config.FeePayerPolicy.MaxTotalFee != nil {
+			policy.MaxTotalFee = new(big.Int).Set(config.FeePayerPolicy.MaxTotalFee)
+		}
+		policy.RejectKeyAuthorization = config.FeePayerPolicy.RejectKeyAuthorization
+	}
+	return policy
+}
+
+// usesHostedFeePayer reports whether a hosted fee payer, not a local signer,
+// sponsors this verifier's charges.
+func (i *Intent) usesHostedFeePayer() bool {
+	return i.feePayerSigner == nil && i.hostedFeePayer != nil
+}
+
+// sponsorPolicyFor returns the sponsorship policy for a fee token. A hosted
+// fee payer without an AllowedFeeTokens list may pick any fee token, which
+// then gets the shared policy, as does a transaction it has not filled yet.
+func (i *Intent) sponsorPolicyFor(feeToken common.Address) (FeePayerPolicy, error) {
+	// Before the hosted fee payer fills the fee token, every allowed token
+	// shares this policy; the filled token is checked after co-signing.
+	if i.usesHostedFeePayer() && (i.feeTokens == nil || feeToken == (common.Address{})) {
+		policy := i.sponsorPolicy
+		return FeePayerPolicy{
+			MaxFeePerGas:           new(big.Int).Set(policy.MaxFeePerGas),
+			MaxPriorityFeePerGas:   new(big.Int).Set(policy.MaxPriorityFeePerGas),
+			MaxTotalFee:            new(big.Int).Set(policy.MaxTotalFee),
+			RejectKeyAuthorization: policy.RejectKeyAuthorization,
+		}, nil
+	}
+	return i.feePayerPolicyFor(feeToken.Hex())
+}
+
+// sponsors reports whether the verifier has a fee payer, local or hosted.
+func (i *Intent) sponsors() bool {
+	return i != nil && (i.feePayerSigner != nil || i.hostedFeePayer != nil)
 }
 
 func normalizeFeePayerPolicies(configured map[string]FeePayerPolicy) (map[string]FeePayerPolicy, error) {

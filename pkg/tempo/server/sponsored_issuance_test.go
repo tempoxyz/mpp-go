@@ -32,8 +32,8 @@ func TestSponsoredChallengeIssuanceRequires15Seconds(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			method := newMethod(methodConfig{Intent: testStoredIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431})
-			_, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50", FeePayer: tt.feePayer, Expires: tt.expires})
+			method := newMethod(methodConfig{Intent: testSponsoringIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431})
+			_, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0.50", DisableFeePayer: !tt.feePayer, Expires: tt.expires})
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -47,7 +47,7 @@ func TestSponsoredChargeRefusesShortExpiryAtIssuance(t *testing.T) {
 	t.Parallel()
 
 	for _, sponsoredByDefault := range []bool{false, true} {
-		method := newMethod(methodConfig{Intent: testStoredIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: sponsoredByDefault})
+		method := newMethod(methodConfig{Intent: testSponsoringIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: sponsoredByDefault})
 		payment, err := mppserver.New(method, "api.example.com", "0123456789abcdef0123456789abcdef")
 		require.NoError(t, err)
 
@@ -69,7 +69,7 @@ func TestSponsoredIssuanceFloorSkipsZeroAmountProofCharges(t *testing.T) {
 	t.Parallel()
 
 	for _, sponsoredByDefault := range []bool{false, true} {
-		method := newMethod(methodConfig{Intent: testStoredIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: sponsoredByDefault})
+		method := newMethod(methodConfig{Intent: testSponsoringIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: sponsoredByDefault})
 		_, err := method.BuildChargeRequest(mppserver.ChargeParams{Amount: "0", FeePayer: !sponsoredByDefault, Expires: mpp.ExpiresIn(10 * time.Second)})
 		require.NoError(t, err)
 
@@ -86,7 +86,7 @@ func TestSponsoredIssuanceFloorSkipsZeroAmountProofCharges(t *testing.T) {
 func TestSponsoredIssuanceFloorSkipsCredentialVerification(t *testing.T) {
 	t.Parallel()
 
-	method := newMethod(methodConfig{Intent: testStoredIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: true})
+	method := newMethod(methodConfig{Intent: testSponsoringIntent(), Recipient: sponsoredIssuanceRecipient, ChainID: 42431, FeePayer: true})
 	expires := mpp.ExpiresIn(10 * time.Second)
 
 	// A request carrying a Payment credential is verified against its echoed

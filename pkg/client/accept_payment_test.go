@@ -459,10 +459,14 @@ func TestTransport_RoundTrip_PaymentNegotiation(t *testing.T) {
 			}
 
 			resp, err := transport.RoundTrip(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-
-			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			if tt.wantStatus == http.StatusPaymentRequired {
+				// Nothing payable in the first 402 fails the request.
+				require.ErrorIs(t, err, ErrNoMethodFound)
+			} else {
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			}
 			assert.Equal(t, tt.wantHeader, acceptPayment)
 			calls := make([]int, len(tracked))
 			for i, method := range tracked {

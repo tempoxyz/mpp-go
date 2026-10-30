@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -50,12 +51,51 @@ type OriginValidator interface {
 // errors.Is.
 var ErrPaymentDeclined = errors.New("mpp: payment declined")
 
+// ErrNoMethodFound matches, with errors.Is, the *NoMethodFoundError a request
+// fails with when the server's first 402 offers no Challenge a configured
+// Method pays.
+var ErrNoMethodFound = errors.New("mpp: no method found for challenges")
+
+// NoMethodFoundError is returned, wrapped in a *url.Error by Client.Do and
+// http.Client, when the 402 answering a request that carried no Credential
+// offers no Challenge a configured Method can pay (none matches a method and
+// intent, every match is expired, refused by ChallengeMatcher or q=0, or
+// OrderChallenges returned none). It matches mppx's error message. A 402
+// answering a paid retry is returned as the response instead: it is the
+// server's answer to the Credential.
+type NoMethodFoundError struct {
+	// Challenges are the Payment Challenges the 402 offered, in offer order.
+	Challenges []mpp.Challenge
+	// Available lists the configured methods as "method.intent".
+	Available []string
+}
+
+func newNoMethodFoundError(challenges []mpp.Challenge, methods []Method) *NoMethodFoundError {
+	available := make([]string, len(methods))
+	for i, method := range methods {
+		available[i] = method.Name() + "." + method.Intent()
+	}
+	return &NoMethodFoundError{Challenges: append([]mpp.Challenge(nil), challenges...), Available: available}
+}
+
+func (e *NoMethodFoundError) Error() string {
+	offered := make([]string, len(e.Challenges))
+	for i, challenge := range e.Challenges {
+		offered[i] = challenge.Method + "." + challenge.Intent
+	}
+	return "No method found for challenges: " + strings.Join(offered, ", ") + ". Available: " + strings.Join(e.Available, ", ")
+}
+
+// Is reports whether target is ErrNoMethodFound.
+func (e *NoMethodFoundError) Is(target error) bool { return target == ErrNoMethodFound }
+
 // OrderChallenges filters and sorts the payable Challenges before one is
 // paid, like mppx's orderChallenges. Candidates arrive ranked by payment
 // preference, then offer order. Return them in the order to try: the first
 // one returned that passes the origin checks is paid. Returning none pays
-// nothing, and the 402 response is returned as is; returning an error fails
-// the request with it.
+// nothing and fails the request with a *NoMethodFoundError, as when no
+// method can pay the 402 (after a paid retry, the 402 is returned instead);
+// returning an error fails the request with it.
 type OrderChallenges func(
 	ctx context.Context,
 	candidates []ChallengeCandidate,

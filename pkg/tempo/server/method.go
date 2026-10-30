@@ -23,19 +23,24 @@ type methodConfig struct {
 	Decimals       int
 	ChainID        int64
 	FeePayer       bool
-	FeePayerURL    string
 	SupportedModes []tempo.ChargeMode
 }
 
 // Method adapts Tempo charge configuration to the generic server interfaces.
 type Method struct {
-	intent               mppserver.Intent
-	currencies           []string
-	recipient            string
-	decimals             int
-	chainID              int64
-	feePayer             bool
-	feePayerURL          string
+	intent     mppserver.Intent
+	currencies []string
+	recipient  string
+	decimals   int
+	chainID    int64
+	// feePayer advertises sponsorship on every route (Config.FeePayer).
+	feePayer bool
+	// sponsors is set when the intent has a fee payer, local or hosted: then
+	// every route is sponsored unless ChargeParams.DisableFeePayer, as in
+	// mppx.
+	sponsors bool
+	// relay is set when a relay verifies credentials and sponsors them.
+	relay                bool
 	supportedModes       []tempo.ChargeMode
 	supportsUnknownChain bool
 }
@@ -71,7 +76,7 @@ func newMethod(config methodConfig) *Method {
 		decimals:             decimals,
 		chainID:              chainID,
 		feePayer:             config.FeePayer,
-		feePayerURL:          config.FeePayerURL,
+		sponsors:             intent.sponsors(),
 		supportedModes:       append([]tempo.ChargeMode(nil), config.SupportedModes...),
 		supportsUnknownChain: intent.rpc != nil || intent.rpcURL != "",
 	}
@@ -136,11 +141,14 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 	if chainID != 0 && !tempo.IsKnownChainID(chainID) && !m.supportsUnknownChain {
 		return nil, fmt.Errorf("tempo server: unknown chain id %d; configure Intent.RPC or Intent.RPCURL explicitly", chainID)
 	}
-	feePayerURL := params.FeePayerURL
-	if feePayerURL == "" {
-		feePayerURL = m.feePayerURL
+	if params.FeePayerURL != "" { //nolint:staticcheck // Reject the deprecated field rather than ignore it.
+		return nil, fmt.Errorf("tempo server: ChargeParams.FeePayerURL is no longer supported; configure the fee payer on the server with Config.FeePayerURL or Config.HostedFeePayer")
 	}
-	feePayer := params.FeePayer || m.feePayer
+	feePayer, err := m.resolveFeePayer(params)
+	if err != nil {
+		return nil, err
+	}
+	modes := resolvedModes(params.SupportedModes, m.supportedModes)
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
 		Amount:         params.Amount,
 		Currency:       currency,
@@ -150,22 +158,43 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		ExternalID:     params.ExternalID,
 		ChainID:        chainID,
 		FeePayer:       feePayer,
-		FeePayerURL:    feePayerURL,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
-		SupportedModes: resolvedModes(params.SupportedModes, m.supportedModes),
+		SupportedModes: modes,
 	})
 	if err != nil {
 		return nil, err
 	}
 	// The floor applies only when issuing a challenge that needs a sponsored
-	// transaction: zero-amount charges are paid with a proof, and a request
-	// carrying a credential is verified against its echoed expiry instead.
-	if feePayer && request.Amount != "0" && !carriesPaymentCredential(params) {
+	// transaction, as in mppx: zero-amount charges are paid with a proof,
+	// push-only charges are broadcast by the client, and a request carrying a
+	// credential is verified against its echoed expiry instead.
+	if feePayer && request.Amount != "0" && request.Allows(tempo.CredentialTypeTransaction) && !carriesPaymentCredential(params) {
 		if err := validateSponsoredChallengeExpiry(params.Expires, time.Now()); err != nil {
 			return nil, err
 		}
 	}
 	return request.Map(), nil
+}
+
+// resolveFeePayer reports whether a route's challenge advertises
+// sponsorship, as mppx's charge request() resolves feePayer: a route is
+// sponsored whenever the method has a fee payer, unless it sets
+// DisableFeePayer, and never without one. With a relay, which sponsors
+// itself, Config.FeePayer or ChargeParams.FeePayer requests it.
+func (m *Method) resolveFeePayer(params mppserver.ChargeParams) (bool, error) {
+	if params.DisableFeePayer {
+		return false, nil
+	}
+	if m.sponsors {
+		return true, nil
+	}
+	if params.FeePayer || m.feePayer {
+		if !m.relay {
+			return false, fmt.Errorf("tempo server: a sponsored charge requires a fee payer; configure FeePayerSigner, FeePayerPrivateKey, FeePayerURL or HostedFeePayer")
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func carriesPaymentCredential(params mppserver.ChargeParams) bool {

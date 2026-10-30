@@ -144,7 +144,9 @@ Clients and Tempo methods:
 - HTTP clients: `client.NewHTTPClient(methods, opts...)` returns a standard
   `*http.Client` (same-origin redirects only, config errors at construction);
   `client.New` and `NewHTTPTransport` take the same `Option`s. Options include `WithMaxRetries` and
-  `WithOrderChallenges`; a declined payment matches `client.ErrPaymentDeclined`
+  `WithOrderChallenges`; a first 402 with no payable Challenge fails with
+  `*client.NoMethodFoundError` (`client.ErrNoMethodFound`, mppx's message), while a
+  402 after a paid retry is returned; a declined payment matches `client.ErrPaymentDeclined`
   (also `mcpclient.ErrPaymentDeclined`), but an `OnChallenge` error returned after
   `createCredential` succeeded does not. Read receipts with `mpp.ReceiptFromResponse`.
 - Method-specific origin rules belong in the method, through
@@ -154,6 +156,13 @@ Clients and Tempo methods:
 - Tempo server: construct with `charge.New(charge.Config{...})` and list
   accepted tokens in `Config.Currencies`. Sponsor fees with `AllowedFeeTokens` and `FeePayerPolicy`; a
   `FeeToken` must be in an explicit `AllowedFeeTokens` list.
+  The fee payer is configured on the server, as in mppx: a local
+  `FeePayerSigner`/`FeePayerPrivateKey`, or a hosted service with `FeePayerURL` or
+  `HostedFeePayer{URL, Headers}` (co-signs with `eth_fillTransaction`; the server
+  recovers the sponsor, simulates and broadcasts). With one, every route is
+  sponsored unless `ChargeParams.DisableFeePayer`; without one, sponsorship is
+  never advertised (relays excepted). Challenges never carry a fee payer URL.
+  Zero-amount charges accept only proof credentials.
 - Tempo client: build `Config.PaymentPolicy` from `charge.MaxAmount`,
   `MaxAtomicAmount` and `AllowChainIDs` combined with `AllPolicies`; trust proof realms
   with `Config.TrustedProofRealms`. Use `tempo.ChainIDMainnet`/`ChainIDModerato`,
