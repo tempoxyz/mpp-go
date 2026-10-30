@@ -10,12 +10,15 @@ import (
 	"math"
 	"math/big"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
@@ -34,6 +37,10 @@ const feePayerMarker = "feefeefeefee"
 type Config struct {
 	// Signer signs Tempo transactions and proof payloads.
 	Signer *temposigner.Signer
+	// AccessKey signs as a Tempo access key on behalf of a root account
+	// instead of Signer or PrivateKey, as an mppx client with a viem access
+	// key account does.
+	AccessKey *AccessKey
 	// PrivateKey constructs Signer when Signer is nil.
 	PrivateKey string
 	// RPC overrides the Tempo JSON-RPC client used for signing flows.
@@ -71,6 +78,24 @@ type Config struct {
 	TrustedProofRealms []TrustedProofRealm
 }
 
+// AccessKey is a Tempo access key that pays on behalf of Account. Payments
+// come from Account, which is also the credential source: the key signs
+// transactions with Keychain V2 signatures (keccak256(0x04 || hash ||
+// Account)) and zero-amount proofs with a Keychain V2 envelope naming
+// Account, byte-identical to viem's.
+type AccessKey struct {
+	// Signer is the access key's secp256k1 signer.
+	Signer *temposigner.Signer
+	// Account is the root account the key acts for.
+	Account common.Address
+	// KeyAuthorization is the root account's signed authorization of the key,
+	// as keychain.KeyAuthorization.Sign returns it. When set, each
+	// transaction carries it until the AccountKeychain reports the key
+	// authorized, so the first payment authorizes the key. Nil when the key
+	// is already authorized.
+	KeyAuthorization []interface{}
+}
+
 // TrustedProofRealm trusts a server to request zero-amount proofs for Realm.
 type TrustedProofRealm struct {
 	// Origin is the scheme://host[:port] origin of the HTTP server or MCP
@@ -89,6 +114,7 @@ type Method struct {
 	now func() time.Time
 
 	signer         *temposigner.Signer
+	accessKey      *AccessKey
 	rpc            tempo.RPCClient
 	rpcURL         string
 	chainID        int64
@@ -127,6 +153,22 @@ func New(config Config) (*Method, error) {
 		return nil, fmt.Errorf("tempo client: unknown chain id %d; configure RPC or RPCURL explicitly", config.ChainID)
 	}
 	signer := config.Signer
+	var accessKey *AccessKey
+	if config.AccessKey != nil {
+		if config.Signer != nil || config.PrivateKey != "" {
+			return nil, fmt.Errorf("tempo client: configure either AccessKey or Signer/PrivateKey, not both")
+		}
+		if config.AccessKey.Signer == nil {
+			return nil, fmt.Errorf("tempo client: AccessKey requires a Signer")
+		}
+		if config.AccessKey.Account == (common.Address{}) {
+			return nil, fmt.Errorf("tempo client: AccessKey requires an Account")
+		}
+		copied := *config.AccessKey
+		copied.KeyAuthorization = slices.Clone(config.AccessKey.KeyAuthorization)
+		accessKey = &copied
+		signer = copied.Signer
+	}
 	if signer == nil {
 		if config.PrivateKey == "" {
 			return nil, fmt.Errorf("tempo client: signer or private key is required")
@@ -152,6 +194,7 @@ func New(config Config) (*Method, error) {
 	}
 	return &Method{
 		signer:         signer,
+		accessKey:      accessKey,
 		rpc:            rpc,
 		rpcURL:         config.RPCURL,
 		chainID:        chainID,
@@ -331,7 +374,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 				Type:      tempo.CredentialTypeProof,
 				Signature: signature,
 			}.Map(),
-			Source: tempo.ProofSource(chainID, m.signer.Address()),
+			Source: tempo.ProofSource(chainID, m.account()),
 		}, nil
 	}
 	if !request.Allows(credentialType) {
@@ -380,7 +423,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		preflight := &mpp.Credential{
 			Challenge: challenge.ToEcho(),
 			Payload:   tempo.ChargeCredentialPayload{Type: credentialType, Hash: "0x" + strings.Repeat("0", 64)}.Map(),
-			Source:    tempo.ProofSource(chainID, m.signer.Address()),
+			Source:    tempo.ProofSource(chainID, m.account()),
 		}
 		if _, err := mpp.FormatCredential(preflight); err != nil {
 			return nil, err
@@ -397,7 +440,7 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   payload.Map(),
-		Source:    tempo.ProofSource(chainID, m.signer.Address()),
+		Source:    tempo.ProofSource(chainID, m.account()),
 	}
 	if _, err := mpp.FormatCredential(credential); err != nil {
 		return nil, err
@@ -452,7 +495,7 @@ func (m *Method) buildTransfer(
 			SetNonce(0).
 			SetValidBefore(validBefore)
 	} else {
-		nonce, err := rpc.GetTransactionCount(ctx, m.signer.Address().Hex())
+		nonce, err := rpc.GetTransactionCount(ctx, m.account().Hex())
 		if err != nil {
 			return "", fmt.Errorf("tempo client: get nonce: %w", err)
 		}
@@ -463,7 +506,16 @@ func (m *Method) buildTransfer(
 		return "", fmt.Errorf("tempo client: build transaction: %w", err)
 	}
 
-	if err := tempotx.SignTransaction(tx, m.signer); err != nil {
+	if m.accessKey != nil {
+		authorization, err := m.pendingKeyAuthorization(ctx, rpc)
+		if err != nil {
+			return "", err
+		}
+		tx.KeyAuthorization = authorization
+		if err := keychain.SignWithAccessKey(tx, m.signer, m.accessKey.Account); err != nil {
+			return "", fmt.Errorf("tempo client: sign transaction: %w", err)
+		}
+	} else if err := tempotx.SignTransaction(tx, m.signer); err != nil {
 		return "", fmt.Errorf("tempo client: sign transaction: %w", err)
 	}
 
@@ -472,7 +524,7 @@ func (m *Method) buildTransfer(
 		return "", fmt.Errorf("tempo client: serialize transaction: %w", err)
 	}
 	if sponsored {
-		return serialized + strings.TrimPrefix(strings.ToLower(m.signer.Address().Hex()), "0x") + feePayerMarker, nil
+		return serialized + strings.TrimPrefix(strings.ToLower(m.account().Hex()), "0x") + feePayerMarker, nil
 	}
 	return serialized, nil
 }
@@ -548,11 +600,68 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 	return uint64(validBefore), nil
 }
 
+// account is the address that pays and is named as the credential source:
+// the access key's root account, or the signer's address.
+func (m *Method) account() common.Address {
+	if m.accessKey != nil {
+		return m.accessKey.Account
+	}
+	return m.signer.Address()
+}
+
+// keychainV2Hash is the digest a Keychain V2 access key signs for hash on
+// behalf of account: keccak256(0x04 || hash || account).
+func keychainV2Hash(hash common.Hash, account common.Address) common.Hash {
+	return crypto.Keccak256Hash([]byte{keychain.KeychainSignatureType}, hash.Bytes(), account.Bytes())
+}
+
+// pendingKeyAuthorization returns the access key's authorization while the
+// AccountKeychain does not report the key authorized for its account.
+func (m *Method) pendingKeyAuthorization(ctx context.Context, rpc tempo.RPCClient) ([]interface{}, error) {
+	if m.accessKey == nil || m.accessKey.KeyAuthorization == nil {
+		return nil, nil
+	}
+	data := keychain.GetKeySelector +
+		strings.Repeat("0", 24) + strings.TrimPrefix(strings.ToLower(m.accessKey.Account.Hex()), "0x") +
+		strings.Repeat("0", 24) + strings.TrimPrefix(strings.ToLower(m.signer.Address().Hex()), "0x")
+	response, err := rpc.SendRequest(ctx, "eth_call", map[string]any{
+		"to":   keychain.AccountKeychainAddress,
+		"data": data,
+	}, "latest")
+	if err != nil {
+		return nil, fmt.Errorf("tempo client: read access key: %w", err)
+	}
+	if err := response.CheckError(); err != nil {
+		return nil, fmt.Errorf("tempo client: read access key: %w", err)
+	}
+	result, ok := response.Result.(string)
+	if !ok {
+		return nil, fmt.Errorf("tempo client: unexpected eth_call result %T", response.Result)
+	}
+	raw, err := hexutil.Decode(result)
+	if err != nil || len(raw) < 64 {
+		return nil, fmt.Errorf("tempo client: invalid getKey result")
+	}
+	// KeyInfo is (signatureType, keyId, expiry, enforceLimits, isRevoked):
+	// a zero keyId means the key is not authorized yet.
+	if common.BytesToAddress(raw[32:64]) != (common.Address{}) {
+		return nil, nil
+	}
+	return slices.Clone(m.accessKey.KeyAuthorization), nil
+}
+
 func (m *Method) signProof(chainID int64, challengeID, realm string) (string, error) {
 	// Bind the proof to the signing wallet, echoed as the credential source.
-	hash, err := tempo.ProofTypedDataHash(chainID, m.signer.Address(), challengeID, realm)
+	hash, err := tempo.ProofTypedDataHash(chainID, m.account(), challengeID, realm)
 	if err != nil {
 		return "", fmt.Errorf("tempo client: build proof payload: %w", err)
+	}
+	if m.accessKey != nil {
+		signature, err := m.signer.Sign(keychainV2Hash(hash, m.accessKey.Account))
+		if err != nil {
+			return "", fmt.Errorf("tempo client: sign proof payload: %w", err)
+		}
+		return hexutil.Encode(keychain.BuildKeychainSignature(signature, m.accessKey.Account)), nil
 	}
 	signature, err := m.signer.Sign(hash)
 	if err != nil {
@@ -634,7 +743,7 @@ func (m *Method) estimateGas(
 	data string,
 ) (uint64, error) {
 	response, err := rpc.SendRequest(ctx, "eth_estimateGas", map[string]any{
-		"from": m.signer.Address().Hex(),
+		"from": m.account().Hex(),
 		"to":   to,
 		"data": data,
 	})
