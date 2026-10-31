@@ -434,7 +434,7 @@ func TestChargeHTTPFlow_KeychainFeePayerSigningForm(t *testing.T) {
 			}
 
 			rpc.onSend = func(raw string) (string, map[string]any, error) {
-				broadcast, err := tempotx.Deserialize(raw)
+				broadcast, err := deserializeTestTx(raw)
 				if err != nil {
 					return "", nil, err
 				}
@@ -592,7 +592,7 @@ func buildKeychainFeePayerCredential(
 	if err != nil {
 		t.Fatalf("CreateCredential() error = %v", err)
 	}
-	tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+	tx, err := deserializeTestTx(credential.Payload["signature"].(string))
 	if err != nil {
 		t.Fatalf("Deserialize(seed) error = %v", err)
 	}
@@ -621,7 +621,12 @@ func buildKeychainFeePayerCredential(
 		t.Fatalf("SignWithAccessKey() error = %v", err)
 	}
 	if options.legacyYParity {
-		tx.Signature.Raw[keychain.KeychainSignatureLength-1] += 27
+		// Use the other recovery-byte form: 0/1 or 27/28.
+		if v := &tx.Signature.Raw[keychain.KeychainSignatureLength-1]; *v < 27 {
+			*v += 27
+		} else {
+			*v -= 27
+		}
 	}
 
 	sender := options.sender
@@ -692,7 +697,7 @@ func TestChargeFlow_ProofCredentialWithAccessKey(t *testing.T) {
 		Challenge: challenge.ToEcho(),
 		Payload: tempo.ChargeCredentialPayload{
 			Type:      tempo.CredentialTypeProof,
-			Signature: hexutil.Encode(keychain.BuildKeychainSignature(innerSignature, rootSigner.Address())),
+			Signature: hexutil.Encode(mustKeychainSignature(t, innerSignature, rootSigner.Address())),
 		}.Map(),
 		Source: tempo.ProofSource(42431, rootSigner.Address()),
 	}
@@ -766,7 +771,7 @@ func TestChargeFlow_ProofCredentialRejectsAccessKeyWithZeroExpiry(t *testing.T) 
 		Challenge: challenge.ToEcho(),
 		Payload: tempo.ChargeCredentialPayload{
 			Type:      tempo.CredentialTypeProof,
-			Signature: hexutil.Encode(keychain.BuildKeychainSignature(innerSignature, rootSigner.Address())),
+			Signature: hexutil.Encode(mustKeychainSignature(t, innerSignature, rootSigner.Address())),
 		}.Map(),
 		Source: tempo.ProofSource(42431, rootSigner.Address()),
 	}
@@ -802,7 +807,7 @@ func TestChargeFlow_HashCredentialRejectsExtraTransferLogs(t *testing.T) {
 
 	rpc := newMockRPC(request)
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -854,7 +859,7 @@ func TestChargeFlow_HashCredentialIgnoresFeeControllerLogs(t *testing.T) {
 
 	rpc := newMockRPC(request)
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1150,7 +1155,7 @@ func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.
 	request := buildRequest(t, false, nil)
 	rpc := newMockRPC(request)
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1511,7 +1516,7 @@ func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailur
 	}
 
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1616,7 +1621,7 @@ func TestChargeFlow_FeePayerDistinctPayersShareChallenge(t *testing.T) {
 	// Give every broadcast its own hash so the post-receipt hash reservation
 	// does not conflate the two payments.
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1671,7 +1676,7 @@ func TestChargeFlow_FeePayerCanonicalReplay(t *testing.T) {
 			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
 			require.NoError(t, err)
 			normal := credential.Payload["signature"].(string)
-			tx, err := tempotx.Deserialize(normal)
+			tx, err := deserializeTestTx(normal)
 			require.NoError(t, err)
 			sender, err := tempotx.VerifySignature(tx)
 			require.NoError(t, err)
@@ -1862,7 +1867,7 @@ func TestChargeFlow_LocalFeePayerSponsorsCurrencyWithoutFeePolicy(t *testing.T) 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.NoError(t, err)
 	require.Len(t, rpc.sentRawTxs, 1)
-	broadcast, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	broadcast, err := deserializeTestTx(rpc.sentRawTxs[0])
 	require.NoError(t, err)
 	assert.Equal(t, common.HexToAddress(tempo.PathUSDAddress), broadcast.FeeToken)
 }
@@ -1947,7 +1952,7 @@ func TestChargeFlow_TransactionCredentialRecoversConfirmedChargeAfterSubmissionE
 			rpc := newMockRPC(request)
 			var broadcastHash string
 			rpc.onSend = func(raw string) (string, map[string]any, error) {
-				tx, err := tempotx.Deserialize(raw)
+				tx, err := deserializeTestTx(raw)
 				if err != nil {
 					return "", nil, err
 				}
@@ -2025,7 +2030,7 @@ func TestChargeFlow_TransactionCredentialRecoversPendingChargeAfterSubmissionErr
 	rpc := newMockRPC(request)
 	var mined map[string]any
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -2094,7 +2099,7 @@ func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testin
 			// The node still holds the transaction an earlier attempt
 			// broadcast and rejects the re-broadcast as a duplicate.
 			rpc.onSend = func(raw string) (string, map[string]any, error) {
-				tx, err := tempotx.Deserialize(raw)
+				tx, err := deserializeTestTx(raw)
 				if err != nil {
 					return "", nil, err
 				}
@@ -2164,7 +2169,7 @@ func TestChargeFlow_FeePayerRetryFindsReceiptForEarlierFeeToken(t *testing.T) {
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
 	require.Len(t, rpc.sentRawTxs, 1)
-	first, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	first, err := deserializeTestTx(rpc.sentRawTxs[0])
 	require.NoError(t, err)
 	require.Equal(t, usdceToken, first.FeeToken)
 
@@ -2218,7 +2223,7 @@ func TestChargeFlow_StoreWritesAfterSubmissionErrorOutliveRequestContext(t *test
 				}
 				broadcastHash = hash.Hex()
 				if recovered {
-					tx, err := tempotx.Deserialize(raw)
+					tx, err := deserializeTestTx(raw)
 					if err != nil {
 						return "", nil, err
 					}
@@ -2281,7 +2286,7 @@ func TestChargeFlow_TransactionCredentialBroadcastsCanonicalRecoveryID(t *testin
 			request := buildRequest(t, false, nil)
 			rpc := newMockRPC(request)
 			rpc.onSend = func(raw string) (string, map[string]any, error) {
-				tx, err := tempotx.Deserialize(raw)
+				tx, err := deserializeTestTx(raw)
 				if err != nil {
 					return "", nil, err
 				}
@@ -2300,8 +2305,11 @@ func TestChargeFlow_TransactionCredentialBroadcastsCanonicalRecoveryID(t *testin
 
 			rawForm := credential.Payload["signature"].(string)
 			recoveryID := rawForm[len(rawForm)-2:]
-			require.Contains(t, []string{"00", "01"}, recoveryID)
-			canonical := rawForm[:len(rawForm)-2] + map[string]string{"00": "1b", "01": "1c"}[recoveryID]
+			require.Contains(t, []string{"00", "01", "1b", "1c"}, recoveryID)
+			parity := map[string]int{"00": 0, "01": 1, "1b": 0, "1c": 1}[recoveryID]
+			body := rawForm[:len(rawForm)-2]
+			rawForm = body + []string{"00", "01"}[parity]
+			canonical := body + []string{"1b", "1c"}[parity]
 			forms := []string{rawForm, canonical}
 			if electrumFirst {
 				forms[0], forms[1] = forms[1], forms[0]
@@ -2342,7 +2350,7 @@ func TestChargeFlow_KeychainTransactionCredentialBroadcastsCanonicalRecoveryID(t
 
 			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
 			require.NoError(t, err)
-			tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+			tx, err := deserializeTestTx(credential.Payload["signature"].(string))
 			require.NoError(t, err)
 			accessSigner, err := temposigner.NewSigner(accessKey)
 			require.NoError(t, err)
@@ -2356,8 +2364,11 @@ func TestChargeFlow_KeychainTransactionCredentialBroadcastsCanonicalRecoveryID(t
 			require.NoError(t, err)
 
 			recoveryID := rawForm[len(rawForm)-2:]
-			require.Contains(t, []string{"00", "01"}, recoveryID)
-			canonical := rawForm[:len(rawForm)-2] + map[string]string{"00": "1b", "01": "1c"}[recoveryID]
+			require.Contains(t, []string{"00", "01", "1b", "1c"}, recoveryID)
+			parity := map[string]int{"00": 0, "01": 1, "1b": 0, "1c": 1}[recoveryID]
+			body := rawForm[:len(rawForm)-2]
+			rawForm = body + []string{"00", "01"}[parity]
+			canonical := body + []string{"1b", "1c"}[parity]
 			forms := []string{rawForm, canonical}
 			if legacyFirst {
 				forms[0], forms[1] = forms[1], forms[0]
@@ -2453,7 +2464,7 @@ func newMockRPC(request tempo.ChargeRequest) *mockRPC {
 		receipts:    map[string]map[string]any{},
 	}
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -2467,7 +2478,7 @@ func newMockRPC(request tempo.ChargeRequest) *mockRPC {
 }
 
 func buildReceipt(raw string, request tempo.ChargeRequest, sender common.Address) map[string]any {
-	tx, _ := tempotx.Deserialize(raw)
+	tx, _ := deserializeTestTx(raw)
 	logs := make([]any, 0, len(tx.Calls)*2)
 	for _, call := range tx.Calls {
 		callData := common.Bytes2Hex(call.Data)
@@ -2584,7 +2595,7 @@ func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	raw := credential.Payload["signature"].(string)
 	hash, err := tempotx.ComputeHash(raw)
 	require.NoError(t, err)
-	tx, err := tempotx.Deserialize(raw)
+	tx, err := deserializeTestTx(raw)
 	require.NoError(t, err)
 	sender, err := tempotx.VerifySignature(tx)
 	require.NoError(t, err)
@@ -2624,7 +2635,7 @@ func TestChargeFlow_HashReceiptReportsFundingCurrency(t *testing.T) {
 			if !assert.NoError(t, err) || !assert.Len(t, rpc.sentRawTxs, 1) {
 				return
 			}
-			tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+			tx, err := deserializeTestTx(rpc.sentRawTxs[0])
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -2752,4 +2763,28 @@ func TestChargeFlow_HashCredentialRejectsSourceOnAnotherChain(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "source chain id does not match")
+}
+
+func mustKeychainSignature(t *testing.T, inner *temposigner.Signature, root common.Address) []byte {
+	t.Helper()
+	envelope, err := keychain.BuildKeychainSignature(inner, root)
+	require.NoError(t, err)
+	return envelope
+}
+
+// deserializeTestTx decodes a transaction the client produced, stripping the
+// "<sender> feefeefeefee" trailer a sponsored one carries, which tempo-go
+// does not decode.
+func deserializeTestTx(raw string) (*tempotx.Tx, error) {
+	const marker = "feefeefeefee"
+	if strings.HasSuffix(raw, marker) && len(raw) > 2+40+len(marker) {
+		sender := raw[len(raw)-len(marker)-40 : len(raw)-len(marker)]
+		tx, err := tempotx.Deserialize(raw[:len(raw)-len(marker)-40])
+		if err != nil {
+			return nil, err
+		}
+		tx.From = common.HexToAddress(sender)
+		return tx, nil
+	}
+	return tempotx.Deserialize(raw)
 }

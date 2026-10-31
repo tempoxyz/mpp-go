@@ -524,7 +524,7 @@ func newOffersRPC(chainID int64) *mockRPC {
 	// Emit Transfer logs from the token each call targets so verification
 	// sees the currency the client actually paid with.
 	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		tx, err := tempotx.Deserialize(raw)
+		tx, err := deserializeTestTx(raw)
 		if err != nil {
 			return "", nil, err
 		}
@@ -585,7 +585,7 @@ func payWithHash(t *testing.T, rpc *mockRPC, challenge *mpp.Challenge) *mpp.Cred
 
 func sentTokens(t *testing.T, raw string) []common.Address {
 	t.Helper()
-	tx, err := tempotx.Deserialize(raw)
+	tx, err := deserializeTestTx(raw)
 	require.NoError(t, err)
 	tokens := make([]common.Address, 0, len(tx.Calls))
 	for _, call := range tx.Calls {

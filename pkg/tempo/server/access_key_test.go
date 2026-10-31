@@ -13,7 +13,6 @@ import (
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
-	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	chargeclient "github.com/tempoxyz/mpp-go/pkg/tempo/client"
@@ -101,7 +100,7 @@ func TestAccessKeySignsTransactionsForTheRootAccount(t *testing.T) {
 			credential, err := method.CreateCredential(ctx, buildChallenge(t, request))
 			require.NoError(t, err)
 			assert.Equal(t, tempo.ProofSource(42431, root), credential.Source)
-			tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+			tx, err := deserializeTestTx(credential.Payload["signature"].(string))
 			require.NoError(t, err)
 			assert.Equal(t, tt.authorization, tx.KeyAuthorization != nil)
 			signedKey, signedRoot, err := keychain.VerifyAccessKeySignature(tx)

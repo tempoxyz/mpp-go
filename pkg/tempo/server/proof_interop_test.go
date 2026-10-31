@@ -146,8 +146,10 @@ func TestRecoverProofSigner_KeychainAcceptsLegacyVRecoveryByte(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Force a legacy v=27/28 recovery byte.
-	inner.YParity += 27
-	keychainSig := keychain.BuildKeychainSignature(inner, rootSigner.Address())
+	keychainSig := mustKeychainSignature(t, inner, rootSigner.Address())
+	if keychainSig[len(keychainSig)-1] < 27 {
+		keychainSig[len(keychainSig)-1] += 27
+	}
 
 	signer, err := recoverProofSigner(proofHash, hexutil.Encode(keychainSig), rootSigner.Address())
 	assert.NoError(t, err)

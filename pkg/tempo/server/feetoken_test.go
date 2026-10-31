@@ -98,7 +98,7 @@ func TestSponsoredOUSDChargeWithDefaultsEndToEnd(t *testing.T) {
 			assert.Equal(t, "success", result.Receipt.Status)
 
 			require.Len(t, rpc.sentRawTxs, 1)
-			broadcast, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+			broadcast, err := deserializeTestTx(rpc.sentRawTxs[0])
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantFeeToken, broadcast.FeeToken)
 			assert.Equal(t, []common.Address{ousdToken}, sentTokens(t, rpc.sentRawTxs[0]))
@@ -355,7 +355,7 @@ func payWithTransaction(t *testing.T, rpc *mockRPC, challenge *mpp.Challenge) *m
 func broadcastFeeToken(t *testing.T, rpc *mockRPC) common.Address {
 	t.Helper()
 	require.Len(t, rpc.sentRawTxs, 1)
-	broadcast, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	broadcast, err := deserializeTestTx(rpc.sentRawTxs[0])
 	require.NoError(t, err)
 	return broadcast.FeeToken
 }

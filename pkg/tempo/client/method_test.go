@@ -182,7 +182,7 @@ func TestCreateCredentialHashWithAttributionMemo(t *testing.T) {
 		!assert.Len(t, rpc.sentRawTxs, 1) {
 		return
 	}
-	tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	tx, err := deserializeTestTx(rpc.sentRawTxs[0])
 	if !assert.NoErrorf(t, err, "Deserialize() error = %v", err) ||
 		!assert.Len(t, tx.Calls, 1) {
 		return
@@ -571,7 +571,7 @@ func TestCreateCredentialPushOnSponsoredChallengeIsUnsponsored(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(tempo.CredentialTypeHash), credential.Payload["type"])
 	require.Len(t, rpc.sentRawTxs, 1)
-	tx, err := tempotx.Deserialize(rpc.sentRawTxs[0])
+	tx, err := deserializeTestTx(rpc.sentRawTxs[0])
 	require.NoError(t, err)
 	assert.False(t, tx.AwaitingFeePayer)
 	assert.Equal(t, common.HexToAddress(testCurrency), tx.FeeToken)

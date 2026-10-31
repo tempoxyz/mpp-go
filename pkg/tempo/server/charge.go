@@ -1602,28 +1602,25 @@ func resolveChallengeChainID(ctx context.Context, rpc tempo.RPCClient, request t
 	return int64(chainID), nil
 }
 
-// recoverProofSigner recovers the key that signed a proof: a secp256k1, P256
-// or WebAuthn signature over the proof digest, or a Keychain envelope naming
-// source whose inner signature (any of those) signs the digest (Keychain V1,
-// type 0x03) or keccak256(0x04 || digest || source) (Keychain V2, type 0x04),
-// as mppx's recoverAuthorizedProofSigner does.
+// recoverProofSigner recovers the key that signed a proof with tempo-go's
+// signer.RecoverEnvelope: a secp256k1, P256 or WebAuthn signature over the
+// proof digest, or a Keychain envelope naming source whose inner signature
+// (any of those) signs the digest (Keychain V1, type 0x03) or
+// keccak256(0x04 || digest || source) (Keychain V2, type 0x04), as mppx's
+// recoverAuthorizedProofSigner does.
 func recoverProofSigner(proofHash common.Hash, encoded string, source common.Address) (common.Address, error) {
 	raw, err := hexutil.Decode(encoded)
 	if err != nil {
 		return common.Address{}, err
 	}
-	if len(raw) > 21 && len(raw) != 65 && (raw[0] == keychainV1SignatureType || raw[0] == keychain.KeychainSignatureType) {
-		rootAccount := common.BytesToAddress(raw[1:21])
-		if rootAccount != source {
-			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
-		}
-		payload := proofHash
-		if raw[0] == keychain.KeychainSignatureType {
-			payload = crypto.Keccak256Hash([]byte{keychain.KeychainSignatureType}, proofHash.Bytes(), rootAccount.Bytes())
-		}
-		return recoverPrimitiveSigner(payload, raw[21:])
+	recovered, err := temposigner.RecoverEnvelope(proofHash, raw)
+	if err != nil {
+		return common.Address{}, err
 	}
-	return recoverPrimitiveSigner(proofHash, raw)
+	if recovered.Keychain != 0 && recovered.Account != source {
+		return common.Address{}, fmt.Errorf("keychain proof root mismatch")
+	}
+	return recovered.KeyID, nil
 }
 
 // recoverSecp256k1 recovers the signer of a 65-byte r || s || v signature,

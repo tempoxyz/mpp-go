@@ -54,11 +54,10 @@ func stripFeePayerTrailer(body []byte) []byte {
 // Like mppx's prepareSponsoredTransaction it keeps every sender signature
 // envelope Tempo defines (secp256k1, P256, WebAuthn, Keychain V1 and V2 with
 // any inner signature, and multisig) and a keyAuthorization, and refuses a
-// non-empty authorizationList. tempo-go v0.5 decodes only secp256k1, P256,
-// WebAuthn and Keychain V2 envelopes with a secp256k1 inner signature, and
-// neither the 0x78 form nor field 12, so the body is checked and normalized
-// here before delegating the remaining decoding; any other envelope is carried
-// through as raw bytes.
+// non-empty authorizationList. tempo-go decodes every envelope but multisig,
+// and neither the 0x78 form nor field 12, so the body is checked and
+// normalized here before delegating the remaining decoding; a multisig
+// envelope is carried through as raw bytes.
 func deserializeTransactionCredential(serialized string) (*tempotx.Tx, bool, error) {
 	hexValue := serialized
 	if strings.HasPrefix(hexValue, "0x") || strings.HasPrefix(hexValue, "0X") {
@@ -150,18 +149,18 @@ func deserializeTransactionCredential(serialized string) (*tempotx.Tx, bool, err
 	return tx, feePayerForm, nil
 }
 
-// carriedAsRaw reports whether tempo-go v0.5 cannot decode a sender signature
-// envelope, which this package then carries as raw bytes: a Keychain V1, a
-// Keychain V2 whose inner signature is not secp256k1, or a multisig envelope.
+// carriedAsRaw reports whether tempo-go cannot decode a sender signature
+// envelope, which this package then carries as raw bytes: a multisig
+// envelope, or a Keychain envelope wrapping one.
 func carriedAsRaw(envelope []byte) bool {
 	if len(envelope) == 65 || len(envelope) == 0 {
 		return false
 	}
 	switch envelope[0] {
-	case envelopeTypeKeychainV1, envelopeTypeMultisig:
+	case envelopeTypeMultisig:
 		return true
-	case envelopeTypeKeychainV2:
-		return len(envelope) != keychain.KeychainSignatureLength
+	case envelopeTypeKeychainV1, envelopeTypeKeychainV2:
+		return len(envelope) > 1+common.AddressLength && envelope[1+common.AddressLength] == envelopeTypeMultisig
 	default:
 		return false
 	}

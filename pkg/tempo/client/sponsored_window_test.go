@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
 	"github.com/stretchr/testify/require"
@@ -105,7 +106,7 @@ func TestCreateCredentialSponsoredValidityWindow(t *testing.T) {
 			require.Empty(t, rpc.sentRawTxs)
 
 			signature, _ := credential.Payload["signature"].(string)
-			tx, err := tempotx.Deserialize(signature)
+			tx, err := deserializeTestTx(signature)
 			require.NoError(t, err)
 			require.True(t, tx.AwaitingFeePayer)
 			require.GreaterOrEqual(t, tx.ValidBefore, uint64(before.Add(tt.window).Unix()))
@@ -156,7 +157,7 @@ func TestCreateCredentialUnsponsoredShortChallengeStillSigns(t *testing.T) {
 	credential, err := method.CreateCredential(context.Background(), challenge)
 	require.NoError(t, err)
 	signature, _ := credential.Payload["signature"].(string)
-	tx, err := tempotx.Deserialize(signature)
+	tx, err := deserializeTestTx(signature)
 	require.NoError(t, err)
 	require.Zero(t, tx.ValidBefore)
 }
@@ -198,7 +199,7 @@ func TestCreateCredentialComputesSponsoredValidBeforeAfterPaymentPolicy(t *testi
 	credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.ExpiresIn(5*time.Minute)))
 	require.NoError(t, err)
 	signature, _ := credential.Payload["signature"].(string)
-	tx, err := tempotx.Deserialize(signature)
+	tx, err := deserializeTestTx(signature)
 	require.NoError(t, err)
 	require.Equal(t, uint64(clock.Now().Add(tempo.SponsoredValidBeforeWindow).Unix()), tx.ValidBefore)
 }
@@ -241,4 +242,21 @@ func TestCanHandleChallengeSkipsSponsoredChallengeExpiringTooSoon(t *testing.T) 
 	require.True(t, method.CanHandleChallenge(challenge("0.50", true, mpp.ExpiresIn(5*time.Minute))))
 	require.True(t, method.CanHandleChallenge(challenge("0.50", false, mpp.ExpiresIn(10*time.Second))))
 	require.True(t, method.CanHandleChallenge(challenge("0", true, mpp.ExpiresIn(10*time.Second))))
+}
+
+// deserializeTestTx decodes a transaction the client produced, stripping the
+// "<sender> feefeefeefee" trailer a sponsored one carries, which tempo-go
+// does not decode.
+func deserializeTestTx(raw string) (*tempotx.Tx, error) {
+	const marker = "feefeefeefee"
+	if strings.HasSuffix(raw, marker) && len(raw) > 2+40+len(marker) {
+		sender := raw[len(raw)-len(marker)-40 : len(raw)-len(marker)]
+		tx, err := tempotx.Deserialize(raw[:len(raw)-len(marker)-40])
+		if err != nil {
+			return nil, err
+		}
+		tx.From = common.HexToAddress(sender)
+		return tx, nil
+	}
+	return tempotx.Deserialize(raw)
 }

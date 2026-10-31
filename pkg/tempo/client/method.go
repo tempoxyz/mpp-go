@@ -661,7 +661,11 @@ func (m *Method) signProof(chainID int64, challengeID, realm string) (string, er
 		if err != nil {
 			return "", fmt.Errorf("tempo client: sign proof payload: %w", err)
 		}
-		return hexutil.Encode(keychain.BuildKeychainSignature(signature, m.accessKey.Account)), nil
+		envelope, err := keychain.BuildKeychainSignature(signature, m.accessKey.Account)
+		if err != nil {
+			return "", fmt.Errorf("tempo client: build keychain proof: %w", err)
+		}
+		return hexutil.Encode(envelope), nil
 	}
 	signature, err := m.signer.Sign(hash)
 	if err != nil {
