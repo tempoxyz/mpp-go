@@ -265,7 +265,13 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 	require.NoError(t, err)
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
 	require.NoError(t, err)
-	tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+	// Drop the "<sender> feefeefeefee" trailer of a sponsored credential,
+	// which tempo-go does not decode.
+	signature := credential.Payload["signature"].(string)
+	if strings.HasSuffix(signature, "feefeefeefee") {
+		signature = signature[:len(signature)-len("feefeefeefee")-40]
+	}
+	tx, err := tempotx.Deserialize(signature)
 	require.NoError(t, err)
 
 	tx.Signature = nil
@@ -277,7 +283,9 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 	require.NoError(t, authorization.SignAndAttach(tx, rootSigner))
 	require.NoError(t, keychain.SignWithAccessKey(tx, accessSigner, rootSigner.Address()))
 	// Tempo CLI 1.6 emits the inner recovery byte in legacy 27/28 form.
-	tx.Signature.Raw[keychain.KeychainSignatureLength-1] += 27
+	if v := &tx.Signature.Raw[keychain.KeychainSignatureLength-1]; *v < 27 {
+		*v += 27
+	}
 	serialized, err := tempotx.Serialize(tx, &tempotx.SerializeOptions{
 		Format: tempotx.FormatFeePayer,
 		Sender: rootSigner.Address(),
