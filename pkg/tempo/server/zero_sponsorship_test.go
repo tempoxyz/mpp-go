@@ -21,7 +21,7 @@ func TestZeroAmountSponsoredCredentialsRequireProof(t *testing.T) {
 				require.NoError(t, err)
 				credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x" + strings.Repeat("01", 32)}.Map()}
 				_, err = intent.Verify(context.Background(), credential, request.Map())
-				require.ErrorContains(t, err, "zero-amount fee payer challenges require a proof")
+				require.ErrorContains(t, err, "zero-amount challenges require a proof")
 				require.Empty(t, rpc.sentRawTxs)
 				require.Empty(t, rpc.callRequests)
 			})

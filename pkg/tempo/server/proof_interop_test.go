@@ -154,3 +154,38 @@ func TestRecoverProofSigner_KeychainAcceptsLegacyVRecoveryByte(t *testing.T) {
 	assert.Equalf(t, accessKey.Address().Hex(), signer.Hex(),
 		"keychain proof with legacy v byte must recover to the access key")
 }
+
+func TestLegacyKeychainProofBindsRootAndRecoversAccessKey(t *testing.T) {
+	root := common.HexToAddress(testRecipient)
+	access, err := temposigner.NewSigner(feePayerKey)
+	assert.NoError(t, err)
+	digest, err := tempo.ProofTypedDataHash(42431, root, "challenge", "example.test")
+	assert.NoError(t, err)
+	inner := common.FromHex(encodePlainProofSignature(t, access, digest))
+	encoded := append([]byte{0x03}, root.Bytes()...)
+	encoded = append(encoded, inner...)
+	signer, err := recoverProofSigner(digest, hexutil.Encode(encoded), root)
+	assert.NoError(t, err)
+	assert.Equal(t, access.Address(), signer)
+	_, err = recoverProofSigner(digest, hexutil.Encode(encoded), common.Address{})
+	assert.ErrorContains(t, err, "root mismatch")
+}
+
+func TestZeroAmountRejectsHashWithOrWithoutSponsorship(t *testing.T) {
+	for _, sponsored := range []bool{false, true} {
+		request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
+			Amount: "0", Currency: testCurrency, Recipient: testRecipient,
+			Decimals: 6, ChainID: 42431,
+		})
+		assert.NoError(t, err)
+		request.MethodDetails.FeePayer = sponsored
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: newMockRPC(request)})
+		assert.NoError(t, err)
+		credential := &mpp.Credential{
+			Challenge: buildChallenge(t, request).ToEcho(),
+			Payload:   map[string]any{"type": "hash", "hash": common.Hash{}.Hex()},
+		}
+		_, err = intent.Verify(context.Background(), credential, request.Map())
+		assert.ErrorContains(t, err, "zero-amount challenges require a proof credential")
+	}
+}

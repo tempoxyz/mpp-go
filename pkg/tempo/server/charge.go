@@ -355,8 +355,8 @@ func (i *Intent) validateCredential(
 	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	if request.MethodDetails.FeePayer && request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
-		return nil, mpp.ErrInvalidPayload("zero-amount fee payer challenges require a proof credential")
+	if request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
+		return nil, mpp.ErrInvalidPayload("zero-amount challenges require a proof credential")
 	}
 	if request.MethodDetails.FeePayer && request.Amount != "0" && payload.Type != tempo.CredentialTypeTransaction {
 		return nil, mpp.ErrInvalidPayload("fee payer challenges require a transaction credential")
@@ -1659,6 +1659,13 @@ func recoverProofSigner(proofHash common.Hash, encoded string, source common.Add
 	raw, err := hexutil.Decode(encoded)
 	if err != nil {
 		return common.Address{}, err
+	}
+	if len(raw) == keychain.KeychainSignatureLength && raw[0] == 0x03 {
+		if common.BytesToAddress(raw[1:21]) != source {
+			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
+		}
+		// V1 signs the account-bound proof digest without the V2 envelope hash.
+		return recoverProofSigner(proofHash, hexutil.Encode(raw[21:]), source)
 	}
 	if keychain.IsKeychainSignature(raw) {
 		_, rootAccount, innerSignature, err := keychain.ParseKeychainSignature(raw)
