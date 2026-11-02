@@ -381,12 +381,12 @@ func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T
 			}
 
 			resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
-			body, err := io.ReadAll(resp.Body)
-			require.NoError(t, err)
-			assert.JSONEq(t, problem, string(body), "the caller still reads the server's problem")
+			var unknown *PaymentOutcomeUnknownError
+			require.ErrorAs(t, err, &unknown)
+			assert.Nil(t, resp)
+			require.NotNil(t, unknown.Credential)
+			require.NotNil(t, unknown.Challenge)
+			assert.Equal(t, challenge.ID, unknown.Challenge.ID)
 			assert.Equal(t, tc.wantRoundTrips, roundTrips)
 			assert.Equal(t, tc.wantPayments, method.calls)
 		})

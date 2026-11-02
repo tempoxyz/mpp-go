@@ -1509,7 +1509,7 @@ func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailur
 	{
 
 		_, err := intent.Verify(ctx, credential, request.Map())
-		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "transaction submission failed"),
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "Payment outcome is unknown"),
 			"first Verify() error = %v, want submission failure", err) {
 			return
 		}
@@ -2258,7 +2258,7 @@ func TestChargeFlow_StoreWritesAfterSubmissionErrorOutliveRequestContext(t *test
 				assert.True(t, stored, "recovered fee-payer charge must be recorded")
 			} else {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "transaction submission failed")
+				assert.Contains(t, err.Error(), "Payment outcome is unknown")
 				assert.False(t, stored, "failed charge must release its reservation")
 			}
 		})

@@ -930,7 +930,8 @@ func (i *Intent) broadcastTransaction(
 			// A node that already holds the transaction, such as one an
 			// earlier attempt broadcast that is still pending, may include
 			// it later.
-			if isDuplicateSubmission(err) {
+			var rpcErr *temporpc.JSONRPCError
+			if isDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
 				return nil, broadcastOutcomeUnknown(credential.Challenge.ID, err)
 			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")

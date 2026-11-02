@@ -153,14 +153,31 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			return nil, err
 		}
-		if resp.StatusCode != http.StatusPaymentRequired || retries >= t.maxRetries {
+		if resp.StatusCode != http.StatusPaymentRequired {
 			return resp, nil
 		}
 
 		problem := responseProblemType(resp)
 		if problem == mpp.ErrorTypePaymentOutcomeUnknown {
-			// The server cannot tell whether the credential settled. Paying
-			// again could pay twice: hand the response to the caller.
+			// Preserve the sent credential for explicit reconciliation without
+			// authorizing a different payment from any accompanying offers.
+			if sent {
+				drainAndClose(resp.Body)
+				unknown := &PaymentOutcomeUnknownError{
+					Challenge: sentChallenge, Credential: sentCred,
+					Err: mpp.ErrPaymentOutcomeUnknown(sentChallengeID(sentChallenge)),
+				}
+				if state := paymentStateFrom(req.Context()); state != nil {
+					state.mu.Lock()
+					state.unknown = unknown
+					state.mu.Unlock()
+				}
+				return nil, unknown
+			}
+			return resp, nil
+		}
+
+		if retries >= t.maxRetries {
 			return resp, nil
 		}
 
@@ -255,9 +272,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
+func sentChallengeID(challenge *mpp.Challenge) string {
+	if challenge == nil {
+		return ""
+	}
+	return challenge.ID
+}
+
 // PaymentOutcomeUnknownError is returned by Transport.RoundTrip, and so by
 // Client.Do wrapped in a *url.Error, when the request carrying a payment
-// credential failed without a response. That includes a credential the caller
+// credential failed without a response or the server reported an unknown
+// settlement outcome. That includes a credential the caller
 // set on the request itself (any header whose value uses the Payment scheme).
 // The server may have settled the payment, so do not blindly retry: reconcile
 // it using Challenge and Credential. It matches mppx's
