@@ -262,7 +262,7 @@ func ErrPaymentActionRequired(reason string) *PaymentError {
 // for challengeID without a definitive result, so the payment may have
 // settled. It matches mppx's PaymentOutcomeUnknownError. The server
 // middleware writers send it without retry challenges, and client.Transport
-// returns such a response instead of paying again.
+// exposes the original credential for reconciliation instead of paying again.
 func ErrPaymentOutcomeUnknown(challengeID string) *PaymentError {
 	return newPaymentError(ErrorTypePaymentOutcomeUnknown, fmt.Sprintf(
 		"Payment outcome is unknown after sending a credential for challenge %q. Do not blindly retry.",

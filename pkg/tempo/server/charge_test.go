@@ -1231,7 +1231,8 @@ func TestChargeFlow_TransactionCredentialRetryRecoversAfterReceiptFailure(t *tes
 	// the outcome is unknown and the credential must stay usable.
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
-	require.ErrorContains(t, err, "failed to fetch transaction receipt")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	require.ErrorContains(t, err, "Check the original transaction on chain")
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// The transaction was included and spent the payer's balance, so
@@ -1283,6 +1284,7 @@ func TestChargeFlow_TransactionCredentialRetryRebroadcastsWhenNotIncluded(t *tes
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 
 	// No receipt yet: the retry simulates and re-broadcasts the identical
 	// signed transaction.
@@ -1373,6 +1375,7 @@ func TestChargeFlow_FeePayerRetryRecoversAfterReceiptFailure(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// The included transaction spent the payer's balance. The local fee
@@ -1410,6 +1413,7 @@ func TestChargeFlow_FeePayerRetryRecoversAfterDeadline(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// Less than 15 seconds of the 60-second window are left.
@@ -1505,7 +1509,7 @@ func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailur
 	{
 
 		_, err := intent.Verify(ctx, credential, request.Map())
-		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "transaction submission failed"),
+		if !assert.Falsef(t, err == nil || !strings.Contains(err.Error(), "Payment outcome is unknown"),
 			"first Verify() error = %v, want submission failure", err) {
 			return
 		}
@@ -2135,6 +2139,7 @@ func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testin
 				return
 			}
 			require.ErrorContains(t, err, "outcome is unknown")
+			require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 			assert.NotContains(t, err.Error(), "transaction submission failed")
 			assert.Greater(t, lookups, 1)
 		})
@@ -2168,6 +2173,7 @@ func TestChargeFlow_FeePayerRetryFindsReceiptForEarlierFeeToken(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 	first, err := deserializeTestTx(rpc.sentRawTxs[0])
 	require.NoError(t, err)
@@ -2252,7 +2258,7 @@ func TestChargeFlow_StoreWritesAfterSubmissionErrorOutliveRequestContext(t *test
 				assert.True(t, stored, "recovered fee-payer charge must be recorded")
 			} else {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "transaction submission failed")
+				assert.Contains(t, err.Error(), "Payment outcome is unknown")
 				assert.False(t, stored, "failed charge must release its reservation")
 			}
 		})
@@ -2787,4 +2793,15 @@ func deserializeTestTx(raw string) (*tempotx.Tx, error) {
 		return tx, nil
 	}
 	return tempotx.Deserialize(raw)
+}
+
+func TestBroadcastOutcomeUnknownDoesNotExposeTransportDetails(t *testing.T) {
+	err := broadcastOutcomeUnknown("challenge")
+	var paymentErr *mpp.PaymentError
+	if !errors.As(err, &paymentErr) {
+		t.Fatalf("expected payment error, got %T", err)
+	}
+	if strings.Contains(paymentErr.Detail, "api-secret") || strings.Contains(paymentErr.Detail, "rpc.example") {
+		t.Fatalf("transport detail leaked: %s", paymentErr.Detail)
+	}
 }

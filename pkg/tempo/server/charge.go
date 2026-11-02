@@ -930,8 +930,9 @@ func (i *Intent) broadcastTransaction(
 			// A node that already holds the transaction, such as one an
 			// earlier attempt broadcast that is still pending, may include
 			// it later.
-			if isDuplicateSubmission(err) {
-				return nil, broadcastOutcomeUnknown(err)
+			var rpcErr *temporpc.JSONRPCError
+			if isDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
+				return nil, broadcastOutcomeUnknown(credential.Challenge.ID)
 			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
@@ -954,7 +955,7 @@ func (i *Intent) broadcastTransaction(
 				included = true
 				return nil, err
 			}
-			return nil, broadcastOutcomeUnknown(err)
+			return nil, broadcastOutcomeUnknown(credential.Challenge.ID)
 		}
 		included = true
 	}
@@ -1120,12 +1121,10 @@ func isTransactionReverted(err error) bool {
 // accepted the transaction without showing whether it was included. A retry
 // with the same credential re-broadcasts the transaction, which the node
 // accepts at most once, and recovers its receipt.
-func broadcastOutcomeUnknown(err error) error {
-	detail := err.Error()
-	if paymentErr, ok := err.(*mpp.PaymentError); ok {
-		detail = paymentErr.Detail
-	}
-	return mpp.ErrVerificationFailed("transaction was broadcast but its outcome is unknown (" + detail + "); retry with the same credential to recover its receipt")
+func broadcastOutcomeUnknown(challengeID string) error {
+	unknown := mpp.ErrPaymentOutcomeUnknown(challengeID)
+	unknown.Detail += " Check the original transaction on chain before authorizing any further payment."
+	return unknown
 }
 
 // claimReplayKey atomically records first use of a replay key. With
