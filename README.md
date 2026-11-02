@@ -338,9 +338,10 @@ shall be dual licensed as above, without any additional terms or conditions.
 Hash-mode clients validate the credential header size before broadcasting. For custom clients,
 serialize with `mpp.FormatCredential(credential)` and handle its error.
 
-With `server.WithChallengeNonce(true)`, server-issued challenges have
-random opaque `_mpp_nonce` metadata. Do not set
-that reserved key. Bind authenticated application context with
+Server-issued challenges have random opaque `_mppx_nonce` metadata by
+default, as in mppx, so identical charges never share a challenge ID. Do not
+set that reserved key (or `_mpp_nonce`, which earlier releases issued and
+verification still accepts). Bind authenticated application context with
 `ChargeParams{Meta: map[string]string{"account": authenticatedAccountID}}` when
 a payment must authorize a specific caller. Derive this ID from trusted
 session authentication, never directly from request input. Nonces prevent
@@ -349,11 +350,9 @@ Low-level challenge constructors remain deterministic, so custom issuance must
 supply its own unique, authenticated context. Existing challenges remain valid
 until their original expiry.
 
-Nonce issuance is opt-in for upgrade safety. First deploy this release everywhere
-with nonce issuance off (the default). Verification already accepts
-nonces, while issuance stays compatible with old replicas. After all verifiers
-are upgraded, create the server with `server.WithChallengeNonce(true)` (or set
-`VerifyParams.EnableChallengeNonce` when calling `VerifyOrChallenge`). **The
-shared-challenge collision risk remains until issuance is enabled.** Old replicas reject nonced credentials,
-potentially after a hash payment has settled; do not enable issuance while old
-verifiers remain. Version-sticky retries are an alternative rollout strategy.
+Replicas on releases before default nonces reject `_mppx_nonce` credentials,
+potentially after a hash payment has settled. While any such verifier remains,
+create the server with `server.WithChallengeNonce(false)` (or set
+`VerifyParams.DisableChallengeNonce` when calling `VerifyOrChallenge`), and
+drop it once every replica is upgraded. Version-sticky retries are an
+alternative rollout strategy.

@@ -533,43 +533,53 @@ func TestVerifyOrChallenge_RejectsOpaqueMismatch(t *testing.T) {
 }
 
 func TestChallengeIssuanceNonce(t *testing.T) {
-	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.ExpiresIn(5 * time.Minute), Meta: map[string]string{"order": "one"}, EnableChallengeNonce: true}
+	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.ExpiresIn(5 * time.Minute), Meta: map[string]string{"order": "one"}}
 	first, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	second, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.NotEqual(t, first.Challenge.ID, second.Challenge.ID)
-	require.Len(t, first.Challenge.Opaque["_mpp_nonce"], 64)
+	require.Regexp(t, "^0x[0-9a-f]{64}$", first.Challenge.Opaque["_mppx_nonce"])
 	require.Equal(t, map[string]string{"order": "one"}, params.Meta)
 	cred := &mpp.Credential{Challenge: first.Challenge.ToEcho(), Payload: map[string]any{}}
 	params.Authorization = mpptest.FormatCredential(cred)
 	result, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.NotNil(t, result.Receipt)
-	cred.Challenge.Opaque["_mpp_nonce"] = second.Challenge.Opaque["_mpp_nonce"]
+	cred.Challenge.Opaque["_mppx_nonce"] = second.Challenge.Opaque["_mppx_nonce"]
 	params.Authorization = mpptest.FormatCredential(cred)
 	_, err = VerifyOrChallenge(context.Background(), params)
 	require.Error(t, err)
 	params.Authorization = ""
-	params.Meta["_mpp_nonce"] = "fixed"
-	_, err = VerifyOrChallenge(context.Background(), params)
-	require.Error(t, err)
+	for _, key := range []string{"_mppx_nonce", "_mpp_nonce"} {
+		params.Meta = map[string]string{"order": "one", key: "fixed"}
+		_, err = VerifyOrChallenge(context.Background(), params)
+		require.ErrorContains(t, err, key+" is reserved")
+	}
 }
 
 func TestChallengeNonceStagedRollout(t *testing.T) {
-	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.ExpiresIn(5 * time.Minute)}
+	params := VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: "secret", Method: "tempo", Expires: mpp.ExpiresIn(5 * time.Minute), DisableChallengeNonce: true}
 	legacy, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.Empty(t, legacy.Challenge.Opaque)
 	want := mpptest.NewChallenge(params.SecretKey, params.Realm, params.Method, params.Intent.Name(), params.Request, mpp.WithExpires(params.Expires))
-	require.Equal(t, want.ID, legacy.Challenge.ID, "default issuance must match pre-upgrade challenge construction")
-	params.EnableChallengeNonce = true
+	require.Equal(t, want.ID, legacy.Challenge.ID, "disabled issuance must match pre-upgrade challenge construction")
+	params.DisableChallengeNonce = false
 	fresh, err := VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
-	require.NotEmpty(t, fresh.Challenge.Opaque["_mpp_nonce"])
-	params.EnableChallengeNonce = false
+	require.NotEmpty(t, fresh.Challenge.Opaque["_mppx_nonce"])
+	params.DisableChallengeNonce = true
 	params.Authorization = mpptest.FormatCredential(fresh.Challenge.NewCredential(map[string]any{}))
 	result, err := VerifyOrChallenge(context.Background(), params)
+	require.NoError(t, err)
+	require.NotNil(t, result.Receipt)
+
+	// A Challenge an earlier release issued with _mpp_nonce still verifies.
+	earlier := mpptest.NewChallenge(params.SecretKey, params.Realm, params.Method, params.Intent.Name(), params.Request, mpp.WithExpires(params.Expires), mpp.WithMeta(map[string]string{"_mpp_nonce": "f00"}))
+	params.DisableChallengeNonce = false
+	params.Authorization = mpptest.FormatCredential(earlier.NewCredential(map[string]any{}))
+	result, err = VerifyOrChallenge(context.Background(), params)
 	require.NoError(t, err)
 	require.NotNil(t, result.Receipt)
 }
