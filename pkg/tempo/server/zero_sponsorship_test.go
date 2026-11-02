@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
@@ -22,7 +23,10 @@ func TestZeroAmountCredentialsRequireProof(t *testing.T) {
 					rpc := newMockRPC(request)
 					intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
 					require.NoError(t, err)
-					credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x" + strings.Repeat("01", 32)}.Map()}
+					credential := &mpp.Credential{
+						Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x" + strings.Repeat("01", 32)}.Map(),
+						Source:  "did:pkh:eip155:42431:0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+					}
 					_, err = intent.Verify(context.Background(), credential, request.Map())
 					require.ErrorContains(t, err, "zero-amount challenges require a proof credential")
 					require.Empty(t, rpc.sentRawTxs)
