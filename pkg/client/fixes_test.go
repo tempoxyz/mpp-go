@@ -430,7 +430,7 @@ func TestTransport_ExpiredCallerCredentialDoesNotAuthorizeReplacement(t *testing
 		h := http.Header{}
 		h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(fresh))
 		h.Set("Content-Type", "application/problem+json")
-		return &http.Response{StatusCode: 402, Header: h, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/payment-expired","status":402}`)), Request: req}, nil
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: h, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/payment-expired","status":402}`)), Request: req}, nil
 	})
 	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
 	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
@@ -439,6 +439,6 @@ func TestTransport_ExpiredCallerCredentialDoesNotAuthorizeReplacement(t *testing
 	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, 402, resp.StatusCode)
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
 	assert.Zero(t, method.calls)
 }
