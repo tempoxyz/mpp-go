@@ -1232,7 +1232,7 @@ func TestChargeFlow_TransactionCredentialRetryRecoversAfterReceiptFailure(t *tes
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
 	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-	require.ErrorContains(t, err, "failed to fetch transaction receipt")
+	require.ErrorContains(t, err, "Reconcile using the original credential")
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// The transaction was included and spent the payer's balance, so
@@ -2793,4 +2793,15 @@ func deserializeTestTx(raw string) (*tempotx.Tx, error) {
 		return tx, nil
 	}
 	return tempotx.Deserialize(raw)
+}
+
+func TestBroadcastOutcomeUnknownDoesNotExposeTransportDetails(t *testing.T) {
+	err := broadcastOutcomeUnknown("challenge", fmt.Errorf("Post https://rpc.example/api-secret: connection reset"))
+	paymentErr, ok := err.(*mpp.PaymentError)
+	if !ok {
+		t.Fatalf("expected payment error, got %T", err)
+	}
+	if strings.Contains(paymentErr.Detail, "api-secret") || strings.Contains(paymentErr.Detail, "rpc.example") {
+		t.Fatalf("transport detail leaked: %s", paymentErr.Detail)
+	}
 }

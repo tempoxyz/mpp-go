@@ -1122,12 +1122,8 @@ func isTransactionReverted(err error) bool {
 // with the same credential re-broadcasts the transaction, which the node
 // accepts at most once, and recovers its receipt.
 func broadcastOutcomeUnknown(challengeID string, err error) error {
-	detail := err.Error()
-	if paymentErr, ok := err.(*mpp.PaymentError); ok {
-		detail = paymentErr.Detail
-	}
 	unknown := mpp.ErrPaymentOutcomeUnknown(challengeID)
-	unknown.Detail += " Reconcile using the original credential (" + detail + ")."
+	unknown.Detail += " Reconcile using the original credential."
 	return unknown
 }
 
