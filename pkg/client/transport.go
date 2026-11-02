@@ -132,6 +132,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// A credential the caller set on the request is sent with the first
 	// round, so its outcome is as unknown as one the Transport created.
 	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
+	if sentChallenge != nil && sentCred != nil {
+		sentCredential = credentialKey{
+			id:     sentChallenge.ID,
+			method: methodKey{name: sentChallenge.Method, intent: sentChallenge.Intent},
+		}
+		credentials[sentCredential] = sentCred
+	}
 
 	for retries := 0; ; retries++ {
 		resp, err := t.inner.RoundTrip(request)
