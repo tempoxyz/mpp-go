@@ -29,6 +29,9 @@ func TestVerifyBodyDigestRFC9530ByteSequence(t *testing.T) {
 	if !VerifyBodyDigest("sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:", nil) {
 		t.Fatal("byte sequence for empty body rejected")
 	}
+	if !VerifyBodyDigest("sha-256=:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ:", []byte("hello")) {
+		t.Fatal("unpadded byte sequence for hello rejected")
+	}
 	if VerifyBodyDigest("sha-256=:"+hello+":", []byte("changed body")) {
 		t.Fatal("byte sequence accepted a changed body")
 	}

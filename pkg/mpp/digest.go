@@ -22,7 +22,8 @@ func VerifyBodyDigest(digest string, body []byte) bool {
 	return subtle.ConstantTimeCompare([]byte(ComputeBodyDigest(body)), []byte(normalizeBodyDigest(digest))) == 1
 }
 
-// normalizeBodyDigest strips the colons of an RFC 9530 byte sequence:
+// normalizeBodyDigest strips the colons of an RFC 9530 byte sequence and
+// restores any padding it omits (RFC 8941 section 4.2.7):
 // "sha-256=:<base64>:" becomes "sha-256=<base64>". Other text is unchanged.
 func normalizeBodyDigest(digest string) string {
 	value, ok := strings.CutPrefix(digest, "sha-256=:")
@@ -33,5 +34,9 @@ func normalizeBodyDigest(digest string) string {
 	if !ok || inner == "" || strings.Contains(inner, ":") {
 		return digest
 	}
-	return "sha-256=" + inner
+	inner = strings.TrimRight(inner, "=")
+	if inner == "" {
+		return digest
+	}
+	return "sha-256=" + inner + strings.Repeat("=", (4-len(inner)%4)%4)
 }
