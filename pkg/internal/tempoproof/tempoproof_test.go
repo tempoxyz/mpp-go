@@ -42,3 +42,22 @@ func TestOriginOwnsRealm(t *testing.T) {
 	assert.Equal(t, "https://api.example.com", Origin(&url.URL{Scheme: "HTTPS", Host: "API.example.com:443"}))
 	assert.Equal(t, "https://[::1]", Origin(&url.URL{Scheme: "https", Host: "[::1]:443"}))
 }
+
+func TestOriginOwnsRealmIDNA(t *testing.T) {
+	for _, tc := range []struct {
+		host, realm string
+		want        bool
+	}{
+		{"σ.example", "ς.example", false},
+		{"ς.example", "σ.example", false},
+		{"bücher.example", "xn--bcher-kva.example", true},
+		{"xn--bcher-kva.example", "bücher.example", true},
+		{"API.example", "api.example", true},
+		{"bad_host.example", "bad_host.example", false},
+		{"", "", false},
+	} {
+		t.Run(tc.host+"/"+tc.realm, func(t *testing.T) {
+			assert.Equal(t, tc.want, OriginOwnsRealm(&url.URL{Scheme: "https", Host: tc.host}, tc.realm))
+		})
+	}
+}

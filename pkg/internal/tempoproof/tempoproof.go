@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"golang.org/x/net/idna"
 )
 
 // IsProofChallenge reports whether challenge is a zero-amount tempo/charge
@@ -36,10 +37,17 @@ func IsZeroAmount(value any) bool {
 }
 
 // OriginOwnsRealm reports whether u is an HTTPS URL on the default port
-// whose hostname is realm, compared case-insensitively.
+// whose hostname and realm have the same canonical IDNA lookup name.
 func OriginOwnsRealm(u *url.URL, realm string) bool {
-	return u != nil && u.Scheme == "https" && (u.Port() == "" || u.Port() == "443") &&
-		strings.EqualFold(realm, u.Hostname())
+	if u == nil || u.Scheme != "https" || (u.Port() != "" && u.Port() != "443") || realm == "" || u.Hostname() == "" {
+		return false
+	}
+	host, err := idna.Lookup.ToASCII(u.Hostname())
+	if err != nil {
+		return false
+	}
+	name, err := idna.Lookup.ToASCII(realm)
+	return err == nil && strings.EqualFold(name, host)
 }
 
 // Origin returns the lowercase scheme://host[:port] origin of u, or "" for nil.
