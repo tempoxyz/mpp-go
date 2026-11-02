@@ -284,7 +284,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		sentCredential = key
 		sent, sentChallenge, sentCred = true, selected.challenge, cred
 		// Only the caller's own credential is left for the caller to reconcile.
-		callerPaid = callerPaid && cred == callerCred
+		callerPaid = callerCred != nil && cred == callerCred
 	}
 }
 
