@@ -344,7 +344,7 @@ func TestClient_Do_KeepsUnknownOutcomeOnClientTimeout(t *testing.T) {
 func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T) {
 	challenge := challengeForURL(t, "http://api.example.com", "tempo", nil)
 	_, authorization := callerAuthorization(t, challenge)
-	problem := `{"type":"https://paymentauth.org/problems/payment-outcome-unknown","status":402}`
+	problem := `{"type":"https://paymentauth.org/problems/payment-outcome-unknown","status":402,"detail":"Reconcile the submitted transaction","details":{"code":"settlement_unknown"}}`
 	respond := func(req *http.Request, body string) *http.Response {
 		header := http.Header{}
 		// A server may still offer a challenge next to the problem.
@@ -384,6 +384,10 @@ func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T
 			var unknown *PaymentOutcomeUnknownError
 			require.ErrorAs(t, err, &unknown)
 			assert.Nil(t, resp)
+			var paymentErr *mpp.PaymentError
+			require.ErrorAs(t, unknown, &paymentErr)
+			assert.Equal(t, "settlement_unknown", paymentErr.Details["code"])
+			assert.Equal(t, "Reconcile the submitted transaction", paymentErr.Detail)
 			require.NotNil(t, unknown.Credential)
 			require.NotNil(t, unknown.Challenge)
 			assert.Equal(t, challenge.ID, unknown.Challenge.ID)

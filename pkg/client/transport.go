@@ -157,15 +157,15 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 
-		problem := responseProblemType(resp)
-		if problem == mpp.ErrorTypePaymentOutcomeUnknown {
+		problem := responseProblem(resp)
+		if problem != nil && problem.Type == mpp.ErrorTypePaymentOutcomeUnknown {
 			// Preserve the sent credential for explicit reconciliation without
 			// authorizing a different payment from any accompanying offers.
 			if sent {
 				drainAndClose(resp.Body)
 				unknown := &PaymentOutcomeUnknownError{
 					Challenge: sentChallenge, Credential: sentCred,
-					Err: mpp.ErrPaymentOutcomeUnknown(sentChallengeID(sentChallenge)),
+					Err: problem,
 				}
 				if state := paymentStateFrom(req.Context()); state != nil {
 					state.mu.Lock()
@@ -220,11 +220,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			// A hash credential's transfer is already on chain: resending it
 			// is safe, but paying a new challenge would pay twice.
 			key := credentialKey{id: selected.challenge.ID, method: methodKey{name: selected.challenge.Method, intent: selected.challenge.Intent}}
-			if credentials[key] == nil || problem == mpp.ErrorTypeInvalidPayload {
+			if credentials[key] == nil || (problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload) {
 				return resp, nil
 			}
 		}
-		if problem == mpp.ErrorTypeInvalidPayload {
+		if (problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload) {
 			delete(credentials, sentCredential)
 		}
 		drainAndClose(resp.Body)
@@ -270,13 +270,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		sentCredential = key
 		sent, sentChallenge, sentCred = true, selected.challenge, cred
 	}
-}
-
-func sentChallengeID(challenge *mpp.Challenge) string {
-	if challenge == nil {
-		return ""
-	}
-	return challenge.ID
 }
 
 // PaymentOutcomeUnknownError is returned by Transport.RoundTrip, and so by
@@ -460,28 +453,26 @@ func (t *Transport) orderCandidates(ctx context.Context, ranked []challengeCandi
 	return result, nil
 }
 
-// responseProblemType returns the problem type of a 402 response body, or ""
+// responseProblem returns the decoded problem of a 402 response body, or nil
 // when it is not problem details. It restores the body it reads, so the
 // response can still be returned to the caller. An invalid-payload problem
 // drops the cached credential before a retry; other 402 responses retain it to
 // avoid paying twice.
-func responseProblemType(resp *http.Response) mpp.ErrorType {
+func responseProblem(resp *http.Response) *mpp.PaymentError {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/problem+json" || resp.Body == nil {
-		return ""
+		return nil
 	}
 	prefix, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body = &peekedBody{Reader: io.MultiReader(bytes.NewReader(prefix), resp.Body), Closer: resp.Body}
 	if readErr != nil {
-		return ""
+		return nil
 	}
-	var problem struct {
-		Type mpp.ErrorType `json:"type"`
-	}
+	var problem mpp.PaymentError
 	if err := json.NewDecoder(bytes.NewReader(prefix)).Decode(&problem); err != nil {
-		return ""
+		return nil
 	}
-	return problem.Type
+	return &problem
 }
 
 // peekedBody replays a response body prefix that was read for inspection.
