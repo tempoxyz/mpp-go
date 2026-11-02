@@ -99,9 +99,8 @@ func TestWritePaymentResponseSerializationFailure(t *testing.T) {
 	assert.Empty(t, rec.Header().Values(mpp.HeaderWWWAuthenticate), "no partial set of offers")
 
 	scoped, err := mpp.NewChallengeWithError("secret", "api.example.com", "tempo", mpp.IntentCharge, map[string]any{
-		"amount":      "1",
-		"_mppx_scope": map[string]any{"route": "/paid", "resource": "/paid/" + strings.Repeat("a", 16<<10)},
-	})
+		"amount": "1",
+	}, mpp.WithMeta(map[string]string{"_mppx_scope": "GET /paid/" + strings.Repeat("a", 16<<10)}))
 	require.NoError(t, err)
 	rec = httptest.NewRecorder()
 	server.WritePaymentResponse(rec, nil, scoped)

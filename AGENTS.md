@@ -118,10 +118,17 @@ Each type has one canonical Parse/Format pair:
 - A Credential for an offered method but an intent or request no offer
   matches is dispatched to that offer's `Charge`, which answers `402` with
   retry offers; only a method no offer has gets `400` method-unsupported.
-- `_mppx_scope` stays a `{route, resource, query}` map inside the challenge
-  request. mppx binds a `"GET /route"` string in the opaque metadata instead;
-  aligning them is a wire change older Go verifiers reject, so it needs a
-  product decision first.
+- The route scope is mppx's: a `"GET /route"` string (upper-case method,
+  space, route template, else the request path; never the query) bound into
+  the HMAC-bound opaque metadata as `_mppx_scope` (`ChargeParams.MppxScope`,
+  `ScopeFromHTTPRequest`). Verification compares it with the rest of the
+  application metadata, so a Credential is accepted on any resource of the
+  route it was issued for and rejected on another route. Adapters bind the
+  request's scope only when neither `MppxScope` nor `Meta["_mppx_scope"]` is
+  set (`ChargeParams.WithDefaultScope`); different values in both are a
+  server error, as mppx's `Scope.merge`. Releases before this one bound a
+  `{route, resource, query}` map in the request instead and reject these
+  Challenges.
 
 ### Package Layout
 

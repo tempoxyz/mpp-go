@@ -362,10 +362,50 @@ type ChargeParams struct {
 	ChainID int
 	// Meta stores opaque Challenge metadata.
 	Meta map[string]string
-	// MppxScope binds framework route/resource/query context into the
-	// request. When empty, ChargeRequest and the middlewares set it from the
-	// request (see ScopeFromHTTPRequest); a non-empty value is kept as is.
-	MppxScope map[string]string
+	// MppxScope is the route scope, such as "GET /items/:id", bound into the
+	// Challenge's HMAC-bound opaque metadata as _mppx_scope, as mppx's scope
+	// option is. A Credential is accepted only on a route binding the same
+	// scope. When neither MppxScope nor Meta["_mppx_scope"] is set,
+	// ChargeRequest and the middlewares set it from the request (see
+	// ScopeFromHTTPRequest and WithDefaultScope). Setting both to different
+	// values is a server error.
+	MppxScope string
+}
+
+// mppxScopeKey is the reserved opaque metadata key of the route scope, as in
+// mppx (Scope.reservedMetaKey).
+const mppxScopeKey = "_mppx_scope"
+
+// WithDefaultScope returns p with MppxScope set to scope, unless scope is
+// empty or p already binds a scope through MppxScope or Meta["_mppx_scope"].
+// Like mppx's framework adapters, the middlewares bind a request's route
+// scope only to handlers without a scope of their own.
+func (p ChargeParams) WithDefaultScope(scope string) ChargeParams {
+	if scope == "" || p.MppxScope != "" || p.Meta[mppxScopeKey] != "" {
+		return p
+	}
+	p.MppxScope = scope
+	return p
+}
+
+// challengeMeta returns the opaque metadata bound into the params'
+// Challenges: Meta with MppxScope under _mppx_scope, as mppx's Scope.merge.
+func (p ChargeParams) challengeMeta() (map[string]string, error) {
+	if p.MppxScope == "" {
+		return p.Meta, nil
+	}
+	if current, ok := p.Meta[mppxScopeKey]; ok {
+		if current != p.MppxScope {
+			return nil, fmt.Errorf("server: conflicting scope values: MppxScope (%s) does not match Meta[%q] (%s)", p.MppxScope, mppxScopeKey, current)
+		}
+		return p.Meta, nil
+	}
+	meta := make(map[string]string, len(p.Meta)+1)
+	for k, v := range p.Meta {
+		meta[k] = v
+	}
+	meta[mppxScopeKey] = p.MppxScope
+	return meta, nil
 }
 
 // ChargeResult is either a Challenge or a verified (Credential, Receipt) pair.
@@ -438,7 +478,6 @@ func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		applyMppxScope(request, params.MppxScope)
 		return request, nil
 	}
 	request := map[string]any{
@@ -457,7 +496,6 @@ func (m *Mpp) buildChargeRequest(params ChargeParams) (map[string]any, error) {
 	if params.ChainID != 0 {
 		request["chainId"] = params.ChainID
 	}
-	applyMppxScope(request, params.MppxScope)
 	return request, nil
 }
 
@@ -478,9 +516,6 @@ func (m *Mpp) buildChargeRequests(params ChargeParams) ([]map[string]any, error)
 	}
 	if len(requests) == 0 {
 		return nil, fmt.Errorf("server: method %q returned no charge offers", m.method.Name())
-	}
-	for _, request := range requests {
-		applyMppxScope(request, params.MppxScope)
 	}
 	return requests, nil
 }
@@ -510,13 +545,6 @@ func selectChargeOffer(authorization string, requests []map[string]any) int {
 		}
 	}
 	return 0
-}
-
-func applyMppxScope(request map[string]any, scope map[string]string) {
-	if len(scope) == 0 {
-		return
-	}
-	request["_mppx_scope"] = scope
 }
 
 // Charge handles a charge intent with human-readable amounts, for any
@@ -555,6 +583,10 @@ func (m *Mpp) charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	if err != nil {
 		return nil, err
 	}
+	meta, err := params.challengeMeta()
+	if err != nil {
+		return nil, err
+	}
 
 	// Share one expiry so every offer in a response expires together.
 	expires := params.Expires
@@ -573,7 +605,7 @@ func (m *Mpp) charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 		SecretKey:            m.secretKey,
 		Method:               m.method.Name(),
 		Description:          params.Description,
-		Meta:                 params.Meta,
+		Meta:                 meta,
 		Expires:              expires,
 		Header:               m.advertisedCredentialHeader(),
 	}

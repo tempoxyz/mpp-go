@@ -39,7 +39,7 @@ func TestChargeRequestChallengesThenVerifies(t *testing.T) {
 	res, err := payment.ChargeRequest(r, params)
 	require.NoError(t, err)
 	require.True(t, res.IsChallenge())
-	assert.Equal(t, "/premium", res.Challenge.Request["_mppx_scope"].(map[string]string)["resource"])
+	assert.Equal(t, "POST /premium", res.Challenge.Opaque["_mppx_scope"])
 	assert.NotEmpty(t, res.Challenge.Digest)
 
 	rec := httptest.NewRecorder()
@@ -65,9 +65,9 @@ func TestChargeRequestKeepsCallerScopeAndReturnsResultOnError(t *testing.T) {
 
 	payment := apiTestServer(t)
 	r := httptest.NewRequest(http.MethodGet, "/premium", nil)
-	res, err := payment.ChargeRequest(r, ChargeParams{Amount: "1.00", MppxScope: map[string]string{"route": "custom"}})
+	res, err := payment.ChargeRequest(r, ChargeParams{Amount: "1.00", MppxScope: "custom"})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"route": "custom"}, res.Challenge.Request["_mppx_scope"])
+	assert.Equal(t, "custom", res.Challenge.Opaque["_mppx_scope"])
 
 	r = httptest.NewRequest(http.MethodGet, "/premium", nil)
 	r.Header.Set(mpp.HeaderAuthorization, "Payment a, Payment b")

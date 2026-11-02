@@ -145,7 +145,7 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	assert.Empty(t, redirectResponse.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
-func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
+func TestChargeMiddlewareAutoScopesRoute(t *testing.T) {
 	t.Parallel()
 
 	e := echofw.New()
@@ -161,11 +161,9 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header().Get("WWW-Authenticate"))
 	require.NoError(t, err)
-	scope, ok := challenge.Request["_mppx_scope"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "/paid/:id", scope["route"])
-	assert.Equal(t, "/paid/one", scope["resource"])
-	assert.Equal(t, "view=full", scope["query"])
+	// The route template is bound, as in mppx; the resource and query are not.
+	assert.Equal(t, "GET /paid/:id", challenge.Opaque["_mppx_scope"])
+	assert.NotContains(t, challenge.Request, "_mppx_scope")
 
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -177,8 +175,8 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 	paidResponse := httptest.NewRecorder()
 	e.ServeHTTP(paidResponse, paidRequest)
 
-	assert.NotEqual(t, http.StatusOK, paidResponse.Code)
-	assert.Empty(t, paidResponse.Header().Get("Payment-Receipt"))
+	assert.Equal(t, http.StatusOK, paidResponse.Code)
+	assert.NotEmpty(t, paidResponse.Header().Get("Payment-Receipt"))
 }
 
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
@@ -270,7 +268,7 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e.GET("/paid/:id", func(c echofw.Context) error { return nil }, ChargeMiddleware(payment, server.ChargeParams{
 		Amount:    "0.50",
-		MppxScope: map[string]string{"route": "custom"},
+		MppxScope: "custom",
 	}))
 
 	resp := httptest.NewRecorder()
@@ -278,5 +276,5 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 	require.Equal(t, http.StatusPaymentRequired, resp.Code)
 	challenge, err := mpp.ParseChallenge(resp.Header().Get("WWW-Authenticate"))
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"route": "custom"}, challenge.Request["_mppx_scope"])
+	assert.Equal(t, "custom", challenge.Opaque["_mppx_scope"])
 }

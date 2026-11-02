@@ -101,7 +101,7 @@ func (s credentialSource) accepts(m *Mpp) bool {
 //
 // It reports ChallengeCreated for the Challenges the result returns, and only
 // once the whole set is issued and can be serialized.
-func (f paymentFlow) run(ctx context.Context, credential string, source credentialSource, scope map[string]string, body []byte) (*ChargeResult, error) {
+func (f paymentFlow) run(ctx context.Context, credential string, source credentialSource, scope string, body []byte) (*ChargeResult, error) {
 	result, issuers, err := f.charge(ctx, credential, source, scope, body)
 	if challenges := result.offers(); len(issuers) == len(challenges) && challengesDelivered(err, challenges) {
 		for i, challenge := range challenges {
@@ -113,7 +113,7 @@ func (f paymentFlow) run(ctx context.Context, credential string, source credenti
 
 // charge runs the flow, returning with the result the Mpp that issued each
 // Challenge it offers.
-func (f paymentFlow) charge(ctx context.Context, credential string, source credentialSource, scope map[string]string, body []byte) (*ChargeResult, []*Mpp, error) {
+func (f paymentFlow) charge(ctx context.Context, credential string, source credentialSource, scope string, body []byte) (*ChargeResult, []*Mpp, error) {
 	if f.err != nil {
 		return failedFlow(f.err)
 	}

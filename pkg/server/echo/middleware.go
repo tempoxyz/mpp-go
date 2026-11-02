@@ -36,10 +36,7 @@ func Receipt(c echofw.Context) *mpp.Receipt {
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.MiddlewareFunc {
 	return func(next echofw.HandlerFunc) echofw.HandlerFunc {
 		return func(c echofw.Context) error {
-			params := params
-			if len(params.MppxScope) == 0 {
-				params.MppxScope = server.ScopeFromHTTPRequest(c.Request(), c.Path())
-			}
+			params := params.WithDefaultScope(server.ScopeFromHTTPRequest(c.Request(), c.Path()))
 			result, err := m.ChargeRequest(c.Request(), params)
 			return serve(c, next, result, err)
 		}
@@ -64,17 +61,15 @@ func ComposeMiddleware(offers ...server.Offer) echofw.MiddlewareFunc {
 	}
 }
 
-// scopedOffers returns offers with scope bound into every offer that sets
-// none of its own.
-func scopedOffers(offers []server.Offer, scope map[string]string) []server.Offer {
-	if len(scope) == 0 {
+// scopedOffers returns offers with scope bound into every offer that binds
+// none of its own (see server.ChargeParams.WithDefaultScope).
+func scopedOffers(offers []server.Offer, scope string) []server.Offer {
+	if scope == "" {
 		return offers
 	}
 	scoped := slices.Clone(offers)
 	for i := range scoped {
-		if len(scoped[i].Params.MppxScope) == 0 {
-			scoped[i].Params.MppxScope = scope
-		}
+		scoped[i].Params = scoped[i].Params.WithDefaultScope(scope)
 	}
 	return scoped
 }

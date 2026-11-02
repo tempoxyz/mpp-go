@@ -208,7 +208,7 @@ func TestComposeMiddleware_DispatchesToCorrectMethod(t *testing.T) {
 
 }
 
-func TestComposeMiddlewareAutoScopesResourceAndQuery(t *testing.T) {
+func TestComposeMiddlewareAutoScopesRoute(t *testing.T) {
 	methodA := newTestServer(t, composeTestMethod{name: "alpha"}, composeRealm, composeSecret)
 
 	srv := composeTestServer(t,
@@ -220,14 +220,17 @@ func TestComposeMiddlewareAutoScopesResourceAndQuery(t *testing.T) {
 	challenge := findChallenge(t, resp, "alpha")
 	resp.Body.Close()
 
-	scope, ok := challenge.Request["_mppx_scope"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "/cart/123", scope["resource"])
-	assert.Equal(t, "view=full", scope["query"])
+	// Without a route pattern the scope is the method and path, as mppx's
+	// Next.js adapter binds it; the query is not part of it.
+	assert.Equal(t, "GET /cart/123", challenge.Opaque["_mppx_scope"])
 
 	paid := payWith(t, srv.URL+"/cart/456?view=full", challenge)
 	defer paid.Body.Close()
 	assert.Equal(t, http.StatusPaymentRequired, paid.StatusCode)
+
+	paid = payWith(t, srv.URL+"/cart/123?view=other", challenge)
+	defer paid.Body.Close()
+	assert.Equal(t, http.StatusOK, paid.StatusCode)
 }
 
 func TestComposeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
@@ -918,7 +921,7 @@ func TestComposeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
 	srv := composeTestServer(t, ComposeConfig{Mpp: methodA, Params: ChargeParams{Amount: "1.00"}})
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/paid?q=" + strings.Repeat("a", 13*1024))
+	resp, err := http.Get(srv.URL + "/paid/" + strings.Repeat("a", 13*1024))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 

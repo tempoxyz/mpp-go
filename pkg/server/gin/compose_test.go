@@ -32,9 +32,7 @@ func TestComposeMiddleware(t *testing.T) {
 	_, challenges, err := offeredCurrencies(recorder.Header())
 	require.NoError(t, err)
 	require.Len(t, challenges, 4)
-	scope := challenges[3].Request["_mppx_scope"].(map[string]any)
-	assert.Equal(t, "/paid/:id", scope["route"])
-	assert.Equal(t, "/paid/7", scope["resource"])
+	assert.Equal(t, "GET /paid/:id", challenges[3].Opaque["_mppx_scope"])
 
 	request := httptest.NewRequest(http.MethodGet, "/paid/7", nil)
 	authorization, err := mpp.FormatCredential(challenges[3].NewCredential(map[string]any{"type": "test"}))
