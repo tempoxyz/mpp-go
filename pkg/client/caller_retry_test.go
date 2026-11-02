@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -40,12 +41,12 @@ func TestTransportCallerCredentialRetry(t *testing.T) {
 					} else {
 						assert.NotEqual(t, authorization, r.Header.Get("Authorization"))
 					}
-					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
 				}
 				header := make(http.Header)
 				header.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(offered))
 				header.Set("Content-Type", "application/problem+json")
-				return &http.Response{StatusCode: 402, Header: header, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/` + tc.problem + `"}`))}, nil
+				return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/` + tc.problem + `"}`))}, nil
 			})
 			req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
 			require.NoError(t, err)
