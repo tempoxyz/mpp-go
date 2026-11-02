@@ -15,10 +15,13 @@ import (
 
 // VerifyParams contains the parameters for VerifyOrChallenge.
 type VerifyParams struct {
-	// EnableChallengeNonce opts into unique issuance after every replica has
-	// nonce-aware verification. The default preserves legacy issuance for
-	// rollout. Mpp.Charge sets it for a handler created WithChallengeNonce.
-	EnableChallengeNonce bool
+	// DisableChallengeNonce issues Challenges without the random, HMAC-bound
+	// _mppx_nonce that by default makes every issued Challenge unique, as in
+	// mppx. Use it only while some replica still runs a verifier that rejects
+	// _mppx_nonce. Verification accepts Challenges with and without a nonce
+	// either way. Mpp.Charge sets it for a handler created
+	// WithChallengeNonce(false).
+	DisableChallengeNonce bool
 	// Authorization is the incoming Authorization header value.
 	Authorization string
 	// Intent verifies Credentials for this request.
@@ -91,12 +94,14 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
-	if _, reserved := params.Meta["_mpp_nonce"]; reserved {
-		// Meta is server configuration: a reserved key is a server bug.
-		return nil, errors.New("server: _mpp_nonce is reserved for challenge issuance")
+	for _, key := range challengeNonceKeys {
+		if _, reserved := params.Meta[key]; reserved {
+			// Meta is server configuration: a reserved key is a server bug.
+			return nil, fmt.Errorf("server: %s is reserved for challenge issuance", key)
+		}
 	}
 	meta := maps.Clone(params.Meta)
-	if params.EnableChallengeNonce {
+	if !params.DisableChallengeNonce {
 		if meta == nil {
 			meta = make(map[string]string)
 		}
@@ -104,7 +109,8 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		if _, err := rand.Read(nonce); err != nil {
 			return nil, fmt.Errorf("generating challenge nonce: %w", err)
 		}
-		meta["_mpp_nonce"] = hex.EncodeToString(nonce)
+		// mppx's ChallengeMeta.withNonce: 32 random bytes as 0x-prefixed hex.
+		meta[challengeNonceKey] = "0x" + hex.EncodeToString(nonce)
 	}
 	if meta != nil {
 		opts = append(opts, mpp.WithMeta(meta))
@@ -321,8 +327,19 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 	return opts
 }
 
+// challengeNonceKey is the opaque metadata key of the issuance nonce, as in
+// mppx (ChallengeMeta.withNonce).
+const challengeNonceKey = "_mppx_nonce"
+
+// challengeNonceKeys are the reserved issuance nonce keys: mppx's and the
+// _mpp_nonce that earlier mpp-go releases issued, still accepted on
+// verification until those Challenges expire.
+var challengeNonceKeys = [...]string{challengeNonceKey, "_mpp_nonce"}
+
 func applicationMeta(meta map[string]string) map[string]string {
 	result := maps.Clone(meta)
-	delete(result, "_mpp_nonce")
+	for _, key := range challengeNonceKeys {
+		delete(result, key)
+	}
 	return result
 }

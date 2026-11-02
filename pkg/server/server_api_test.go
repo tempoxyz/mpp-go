@@ -170,28 +170,34 @@ func TestComposeRequest(t *testing.T) {
 func TestWithChallengeNonce(t *testing.T) {
 	t.Parallel()
 
-	payment := apiTestServer(t, WithChallengeNonce(true))
+	// Issuance is unique by default, as in mppx.
+	payment := apiTestServer(t)
 	params := ChargeParams{Amount: "1.00", Expires: mpp.ExpiresIn(5 * time.Minute)}
 	first, err := payment.Charge(context.Background(), params)
 	require.NoError(t, err)
 	second, err := payment.Charge(context.Background(), params)
 	require.NoError(t, err)
-	assert.NotEmpty(t, first.Challenge.Opaque["_mpp_nonce"])
+	assert.NotEmpty(t, first.Challenge.Opaque["_mppx_nonce"])
 	assert.NotEqual(t, first.Challenge.ID, second.Challenge.ID)
 
-	params.Authorization = paymentFor(first.Challenge)
-	paid, err := payment.Charge(context.Background(), params)
-	require.NoError(t, err)
-	assert.NotNil(t, paid.Receipt)
+	for _, issued := range []*ChargeResult{first, second} {
+		paidParams := params
+		paidParams.Authorization = paymentFor(issued.Challenge)
+		paid, err := payment.Charge(context.Background(), paidParams)
+		require.NoError(t, err)
+		assert.NotNil(t, paid.Receipt)
+	}
 
-	// Verification accepts a nonce-bearing Challenge whatever the default.
-	plain := apiTestServer(t)
-	paid, err = plain.Charge(context.Background(), params)
+	// Verification accepts a nonce-bearing Challenge on a handler that
+	// issues none.
+	params.Authorization = paymentFor(first.Challenge)
+	plain := apiTestServer(t, WithChallengeNonce(false))
+	paid, err := plain.Charge(context.Background(), params)
 	require.NoError(t, err)
 	assert.NotNil(t, paid.Receipt)
 	issued, err := plain.Charge(context.Background(), ChargeParams{Amount: "1.00"})
 	require.NoError(t, err)
-	assert.Empty(t, issued.Challenge.Opaque["_mpp_nonce"])
+	assert.Empty(t, issued.Challenge.Opaque)
 }
 
 func TestWithEvents(t *testing.T) {
