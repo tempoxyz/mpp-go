@@ -932,7 +932,7 @@ func (i *Intent) broadcastTransaction(
 			// it later.
 			var rpcErr *temporpc.JSONRPCError
 			if isDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
-				return nil, broadcastOutcomeUnknown(credential.Challenge.ID, err)
+				return nil, broadcastOutcomeUnknown(credential.Challenge.ID)
 			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
@@ -955,7 +955,7 @@ func (i *Intent) broadcastTransaction(
 				included = true
 				return nil, err
 			}
-			return nil, broadcastOutcomeUnknown(credential.Challenge.ID, err)
+			return nil, broadcastOutcomeUnknown(credential.Challenge.ID)
 		}
 		included = true
 	}
@@ -1121,7 +1121,7 @@ func isTransactionReverted(err error) bool {
 // accepted the transaction without showing whether it was included. A retry
 // with the same credential re-broadcasts the transaction, which the node
 // accepts at most once, and recovers its receipt.
-func broadcastOutcomeUnknown(challengeID string, err error) error {
+func broadcastOutcomeUnknown(challengeID string) error {
 	unknown := mpp.ErrPaymentOutcomeUnknown(challengeID)
 	unknown.Detail += " Reconcile using the original credential."
 	return unknown

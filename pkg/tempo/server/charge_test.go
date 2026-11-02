@@ -2796,9 +2796,9 @@ func deserializeTestTx(raw string) (*tempotx.Tx, error) {
 }
 
 func TestBroadcastOutcomeUnknownDoesNotExposeTransportDetails(t *testing.T) {
-	err := broadcastOutcomeUnknown("challenge", fmt.Errorf("Post https://rpc.example/api-secret: connection reset"))
-	paymentErr, ok := err.(*mpp.PaymentError)
-	if !ok {
+	err := broadcastOutcomeUnknown("challenge")
+	var paymentErr *mpp.PaymentError
+	if !errors.As(err, &paymentErr) {
 		t.Fatalf("expected payment error, got %T", err)
 	}
 	if strings.Contains(paymentErr.Detail, "api-secret") || strings.Contains(paymentErr.Detail, "rpc.example") {
