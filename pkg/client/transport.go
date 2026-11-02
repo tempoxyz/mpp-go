@@ -132,6 +132,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// A credential the caller set on the request is sent with the first
 	// round, so its outcome is as unknown as one the Transport created.
 	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
+	callerPaid := sent
 	if sentChallenge != nil && sentCred != nil {
 		sentCredential = credentialKey{
 			id:     sentChallenge.ID,
@@ -181,6 +182,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				}
 				return nil, unknown
 			}
+			return resp, nil
+		}
+
+		// An expired caller credential may already have settled. Let the caller
+		// reconcile it instead of automatically authorizing a replacement.
+		if callerPaid && problem != nil && problem.Type == mpp.ErrorTypePaymentExpired {
 			return resp, nil
 		}
 

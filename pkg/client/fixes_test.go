@@ -420,3 +420,25 @@ func TestTransport_UnknownOutcomeWithMalformedOptionalFields(t *testing.T) {
 		})
 	}
 }
+
+func TestTransport_ExpiredCallerCredentialDoesNotAuthorizeReplacement(t *testing.T) {
+	original := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	_, authorization := callerAuthorization(t, original)
+	fresh := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	fresh.ID = "replacement"
+	inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(fresh))
+		h.Set("Content-Type", "application/problem+json")
+		return &http.Response{StatusCode: 402, Header: h, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/payment-expired","status":402}`)), Request: req}, nil
+	})
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set(mpp.HeaderAuthorization, authorization)
+	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, 402, resp.StatusCode)
+	assert.Zero(t, method.calls)
+}
