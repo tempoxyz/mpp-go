@@ -407,7 +407,7 @@ func TestTransport_UnknownOutcomeWithMalformedOptionalFields(t *testing.T) {
 				h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(challenge))
 				h.Set("Content-Type", "application/problem+json")
 				body := `{"type":"https://paymentauth.org/problems/payment-outcome-unknown",` + extra + `}`
-				return &http.Response{StatusCode: 402, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+				return &http.Response{StatusCode: http.StatusPaymentRequired, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 			})
 			method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
 			req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
