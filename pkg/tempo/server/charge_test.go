@@ -1231,6 +1231,7 @@ func TestChargeFlow_TransactionCredentialRetryRecoversAfterReceiptFailure(t *tes
 	// the outcome is unknown and the credential must stay usable.
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.ErrorContains(t, err, "failed to fetch transaction receipt")
 	require.Len(t, rpc.sentRawTxs, 1)
 
@@ -1283,6 +1284,7 @@ func TestChargeFlow_TransactionCredentialRetryRebroadcastsWhenNotIncluded(t *tes
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 
 	// No receipt yet: the retry simulates and re-broadcasts the identical
 	// signed transaction.
@@ -1373,6 +1375,7 @@ func TestChargeFlow_FeePayerRetryRecoversAfterReceiptFailure(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// The included transaction spent the payer's balance. The local fee
@@ -1410,6 +1413,7 @@ func TestChargeFlow_FeePayerRetryRecoversAfterDeadline(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// Less than 15 seconds of the 60-second window are left.
@@ -2135,6 +2139,7 @@ func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testin
 				return
 			}
 			require.ErrorContains(t, err, "outcome is unknown")
+			require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 			assert.NotContains(t, err.Error(), "transaction submission failed")
 			assert.Greater(t, lookups, 1)
 		})
@@ -2168,6 +2173,7 @@ func TestChargeFlow_FeePayerRetryFindsReceiptForEarlierFeeToken(t *testing.T) {
 
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 	first, err := deserializeTestTx(rpc.sentRawTxs[0])
 	require.NoError(t, err)

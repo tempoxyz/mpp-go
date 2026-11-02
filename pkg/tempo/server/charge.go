@@ -931,7 +931,7 @@ func (i *Intent) broadcastTransaction(
 			// earlier attempt broadcast that is still pending, may include
 			// it later.
 			if isDuplicateSubmission(err) {
-				return nil, broadcastOutcomeUnknown(err)
+				return nil, broadcastOutcomeUnknown(credential.Challenge.ID, err)
 			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
 		}
@@ -954,7 +954,7 @@ func (i *Intent) broadcastTransaction(
 				included = true
 				return nil, err
 			}
-			return nil, broadcastOutcomeUnknown(err)
+			return nil, broadcastOutcomeUnknown(credential.Challenge.ID, err)
 		}
 		included = true
 	}
@@ -1120,12 +1120,14 @@ func isTransactionReverted(err error) bool {
 // accepted the transaction without showing whether it was included. A retry
 // with the same credential re-broadcasts the transaction, which the node
 // accepts at most once, and recovers its receipt.
-func broadcastOutcomeUnknown(err error) error {
+func broadcastOutcomeUnknown(challengeID string, err error) error {
 	detail := err.Error()
 	if paymentErr, ok := err.(*mpp.PaymentError); ok {
 		detail = paymentErr.Detail
 	}
-	return mpp.ErrVerificationFailed("transaction was broadcast but its outcome is unknown (" + detail + "); retry with the same credential to recover its receipt")
+	unknown := mpp.ErrPaymentOutcomeUnknown(challengeID)
+	unknown.Detail += " Reconcile using the original credential (" + detail + ")."
+	return unknown
 }
 
 // claimReplayKey atomically records first use of a replay key. With
