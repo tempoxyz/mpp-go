@@ -132,7 +132,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// A credential the caller set on the request is sent with the first
 	// round, so its outcome is as unknown as one the Transport created.
 	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
-	callerPaid := sent
+	callerPaid, callerCred := sent, sentCred
 	if sentChallenge != nil && sentCred != nil {
 		sentCredential = credentialKey{
 			id:     sentChallenge.ID,
@@ -283,6 +283,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		request = retry
 		sentCredential = key
 		sent, sentChallenge, sentCred = true, selected.challenge, cred
+		// Only the caller's own credential is left for the caller to reconcile.
+		callerPaid = callerPaid && cred == callerCred
 	}
 }
 
