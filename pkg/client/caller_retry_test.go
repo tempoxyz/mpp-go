@@ -52,8 +52,14 @@ func TestTransportCallerCredentialRetry(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set("Authorization", authorization)
 			response, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
-			require.NoError(t, err)
-			defer response.Body.Close()
+			if tc.problem == "payment-outcome-unknown" {
+				var unknown *PaymentOutcomeUnknownError
+				require.ErrorAs(t, err, &unknown)
+				require.NotNil(t, unknown.Credential)
+			} else {
+				require.NoError(t, err)
+				defer response.Body.Close()
+			}
 			assert.Equal(t, tc.payments, method.calls)
 			assert.Equal(t, tc.requests, attempts)
 		})
