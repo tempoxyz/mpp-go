@@ -470,7 +470,14 @@ func responseProblem(resp *http.Response) *mpp.PaymentError {
 	}
 	var problem mpp.PaymentError
 	if err := json.NewDecoder(bytes.NewReader(prefix)).Decode(&problem); err != nil {
-		return nil
+		// Optional peer fields must not hide the terminal payment outcome.
+		var kind struct {
+			Type mpp.ErrorType `json:"type"`
+		}
+		if err := json.Unmarshal(prefix, &kind); err != nil {
+			return nil
+		}
+		return &mpp.PaymentError{Type: kind.Type}
 	}
 	return &problem
 }

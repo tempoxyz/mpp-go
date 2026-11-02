@@ -1232,7 +1232,7 @@ func TestChargeFlow_TransactionCredentialRetryRecoversAfterReceiptFailure(t *tes
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
 	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-	require.ErrorContains(t, err, "Reconcile using the original credential")
+	require.ErrorContains(t, err, "Check the original transaction on chain")
 	require.Len(t, rpc.sentRawTxs, 1)
 
 	// The transaction was included and spent the payer's balance, so

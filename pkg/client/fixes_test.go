@@ -396,3 +396,27 @@ func TestTransport_RoundTrip_DoesNotPayAgainOnOutcomeUnknownProblem(t *testing.T
 		})
 	}
 }
+
+func TestTransport_UnknownOutcomeWithMalformedOptionalFields(t *testing.T) {
+	for _, extra := range []string{`"status":"402"`, `"details":[]`, `"hint":42`} {
+		t.Run(extra, func(t *testing.T) {
+			challenge := challengeForURL(t, "http://api.example.com", "tempo", nil)
+			_, authorization := callerAuthorization(t, challenge)
+			inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				h := http.Header{}
+				h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(challenge))
+				h.Set("Content-Type", "application/problem+json")
+				body := `{"type":"https://paymentauth.org/problems/payment-outcome-unknown",` + extra + `}`
+				return &http.Response{StatusCode: 402, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+			})
+			method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+			req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+			require.NoError(t, err)
+			req.Header.Set(mpp.HeaderAuthorization, authorization)
+			_, err = newTestTransport([]Method{method}, inner).RoundTrip(req)
+			var unknown *PaymentOutcomeUnknownError
+			require.ErrorAs(t, err, &unknown)
+			assert.Zero(t, method.calls)
+		})
+	}
+}
