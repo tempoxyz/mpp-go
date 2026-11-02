@@ -18,3 +18,10 @@ rules:
           ActionName == "tempoxyz/mpp-tools/.github/workflows/sdk-conformance.yml" && ActionVersion == "c5dde8faa684b79e2df665143cf7cd731608c079"
       - expr: |
           ActionName == "tempoxyz/mpp-tools/.github/workflows/dependabot.yml" && ActionVersion == "77de41d7ae6e215290f31ac1f0782f545ee07e5d"
+  # tempoxyz/mpp-tools publishes its reusable workflows without tags, and the
+  # shared AGENTS.md sync is first-party, so skip version-comment and min-age
+  # checks for it. Its SHA pin is still enforced.
+  - ignore: true
+    conditions:
+      - expr: |
+          ActionName == "tempoxyz/mpp-tools/.github/workflows/agents-sync.yml"
