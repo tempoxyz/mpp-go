@@ -420,3 +420,63 @@ func TestTransport_UnknownOutcomeWithMalformedOptionalFields(t *testing.T) {
 		})
 	}
 }
+
+func TestTransport_ExpiredCallerCredentialDoesNotAuthorizeReplacement(t *testing.T) {
+	original := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	_, authorization := callerAuthorization(t, original)
+	fresh := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	fresh.ID = "replacement"
+	inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(fresh))
+		h.Set("Content-Type", "application/problem+json")
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: h, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/payment-expired","status":402}`)), Request: req}, nil
+	})
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set(mpp.HeaderAuthorization, authorization)
+	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Zero(t, method.calls)
+}
+
+func TestTransport_ExpiredTransportCredentialAfterCallerCredentialPaysFreshChallenge(t *testing.T) {
+	original := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	_, authorization := callerAuthorization(t, original)
+	replacement := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	replacement.ID = "replacement"
+	fresh := challengeForURL(t, "http://api.example.com", "tempo", nil)
+	fresh.ID = "fresh"
+	rounds := 0
+	inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rounds++
+		h := http.Header{}
+		switch rounds {
+		case 1:
+			// The caller's credential is answered with a different challenge.
+			h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(replacement))
+			return &http.Response{StatusCode: http.StatusPaymentRequired, Header: h, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+		case 2:
+			// The Transport's own credential expired: it is not the caller's to reconcile.
+			assert.NotEqual(t, authorization, req.Header.Get(mpp.HeaderAuthorization))
+			h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(fresh))
+			h.Set("Content-Type", "application/problem+json")
+			return &http.Response{StatusCode: http.StatusPaymentRequired, Header: h, Body: io.NopCloser(strings.NewReader(`{"type":"https://paymentauth.org/problems/payment-expired","status":402}`)), Request: req}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
+		}
+	})
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set(mpp.HeaderAuthorization, authorization)
+	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 2, method.calls)
+	assert.Equal(t, 3, rounds)
+}
