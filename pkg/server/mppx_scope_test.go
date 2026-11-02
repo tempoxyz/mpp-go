@@ -68,8 +68,7 @@ func TestMppxScopeMatchesMppxWireFormat(t *testing.T) {
 }
 
 func TestChargeParamsConflictingScopeIsServerError(t *testing.T) {
-	// The reference Challenge carries no issuance nonce, so issue without one.
-	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithChallengeNonce(false))
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	_, err := payment.Charge(context.Background(), ChargeParams{
 		Amount:    "0.50",
 		Meta:      map[string]string{"_mppx_scope": "GET /a"},
@@ -80,4 +79,18 @@ func TestChargeParamsConflictingScopeIsServerError(t *testing.T) {
 	// A scope set through Meta alone is kept by the middleware.
 	params := ChargeParams{Meta: map[string]string{"_mppx_scope": "GET /a"}}.WithDefaultScope("GET /b")
 	assert.Empty(t, params.MppxScope)
+}
+
+func TestWithDefaultScopeKeepsExplicitEmptyMetaScope(t *testing.T) {
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	params := ChargeParams{Amount: "0.50", Meta: map[string]string{"_mppx_scope": ""}}.WithDefaultScope("GET /paid")
+	assert.Empty(t, params.MppxScope)
+	issued, err := payment.Charge(context.Background(), params)
+	require.NoError(t, err)
+	assert.True(t, issued.IsChallenge())
+}
+
+func TestScopeFromHTTPRequestFallsBackToEscapedPath(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/files/%FF%20a?x=1", nil)
+	assert.Equal(t, "GET /files/%FF%20a", ScopeFromHTTPRequest(request, ""))
 }

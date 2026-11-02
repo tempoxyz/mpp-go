@@ -215,8 +215,14 @@ func fiberScope(c *fiberfw.Ctx) string {
 	if r := c.Route(); r != nil {
 		route = r.Path
 	}
+	// Inside app.Use, Route().Path is the mount prefix, not the matched
+	// route. A path without parameters that differs from the request path
+	// is such a prefix: bind the request's own (escaped) path instead.
+	if !strings.ContainsAny(route, ":*+") && route != c.Path() {
+		route = ""
+	}
 	if route == "" {
-		route = c.Path()
+		route, _, _ = strings.Cut(c.OriginalURL(), "?")
 	}
 	if route == "" {
 		return ""

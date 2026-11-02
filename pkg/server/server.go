@@ -383,7 +383,12 @@ const mppxScopeKey = "_mppx_scope"
 // Like mppx's framework adapters, the middlewares bind a request's route
 // scope only to handlers without a scope of their own.
 func (p ChargeParams) WithDefaultScope(scope string) ChargeParams {
-	if scope == "" || p.MppxScope != "" || p.Meta[mppxScopeKey] != "" {
+	if scope == "" || p.MppxScope != "" {
+		return p
+	}
+	// Presence, not value, as in challengeMeta: an explicit Meta scope,
+	// even an empty one, is the handler's own.
+	if _, ok := p.Meta[mppxScopeKey]; ok {
 		return p
 	}
 	p.MppxScope = scope

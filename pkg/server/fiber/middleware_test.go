@@ -183,6 +183,36 @@ func TestChargeMiddlewareAutoScopesRoute(t *testing.T) {
 	assert.NotEmpty(t, paidResponse.Header.Get("Payment-Receipt"))
 }
 
+func TestChargeMiddlewareUseBindsRequestPath(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	app := fiberfw.New()
+	app.Use(ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
+	app.Get("/a", func(c *fiberfw.Ctx) error { return c.SendString("a") })
+	app.Get("/b", func(c *fiberfw.Ctx) error { return c.SendString("b") })
+
+	challengeResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/a", nil))
+	require.NoError(t, err)
+	defer challengeResponse.Body.Close()
+	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	// Inside app.Use the route is the mount prefix, so the request path is bound.
+	assert.Equal(t, "GET /a", challenge.Opaque["_mppx_scope"])
+
+	credential := mpptest.FormatCredential(&mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Source:    "did:key:z6Mkrdemo",
+		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
+	})
+	other := httptest.NewRequest(http.MethodGet, "/b", nil)
+	other.Header.Set("Authorization", credential)
+	otherResponse, err := app.Test(other)
+	require.NoError(t, err)
+	defer otherResponse.Body.Close()
+	assert.Equal(t, http.StatusPaymentRequired, otherResponse.StatusCode)
+}
+
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	t.Parallel()
 

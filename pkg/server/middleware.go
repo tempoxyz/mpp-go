@@ -26,7 +26,7 @@ const (
 // as mppx's framework adapters attach it: the request's upper-case method, a
 // space, and route, such as "GET /items/:id". An empty route defaults to the
 // path of r.Pattern (the http.ServeMux pattern that matched, without its
-// method or host), then to the request path. The query is never part of the
+// method or host), then to the request's escaped path. The query is never part of the
 // scope. It returns "" when there is no route or path.
 func ScopeFromHTTPRequest(r *http.Request, route string) string {
 	if r == nil {
@@ -42,7 +42,9 @@ func ScopeFromHTTPRequest(r *http.Request, route string) string {
 		}
 	}
 	if route == "" && r.URL != nil {
-		route = r.URL.Path
+		// The escaped path, as mppx binds url.pathname: the decoded form can
+		// hold invalid UTF-8, which the JSON opaque cannot carry byte for byte.
+		route = r.URL.EscapedPath()
 	}
 	if route == "" {
 		return ""
