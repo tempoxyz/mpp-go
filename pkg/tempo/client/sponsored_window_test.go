@@ -81,12 +81,12 @@ func TestCreateCredentialSponsoredValidityWindow(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
-		name    string
-		expires string
-		window  time.Duration
+		name         string
+		expiresAfter time.Duration
+		window       time.Duration
 	}{
-		{name: "five minute challenge gets the 60 second window", expires: mpp.ExpiresIn(5 * time.Minute), window: tempo.SponsoredValidBeforeWindow},
-		{name: "short challenge is capped 15s past its expiry", expires: mpp.ExpiresIn(30 * time.Second), window: 30*time.Second + time.Second + tempo.FeePayerMinRemainingValidity},
+		{name: "five minute challenge gets the 60 second window", expiresAfter: 5 * time.Minute, window: tempo.SponsoredValidBeforeWindow},
+		{name: "short challenge is capped 15s past its expiry", expiresAfter: 30 * time.Second, window: 30*time.Second + time.Second + tempo.FeePayerMinRemainingValidity},
 	} {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,7 +99,8 @@ func TestCreateCredentialSponsoredValidityWindow(t *testing.T) {
 			require.NoError(t, err)
 
 			before := time.Now()
-			credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, tt.expires))
+			expires := mpp.ExpiresIn(tt.expiresAfter)
+			credential, err := method.CreateCredential(context.Background(), sponsoredChallenge(t, expires))
 			after := time.Now()
 			require.NoError(t, err)
 			require.Empty(t, rpc.sentRawTxs)
