@@ -128,12 +128,14 @@ func ExampleWithEvents() {
 }
 
 func ExampleWithChallengeNonce() {
+	// Issuance nonces are on by default; WithChallengeNonce(false) turns
+	// them off while an older replica still rejects them.
 	payment, _ := server.New(exampleMethod{name: "tempo"}, "api.example.com", exampleSecret,
-		server.WithChallengeNonce(true),
+		server.WithChallengeNonce(false),
 	)
 	params := server.ChargeParams{Amount: "0.01", Expires: mpp.ExpiresIn(5 * time.Minute)}
 	first, _ := payment.Charge(context.Background(), params)
 	second, _ := payment.Charge(context.Background(), params)
-	fmt.Println(first.Challenge.ID != second.Challenge.ID)
+	fmt.Println(first.Challenge.ID == second.Challenge.ID)
 	// Output: true
 }

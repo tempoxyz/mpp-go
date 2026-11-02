@@ -188,11 +188,12 @@ const minimumSecretKeyBytes = 32
 
 // Mpp is the server-side payment handler.
 type Mpp struct {
-	method         Method
-	realm          string
-	secretKey      string
-	requiresAuth   bool
-	challengeNonce bool
+	method       Method
+	realm        string
+	secretKey    string
+	requiresAuth bool
+	// noChallengeNonce is set by WithChallengeNonce(false).
+	noChallengeNonce bool
 	// events is a pointer so Mpp stays comparable.
 	events *Events
 }
@@ -208,14 +209,15 @@ func WithRequiresAuth(enabled bool) Option {
 	}
 }
 
-// WithChallengeNonce makes every Challenge this handler issues unique by
-// binding a random _mpp_nonce into its opaque metadata, so identical charges
-// never share a Challenge ID. Enable it only after every replica verifies
-// nonce-bearing Challenges; verification accepts Challenges with and without
-// a nonce either way.
+// WithChallengeNonce sets whether every Challenge this handler issues is made
+// unique by a random _mppx_nonce bound into its opaque metadata, so identical
+// charges never share a Challenge ID. It is enabled by default, as in mppx;
+// pass false only while some replica still runs a verifier that rejects
+// _mppx_nonce. Verification accepts Challenges with and without a nonce
+// either way.
 func WithChallengeNonce(enabled bool) Option {
 	return func(m *Mpp) {
-		m.challengeNonce = enabled
+		m.noChallengeNonce = !enabled
 	}
 }
 
@@ -596,18 +598,18 @@ func (m *Mpp) charge(ctx context.Context, params ChargeParams) (*ChargeResult, e
 	authorization := m.paymentCredentialValue(params.Authorization, params.PaymentAuthorization)
 	selected := selectChargeOffer(authorization, requests)
 	verifyParams := VerifyParams{
-		EnableChallengeNonce: m.challengeNonce,
-		Authorization:        authorization,
-		Intent:               intent,
-		Request:              requests[selected],
-		Body:                 params.Body,
-		Realm:                m.realm,
-		SecretKey:            m.secretKey,
-		Method:               m.method.Name(),
-		Description:          params.Description,
-		Meta:                 meta,
-		Expires:              expires,
-		Header:               m.advertisedCredentialHeader(),
+		DisableChallengeNonce: m.noChallengeNonce,
+		Authorization:         authorization,
+		Intent:                intent,
+		Request:               requests[selected],
+		Body:                  params.Body,
+		Realm:                 m.realm,
+		SecretKey:             m.secretKey,
+		Method:                m.method.Name(),
+		Description:           params.Description,
+		Meta:                  meta,
+		Expires:               expires,
+		Header:                m.advertisedCredentialHeader(),
 	}
 	result, err := VerifyOrChallenge(ctx, verifyParams)
 	if result == nil {

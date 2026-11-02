@@ -355,8 +355,10 @@ func (i *Intent) validateCredential(
 	if source != nil && request.MethodDetails.ChainID != nil && source.chainID != *request.MethodDetails.ChainID {
 		return nil, mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
-	if request.MethodDetails.FeePayer && request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
-		return nil, mpp.ErrInvalidPayload("zero-amount fee payer challenges require a proof credential")
+	// As in mppx, a zero-amount challenge is paid only with a proof: a hash
+	// or transaction credential carrying a zero-value transfer is rejected.
+	if request.Amount == "0" && payload.Type != tempo.CredentialTypeProof {
+		return nil, mpp.ErrInvalidPayload("zero-amount challenges require a proof credential")
 	}
 	if request.MethodDetails.FeePayer && request.Amount != "0" && payload.Type != tempo.CredentialTypeTransaction {
 		return nil, mpp.ErrInvalidPayload("fee payer challenges require a transaction credential")
@@ -1660,21 +1662,32 @@ func recoverProofSigner(proofHash common.Hash, encoded string, source common.Add
 	if err != nil {
 		return common.Address{}, err
 	}
-	if keychain.IsKeychainSignature(raw) {
-		_, rootAccount, innerSignature, err := keychain.ParseKeychainSignature(raw)
-		if err != nil {
-			return common.Address{}, err
-		}
+	if len(raw) == keychain.KeychainSignatureLength &&
+		(raw[0] == keychainV1SignatureType || raw[0] == keychain.KeychainSignatureType) {
+		// Keychain envelope: type || root account || inner secp256k1
+		// signature. As in mppx, a V2 (0x04) inner signature signs
+		// keccak256(0x04 || proofHash || root) and a legacy V1 (0x03) inner
+		// signature signs the proof hash itself.
+		rootAccount := common.BytesToAddress(raw[1:21])
 		if rootAccount != source {
 			return common.Address{}, fmt.Errorf("keychain proof root mismatch")
 		}
 		// Normalize the inner recovery id to 0/1, as RecoverAddress requires
 		// (the encoded byte may be a legacy 27/28 v value).
-		if innerSignature.YParity >= 27 {
-			innerSignature.YParity -= 27
+		v := raw[85]
+		if v >= 27 {
+			v -= 27
 		}
-		if innerSignature.YParity > 1 {
+		if v > 1 {
 			return common.Address{}, fmt.Errorf("invalid recovery id")
+		}
+		innerSignature := temposigner.NewSignature(
+			new(big.Int).SetBytes(raw[21:53]),
+			new(big.Int).SetBytes(raw[53:85]),
+			v,
+		)
+		if raw[0] == keychainV1SignatureType {
+			return temposigner.RecoverAddress(proofHash, innerSignature)
 		}
 		payload := make([]byte, 0, 1+len(proofHash.Bytes())+len(rootAccount.Bytes()))
 		payload = append(payload, keychain.KeychainSignatureType)

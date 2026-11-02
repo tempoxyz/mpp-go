@@ -26,7 +26,8 @@ import (
 const mppxScopedChallenge = `Payment id="N4I1oMR1Alb0WEqfZYCa8-O5r78H-l6JCalaUo49kZk", realm="api.example.com", method="tempo", intent="charge", request="eyJhbW91bnQiOiIwLjUwIiwiY3VycmVuY3kiOiIifQ", expires="2099-01-01T00:00:00.000Z", opaque="eyJfbXBweF9zY29wZSI6IkdFVCAvcGFpZC97aWR9In0"`
 
 func TestMppxScopeMatchesMppxWireFormat(t *testing.T) {
-	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	// The reference Challenge carries no issuance nonce, so issue without one.
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithChallengeNonce(false))
 
 	// Go issues the same opaque and ID as mppx for the same scope.
 	issued, err := payment.Charge(context.Background(), ChargeParams{
@@ -66,7 +67,8 @@ func TestMppxScopeMatchesMppxWireFormat(t *testing.T) {
 }
 
 func TestChargeParamsConflictingScopeIsServerError(t *testing.T) {
-	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	// The reference Challenge carries no issuance nonce, so issue without one.
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret", WithChallengeNonce(false))
 	_, err := payment.Charge(context.Background(), ChargeParams{
 		Amount:    "0.50",
 		Meta:      map[string]string{"_mppx_scope": "GET /a"},
