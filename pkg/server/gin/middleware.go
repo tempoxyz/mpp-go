@@ -36,10 +36,7 @@ func Receipt(c *ginfw.Context) *mpp.Receipt {
 // Receipt on the Gin context and the request context.
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) ginfw.HandlerFunc {
 	return func(c *ginfw.Context) {
-		params := params
-		if len(params.MppxScope) == 0 {
-			params.MppxScope = server.ScopeFromHTTPRequest(c.Request, c.FullPath())
-		}
+		params := params.WithDefaultScope(server.ScopeFromHTTPRequest(c.Request, c.FullPath()))
 		result, err := m.ChargeRequest(c.Request, params)
 		serve(c, result, err)
 	}
@@ -61,17 +58,15 @@ func ComposeMiddleware(offers ...server.Offer) ginfw.HandlerFunc {
 	}
 }
 
-// scopedOffers returns offers with scope bound into every offer that sets
-// none of its own.
-func scopedOffers(offers []server.Offer, scope map[string]string) []server.Offer {
-	if len(scope) == 0 {
+// scopedOffers returns offers with scope bound into every offer that binds
+// none of its own (see server.ChargeParams.WithDefaultScope).
+func scopedOffers(offers []server.Offer, scope string) []server.Offer {
+	if scope == "" {
 		return offers
 	}
 	scoped := slices.Clone(offers)
 	for i := range scoped {
-		if len(scoped[i].Params.MppxScope) == 0 {
-			scoped[i].Params.MppxScope = scope
-		}
+		scoped[i].Params = scoped[i].Params.WithDefaultScope(scope)
 	}
 	return scoped
 }

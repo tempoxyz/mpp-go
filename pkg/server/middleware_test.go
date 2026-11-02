@@ -121,13 +121,14 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	}
 }
 
-func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
+func TestChargeMiddlewareAutoScopesRoute(t *testing.T) {
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "paid")
 	}))
 	mux := http.NewServeMux()
 	mux.Handle("GET /paid/{id}", handler)
+	mux.Handle("GET /other/{id}", handler)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -138,11 +139,10 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 
 	challenge, err := mpp.ParseChallenge(challengeResponse.Header.Get("WWW-Authenticate"))
 	require.NoError(t, err)
-	scope, ok := challenge.Request["_mppx_scope"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "/paid/{id}", scope["route"])
-	assert.Equal(t, "/paid/one", scope["resource"])
-	assert.Equal(t, "view=full", scope["query"])
+	// The scope is the method and the ServeMux route pattern, as mppx's
+	// adapters bind "GET /route"; the resource and query are not part of it.
+	assert.Equal(t, "GET /paid/{id}", challenge.Opaque["_mppx_scope"])
+	assert.NotContains(t, challenge.Request, "_mppx_scope")
 
 	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -150,14 +150,26 @@ func TestChargeMiddlewareAutoScopesRouteResourceAndQuery(t *testing.T) {
 		Payload:   map[string]any{"type": "hash", "hash": "0xabc123"},
 	}
 
-	paidRequest, err := http.NewRequest(http.MethodGet, server.URL+"/paid/two?view=full", nil)
-	require.NoError(t, err)
-	paidRequest.Header.Set("Authorization", mpptest.FormatCredential(credential))
-	paidResponse, err := http.DefaultClient.Do(paidRequest)
-	require.NoError(t, err)
-	defer paidResponse.Body.Close()
-	assert.NotEqual(t, http.StatusOK, paidResponse.StatusCode)
-	assert.Empty(t, paidResponse.Header.Get("Payment-Receipt"))
+	pay := func(path string) *http.Response {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		require.NoError(t, err)
+		request.Header.Set("Authorization", mpptest.FormatCredential(credential))
+		response, err := http.DefaultClient.Do(request)
+		require.NoError(t, err)
+		t.Cleanup(func() { response.Body.Close() })
+		return response
+	}
+
+	// Another route rejects the Credential.
+	other := pay("/other/one?view=full")
+	assert.Equal(t, http.StatusPaymentRequired, other.StatusCode)
+	assert.Empty(t, other.Header.Get("Payment-Receipt"))
+
+	// The same route accepts it for another resource, as in mppx.
+	same := pay("/paid/two?view=other")
+	assert.Equal(t, http.StatusOK, same.StatusCode)
+	assert.NotEmpty(t, same.Header.Get("Payment-Receipt"))
 }
 
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
@@ -500,7 +512,7 @@ func TestChargeMiddlewareRejectsOversizedRequestURI(t *testing.T) {
 	}))
 
 	for _, credential := range []string{"", "Payment garbage"} {
-		req := httptest.NewRequest(http.MethodGet, "/paid?q="+strings.Repeat("a", 13*1024), nil)
+		req := httptest.NewRequest(http.MethodGet, "/paid/"+strings.Repeat("a", 13*1024), nil)
 		if credential != "" {
 			req.Header.Set(mpp.HeaderAuthorization, credential)
 		}
