@@ -13,7 +13,7 @@ require (
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.12.1
 	github.com/tempoxyz/mpp-go v0.0.0
-	github.com/tempoxyz/tempo-go v0.5.0
+	github.com/tempoxyz/tempo-go v0.7.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 )
 

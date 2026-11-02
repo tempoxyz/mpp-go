@@ -220,8 +220,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/supranational/blst v0.3.16 h1:bTDadT+3fK497EvLdWRQEjiGnUtzJ7jjIUMF0jqwYhE=
 github.com/supranational/blst v0.3.16/go.mod h1:jZJtfjgudtNl4en1tzwPIV3KjUnQUvG3/j+w+fVonLw=
-github.com/tempoxyz/tempo-go v0.5.0 h1:7doFtzBmPR2yNS8bzz8UzQX46BsnfeFhEozJEIbx1JI=
-github.com/tempoxyz/tempo-go v0.5.0/go.mod h1:2nszt4KN0N9JlVN5TBGJdqOlz/INWTtM7Zr7CYbliAU=
+github.com/tempoxyz/tempo-go v0.7.0 h1:qpQzStm3DawUFv2AaTDdaOmuEBw4gulN/Gov08qRq48=
+github.com/tempoxyz/tempo-go v0.7.0/go.mod h1:sQzKX3fWPWRwGsgj3BTmioPvSyeBVegORzZzuSwhYQg=
 github.com/testcontainers/testcontainers-go v0.44.0 h1:/Fwh6HY1mIikhnm9e7HwoxGycx0lzRAE0f5VQpjFxzI=
 github.com/testcontainers/testcontainers-go v0.44.0/go.mod h1:IcnwQrYTO86xHXu5bvMaBH7ATlbS3Qn1M1QWW3c66rE=
 github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRUgPQU=

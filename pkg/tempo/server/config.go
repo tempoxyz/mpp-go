@@ -28,10 +28,20 @@ type Config struct {
 	// ChainID binds issued challenges to a specific Tempo chain when set, such
 	// as tempo.ChainIDMainnet or tempo.ChainIDModerato.
 	ChainID int64
-	// FeePayer enables sponsored transaction flows by default.
+	// FeePayer requests sponsorship on every route. A method with a fee payer
+	// (FeePayerSigner, FeePayerPrivateKey, FeePayerURL or HostedFeePayer)
+	// sponsors every route anyway, unless a route sets
+	// ChargeParams.DisableFeePayer, as in mppx; New rejects FeePayer without
+	// a fee payer, except with a Relay, which sponsors charges itself.
 	FeePayer bool
-	// FeePayerURL points at a remote co-signer when the server does not sign locally.
+	// FeePayerURL sponsors charges through a hosted fee-payer service at this
+	// JSON-RPC URL (shorthand for HostedFeePayer{URL: FeePayerURL}). The
+	// server asks it to co-sign with eth_fillTransaction, then simulates and
+	// broadcasts the transaction itself; challenges no longer carry it.
 	FeePayerURL string
+	// HostedFeePayer sponsors charges through a hosted fee-payer service with
+	// request headers; see HostedFeePayer.
+	HostedFeePayer *HostedFeePayer
 	// SupportedModes limits the credential submission modes advertised to clients.
 	SupportedModes []tempo.ChargeMode
 	// RPC overrides the Tempo JSON-RPC client used for verification.
@@ -85,8 +95,10 @@ func New(config Config) (*Method, error) {
 		Decimals:       config.Decimals,
 		ChainID:        config.ChainID,
 		FeePayer:       config.FeePayer,
-		FeePayerURL:    config.FeePayerURL,
 		SupportedModes: append([]tempo.ChargeMode(nil), config.SupportedModes...),
+	}
+	if config.Intent != nil && (config.FeePayerURL != "" || config.HostedFeePayer != nil) {
+		return nil, fmt.Errorf("tempo server: configure FeePayerURL or HostedFeePayer on the IntentConfig of Config.Intent")
 	}
 	if methodConfig.Intent == nil {
 		buildIntent := NewIntent
@@ -101,6 +113,8 @@ func New(config Config) (*Method, error) {
 			AllowedFeeTokens:   config.AllowedFeeTokens,
 			FeePayerPolicy:     config.FeePayerPolicy,
 			FeeToken:           config.FeeToken,
+			FeePayerURL:        config.FeePayerURL,
+			HostedFeePayer:     config.HostedFeePayer,
 			Store:              config.Store,
 			ExpireReplayKeys:   config.ExpireReplayKeys,
 		})
@@ -121,7 +135,11 @@ func New(config Config) (*Method, error) {
 		}
 		method.intent = intent
 		method.supportsUnknownChain = true
+		method.relay = true
 		return method, nil
+	}
+	if config.FeePayer && !methodConfig.Intent.sponsors() {
+		return nil, fmt.Errorf("tempo server: FeePayer requires a fee payer; configure FeePayerSigner, FeePayerPrivateKey, FeePayerURL or HostedFeePayer")
 	}
 	if !hasReplayStore(methodConfig.Intent.store) {
 		return nil, fmt.Errorf("tempo server: a replay Store is required")

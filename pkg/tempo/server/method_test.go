@@ -58,13 +58,11 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "includes external id and fee payer url",
-			config: methodConfig{Intent: testStoredIntent(),
-				Currencies:  []string{"0x20c0000000000000000000000000000000000001"},
-				Recipient:   "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-				ChainID:     42431,
-				FeePayer:    true,
-				FeePayerURL: "https://fee-payer.example.com",
+			name: "includes external id and sponsorship without a fee payer url",
+			config: methodConfig{Intent: testSponsoringIntent(),
+				Currencies: []string{"0x20c0000000000000000000000000000000000001"},
+				Recipient:  "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+				ChainID:    42431,
 			},
 			params: mppserver.ChargeParams{
 				Amount:      "0.50",
@@ -81,8 +79,8 @@ func TestMethodBuildChargeRequest(t *testing.T) {
 					"request.MethodDetails.FeePayer = false, want true") {
 					return
 				}
-				if !assert.Equalf(t, "https://fee-payer.example.com", request.MethodDetails.FeePayerURL,
-					"request.MethodDetails.FeePayerURL = %q, want https://fee-payer.example.com", request.MethodDetails.FeePayerURL) {
+				if !assert.NotContains(t, request.Map()["methodDetails"], "feePayerUrl",
+					"challenges no longer carry a fee payer URL") {
 					return
 				}
 

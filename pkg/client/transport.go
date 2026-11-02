@@ -23,6 +23,7 @@ import (
 // It wraps an inner transport and automatically negotiates payment.
 type Transport struct {
 	methods            map[methodKey][]Method
+	methodList         []Method
 	inner              http.RoundTripper
 	paymentPreferences []paymentPreference
 	acceptPayment      string
@@ -106,6 +107,7 @@ func newTransport(methods []Method, inner http.RoundTripper, config *transportCo
 	}
 	return &Transport{
 		methods:            m,
+		methodList:         append([]Method(nil), methods...),
 		inner:              inner,
 		paymentPreferences: preferences,
 		acceptPayment:      header,
@@ -173,7 +175,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 		}
 		if len(candidates) == 0 {
-			return resp, nil
+			// A 402 answering a paid retry without a payable challenge (such
+			// as a rejected credential) is the server's final answer. A 402
+			// to the unpaid request is an error, as in mppx.
+			if sent {
+				return resp, nil
+			}
+			drainAndClose(resp.Body)
+			return nil, newNoMethodFoundError(challenges, t.configuredMethods())
 		}
 		var selected challengeCandidate
 		var rejected error
@@ -190,6 +199,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
+		if sent && sentCred != nil && sentCred.Payload["type"] == "hash" {
+			// A hash credential's transfer is already on chain: resending it
+			// is safe, but paying a new challenge would pay twice.
+			key := credentialKey{id: selected.challenge.ID, method: methodKey{name: selected.challenge.Method, intent: selected.challenge.Intent}}
+			if credentials[key] == nil || problem == mpp.ErrorTypeInvalidPayload {
+				return resp, nil
+			}
+		}
 		if problem == mpp.ErrorTypeInvalidPayload {
 			delete(credentials, sentCredential)
 		}
@@ -646,4 +663,10 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 		return tempoproof.RealmError(challenge.Realm, requestOrigin(req.URL), "")
 	}
 	return nil
+}
+
+// configuredMethods returns the methods the Transport was built with, in
+// configuration order.
+func (t *Transport) configuredMethods() []Method {
+	return t.methodList
 }

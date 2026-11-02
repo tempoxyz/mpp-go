@@ -11,8 +11,9 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-// PaymentPolicy authorizes a nonzero Tempo charge before the client signs or
-// broadcasts it; returning an error rejects the payment. The request has the
+// PaymentPolicy authorizes a Tempo charge before the client signs or
+// broadcasts it, including a zero-amount proof; returning an error rejects
+// the payment. The request has the
 // normalized base-unit amount (including splits), the currency, the
 // recipient and the chain ID verified with the RPC. It may run concurrently
 // and must not mutate the request. Build one with MaxAmount, MaxAtomicAmount

@@ -9,10 +9,11 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
-	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
 // encodePlainProofSignature serializes a secp256k1 signature into the 65-byte
@@ -146,8 +147,10 @@ func TestRecoverProofSigner_KeychainAcceptsLegacyVRecoveryByte(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Force a legacy v=27/28 recovery byte.
-	inner.YParity += 27
-	keychainSig := keychain.BuildKeychainSignature(inner, rootSigner.Address())
+	keychainSig := mustKeychainSignature(t, inner, rootSigner.Address())
+	if keychainSig[len(keychainSig)-1] < 27 {
+		keychainSig[len(keychainSig)-1] += 27
+	}
 
 	signer, err := recoverProofSigner(proofHash, hexutil.Encode(keychainSig), rootSigner.Address())
 	assert.NoError(t, err)

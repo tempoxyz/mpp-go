@@ -2,24 +2,23 @@ package chargeserver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
+// As in mppx, a zero-amount charge accepts only a proof, sponsored or not.
 func TestZeroAmountCredentialsRequireProof(t *testing.T) {
-	for _, feePayer := range []bool{true, false} {
+	for _, sponsored := range []bool{true, false} {
 		for _, amount := range []string{"0", "00", "000000", " 0 ", "\t00\n"} {
 			for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
-				name := amount + "/" + string(kind)
-				if feePayer {
-					name = "sponsored/" + name
-				}
-				t.Run(name, func(t *testing.T) {
-					request := buildRequest(t, feePayer, nil)
+				t.Run(fmt.Sprintf("sponsored=%t/%s/%s", sponsored, amount, kind), func(t *testing.T) {
+					request := buildRequest(t, sponsored, nil)
 					request.Amount = amount
 					rpc := newMockRPC(request)
 					intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})

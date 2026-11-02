@@ -265,7 +265,13 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 	require.NoError(t, err)
 	credential, err := clientMethod.CreateCredential(ctx, challenge)
 	require.NoError(t, err)
-	tx, err := tempotx.Deserialize(credential.Payload["signature"].(string))
+	// Drop the "<sender> feefeefeefee" trailer of a sponsored credential,
+	// which tempo-go does not decode.
+	signature := credential.Payload["signature"].(string)
+	if strings.HasSuffix(signature, "feefeefeefee") {
+		signature = signature[:len(signature)-len("feefeefeefee")-40]
+	}
+	tx, err := tempotx.Deserialize(signature)
 	require.NoError(t, err)
 
 	tx.Signature = nil
@@ -277,7 +283,9 @@ func TestIntegrationChargeFlow_LocalNodeKeychainFeePayerForm(t *testing.T) {
 	require.NoError(t, authorization.SignAndAttach(tx, rootSigner))
 	require.NoError(t, keychain.SignWithAccessKey(tx, accessSigner, rootSigner.Address()))
 	// Tempo CLI 1.6 emits the inner recovery byte in legacy 27/28 form.
-	tx.Signature.Raw[keychain.KeychainSignatureLength-1] += 27
+	if v := &tx.Signature.Raw[keychain.KeychainSignatureLength-1]; *v < 27 {
+		*v += 27
+	}
 	serialized, err := tempotx.Serialize(tx, &tempotx.SerializeOptions{
 		Format: tempotx.FormatFeePayer,
 		Sender: rootSigner.Address(),
@@ -967,7 +975,9 @@ func newPaidServer(t *testing.T, rpcURL string, chainID uint64, feePayerSigner *
 		Currencies: []string{integrationCurrency},
 		Recipient:  integrationRecipient,
 		ChainID:    int64(chainID),
-		FeePayer:   true,
+		// New refuses FeePayer without a fee payer; with one, every route
+		// is sponsored unless it sets DisableFeePayer (see paidHandler).
+		FeePayer: feePayerSigner != nil,
 	})
 	hashMethod := mustNewMethod(t, chargeserver.Config{
 		Intent:         intent,
@@ -1010,9 +1020,10 @@ func paidHandler(t *testing.T, payment *server.Mpp, feePayer bool) http.HandlerF
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		result, err := payment.Charge(r.Context(), server.ChargeParams{
-			Authorization: r.Header.Get("Authorization"),
-			Amount:        "1.00",
-			FeePayer:      feePayer,
+			Authorization:   r.Header.Get("Authorization"),
+			Amount:          "1.00",
+			FeePayer:        feePayer,
+			DisableFeePayer: !feePayer,
 		})
 		if err != nil {
 			writeIntegrationPaymentError(w, err)
