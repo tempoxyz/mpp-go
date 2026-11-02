@@ -154,3 +154,26 @@ func TestRecoverProofSigner_KeychainAcceptsLegacyVRecoveryByte(t *testing.T) {
 	assert.Equalf(t, accessKey.Address().Hex(), signer.Hex(),
 		"keychain proof with legacy v byte must recover to the access key")
 }
+
+// TestRecoverProofSigner_KeychainV1SignsProofHash checks the mpp-tools
+// conformance vector keychain_v1_proof_from_active_access_key_accepted: a
+// legacy Keychain V1 envelope (0x03 || root || inner) whose inner signature
+// signs the proof hash itself recovers to the access key, as in mppx.
+func TestRecoverProofSigner_KeychainV1SignsProofHash(t *testing.T) {
+	t.Parallel()
+
+	root := common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+	accessKey := common.HexToAddress("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+	const signature = "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb9226638472ae9a51efc9077f72655d9640d5d6c6006eadca3ca52e6032b7e1e117b1004457c374ebbfebb4245e4306cc9a846a715bc8e8dfc4d6ad577b02f515cd3da1c"
+
+	proofHash, err := tempo.ProofTypedDataHash(4217, root, "zero-amount-challenge", "api.example.com")
+	assert.NoError(t, err)
+
+	signer, err := recoverProofSigner(proofHash, signature, root)
+	assert.NoError(t, err)
+	assert.Equal(t, accessKey.Hex(), signer.Hex())
+
+	// The same envelope naming another root is rejected.
+	_, err = recoverProofSigner(proofHash, signature, accessKey)
+	assert.Error(t, err)
+}

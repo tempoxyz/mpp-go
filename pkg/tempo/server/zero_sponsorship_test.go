@@ -10,24 +10,32 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-func TestZeroAmountSponsoredCredentialsRequireProof(t *testing.T) {
-	for _, amount := range []string{"0", "00", "000000", " 0 ", "\t00\n"} {
-		for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
-			t.Run(amount+"/"+string(kind), func(t *testing.T) {
-				request := buildRequest(t, true, nil)
-				request.Amount = amount
-				rpc := newMockRPC(request)
-				intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
-				require.NoError(t, err)
-				credential := &mpp.Credential{Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x" + strings.Repeat("01", 32)}.Map()}
-				_, err = intent.Verify(context.Background(), credential, request.Map())
-				require.ErrorContains(t, err, "zero-amount fee payer challenges require a proof")
-				require.Empty(t, rpc.sentRawTxs)
-				require.Empty(t, rpc.callRequests)
-			})
+func TestZeroAmountCredentialsRequireProof(t *testing.T) {
+	for _, feePayer := range []bool{true, false} {
+		for _, amount := range []string{"0", "00", "000000", " 0 ", "\t00\n"} {
+			for _, kind := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
+				name := amount + "/" + string(kind)
+				if feePayer {
+					name = "sponsored/" + name
+				}
+				t.Run(name, func(t *testing.T) {
+					request := buildRequest(t, feePayer, nil)
+					request.Amount = amount
+					rpc := newMockRPC(request)
+					intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
+					require.NoError(t, err)
+					credential := &mpp.Credential{
+						Payload: tempo.ChargeCredentialPayload{Type: kind, Signature: "0x01", Hash: "0x" + strings.Repeat("01", 32)}.Map(),
+						Source:  "did:pkh:eip155:42431:0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+					}
+					_, err = intent.Verify(context.Background(), credential, request.Map())
+					require.ErrorContains(t, err, "zero-amount challenges require a proof credential")
+					require.Empty(t, rpc.sentRawTxs)
+					require.Empty(t, rpc.callRequests)
+				})
+			}
 		}
 	}
-
 }
 
 func TestAlternateZeroAmountsCompleteProofFlow(t *testing.T) {
