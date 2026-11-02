@@ -22,30 +22,38 @@ const (
 	receiptKey
 )
 
-// ScopeFromHTTPRequest returns the framework scope bound into charge requests.
-func ScopeFromHTTPRequest(r *http.Request, route string) map[string]string {
-	scope := map[string]string{}
+// ScopeFromHTTPRequest returns the route scope bound into charge Challenges,
+// as mppx's framework adapters attach it: the request's upper-case method, a
+// space, and route, such as "GET /items/:id". An empty route defaults to the
+// path of r.Pattern (the http.ServeMux pattern that matched, without its
+// method or host), then to the request's escaped path. The query is never part of the
+// scope. It returns "" when there is no route or path.
+func ScopeFromHTTPRequest(r *http.Request, route string) string {
+	if r == nil {
+		return ""
+	}
 	if route == "" {
 		route = r.Pattern
-	}
-	if method, path, ok := strings.Cut(route, " "); ok && method != "" && path != "" {
-		route = path
-	}
-	if route != "" {
-		scope["route"] = route
-	}
-	if r.URL != nil {
-		if r.URL.Path != "" {
-			scope["resource"] = r.URL.Path
+		if _, path, ok := strings.Cut(route, " "); ok {
+			route = strings.TrimLeft(path, " \t")
 		}
-		if r.URL.RawQuery != "" {
-			scope["query"] = r.URL.RawQuery
+		if i := strings.IndexByte(route, '/'); i > 0 {
+			route = route[i:] // drop a host
 		}
 	}
-	if len(scope) == 0 {
-		return nil
+	if route == "" && r.URL != nil {
+		// The escaped path, as mppx binds url.pathname: the decoded form can
+		// hold invalid UTF-8, which the JSON opaque cannot carry byte for byte.
+		route = r.URL.EscapedPath()
 	}
-	return scope
+	if route == "" {
+		return ""
+	}
+	method := r.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+	return strings.ToUpper(method) + " " + route
 }
 
 // ContextWithPayment stores the verified payment objects on a request context.
@@ -311,8 +319,8 @@ func formatChallengeWithRealm(challenge *mpp.Challenge, realm string) (string, e
 // ChallengeSerializationError classifies err, a failure to serialize
 // challenge as a WWW-Authenticate value for realm. Challenges come from server
 // configuration, so the failure is a server error (WritePaymentResponse reports
-// it as a 500 internal payment error) unless the request-derived resource or
-// query bound into the challenge's _mppx_scope made the header too large:
+// it as a 500 internal payment error) unless the route scope bound into the
+// challenge's opaque _mppx_scope made the header too large:
 // then the request URI is at fault and the result is a 414 URI Too Long
 // PaymentError.
 func ChallengeSerializationError(challenge *mpp.Challenge, realm string, err error) error {
@@ -328,40 +336,20 @@ func ChallengeSerializationError(challenge *mpp.Challenge, realm string, err err
 }
 
 // fitsWithoutRequestURI reports whether challenge, which failed to serialize,
-// would serialize without the resource and query of its _mppx_scope.
+// would serialize without the route scope in its opaque _mppx_scope, which
+// carries the request path when no route template is known.
 func fitsWithoutRequestURI(challenge *mpp.Challenge, realm string) bool {
-	var trimmed map[string]any
-	switch scope := challenge.Request["_mppx_scope"].(type) {
-	case map[string]string:
-		if scope["resource"] == "" && scope["query"] == "" {
-			return false
-		}
-		trimmed = make(map[string]any, len(scope))
-		for k, v := range scope {
-			trimmed[k] = v
-		}
-	case map[string]any:
-		if scope["resource"] == nil && scope["query"] == nil {
-			return false
-		}
-		trimmed = make(map[string]any, len(scope))
-		for k, v := range scope {
-			trimmed[k] = v
-		}
-	default:
+	if challenge.Opaque[mppxScopeKey] == "" {
 		return false
 	}
-	delete(trimmed, "resource")
-	delete(trimmed, "query")
-
-	request := make(map[string]any, len(challenge.Request))
-	for k, v := range challenge.Request {
-		request[k] = v
+	opaque := make(map[string]string, len(challenge.Opaque))
+	for k, v := range challenge.Opaque {
+		if k != mppxScopeKey {
+			opaque[k] = v
+		}
 	}
-	request["_mppx_scope"] = trimmed
 	probe := *challenge
-	probe.Request = request
-	probe.RequestB64 = ""
+	probe.Opaque = opaque
 	_, err := formatChallengeWithRealm(&probe, realm)
 	return err == nil
 }

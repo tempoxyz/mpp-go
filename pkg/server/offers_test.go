@@ -288,11 +288,11 @@ func TestMppCharge_OffersBindMppxScope(t *testing.T) {
 	t.Parallel()
 
 	payment := newOffersTestServer(t, &recordingOfferIntent{}, offerA, offerB)
-	scope := map[string]string{"route": "/paid"}
-	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", MppxScope: scope})
+	result, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", MppxScope: "GET /paid"})
 	require.NoError(t, err)
 	for _, challenge := range result.Challenges {
-		assert.Equal(t, map[string]string{"route": "/paid"}, challenge.Request["_mppx_scope"])
+		assert.Equal(t, "GET /paid", challenge.Opaque["_mppx_scope"])
+		assert.NotContains(t, challenge.Request, "_mppx_scope")
 	}
 }
 
@@ -329,7 +329,7 @@ func TestChargeMiddleware_VerificationFailureAdvertisesEveryOffer(t *testing.T) 
 	handler := ChargeMiddleware(payment, ChargeParams{Amount: "1"})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run")
 	}))
-	issued, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", MppxScope: map[string]string{"resource": "/paid"}})
+	issued, err := payment.Charge(context.Background(), ChargeParams{Amount: "1", MppxScope: "GET /paid"})
 	require.NoError(t, err)
 
 	request := httptest.NewRequest(http.MethodGet, "/paid", nil)

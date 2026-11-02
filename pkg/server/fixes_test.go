@@ -63,7 +63,7 @@ func challengeScope(t *testing.T, header http.Header) any {
 	t.Helper()
 	challenge, err := mpp.ParseChallenge(header.Get(mpp.HeaderWWWAuthenticate))
 	require.NoError(t, err)
-	return challenge.Request["_mppx_scope"]
+	return challenge.Opaque["_mppx_scope"]
 }
 
 func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
@@ -72,31 +72,31 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 
 	custom := ChargeMiddleware(payment, ChargeParams{
 		Amount:    "0.50",
-		MppxScope: map[string]string{"route": "custom"},
+		MppxScope: "custom",
 	})(next)
 	resp := httptest.NewRecorder()
 	custom.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/paid?x=1", nil))
 	require.Equal(t, http.StatusPaymentRequired, resp.Code)
-	assert.Equal(t, map[string]any{"route": "custom"}, challengeScope(t, resp.Header()))
+	assert.Equal(t, "custom", challengeScope(t, resp.Header()))
 
 	fromRequest := ChargeMiddleware(payment, ChargeParams{Amount: "0.50"})(next)
 	resp = httptest.NewRecorder()
 	fromRequest.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/paid?x=1", nil))
 	require.Equal(t, http.StatusPaymentRequired, resp.Code)
-	assert.Equal(t, map[string]any{"resource": "/paid", "query": "x=1"}, challengeScope(t, resp.Header()))
+	assert.Equal(t, "GET /paid", challengeScope(t, resp.Header()))
 }
 
 func TestComposeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	handler := ComposeMiddleware(ComposeConfig{
 		Mpp:    payment,
-		Params: ChargeParams{Amount: "0.50", MppxScope: map[string]string{"route": "custom"}},
+		Params: ChargeParams{Amount: "0.50", MppxScope: "custom"},
 	})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/paid", nil))
 	require.Equal(t, http.StatusPaymentRequired, resp.Code)
-	assert.Equal(t, map[string]any{"route": "custom"}, challengeScope(t, resp.Header()))
+	assert.Equal(t, "custom", challengeScope(t, resp.Header()))
 }
 
 func TestChargeMiddlewareReportsServerMisconfigurationAsInternalError(t *testing.T) {

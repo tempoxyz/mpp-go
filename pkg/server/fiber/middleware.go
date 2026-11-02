@@ -40,10 +40,7 @@ func Receipt(c *fiberfw.Ctx) *mpp.Receipt {
 // Receipt in the Fiber locals and the user context.
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) fiberfw.Handler {
 	return func(c *fiberfw.Ctx) error {
-		params := params
-		if len(params.MppxScope) == 0 {
-			params.MppxScope = fiberScope(c)
-		}
+		params := params.WithDefaultScope(fiberScope(c))
 		return handle(c, func(r *http.Request) (*server.ChargeResult, error) {
 			return m.ChargeRequest(r, params)
 		})
@@ -67,17 +64,15 @@ func ComposeMiddleware(offers ...server.Offer) fiberfw.Handler {
 	}
 }
 
-// scopedOffers returns offers with scope bound into every offer that sets
-// none of its own.
-func scopedOffers(offers []server.Offer, scope map[string]string) []server.Offer {
-	if len(scope) == 0 {
+// scopedOffers returns offers with scope bound into every offer that binds
+// none of its own (see server.ChargeParams.WithDefaultScope).
+func scopedOffers(offers []server.Offer, scope string) []server.Offer {
+	if scope == "" {
 		return offers
 	}
 	scoped := slices.Clone(offers)
 	for i := range scoped {
-		if len(scoped[i].Params.MppxScope) == 0 {
-			scoped[i].Params.MppxScope = scope
-		}
+		scoped[i].Params = scoped[i].Params.WithDefaultScope(scope)
 	}
 	return scoped
 }
@@ -215,21 +210,24 @@ func (w *responseWriter) Write(body []byte) (int, error) {
 	return len(body), nil
 }
 
-func fiberScope(c *fiberfw.Ctx) map[string]string {
-	scope := map[string]string{}
-	if route := c.Route(); route != nil && route.Path != "" {
-		scope["route"] = route.Path
+func fiberScope(c *fiberfw.Ctx) string {
+	route := ""
+	if r := c.Route(); r != nil {
+		route = r.Path
 	}
-	if path := c.Path(); path != "" {
-		scope["resource"] = path
+	// Inside app.Use or a Group, Route().Path is the mount prefix, not the
+	// matched route. A pattern that does not match the whole request path is
+	// such a prefix: bind the request's own (escaped) path instead.
+	if route != "" && !fiberfw.RoutePatternMatch(c.Path(), route, c.App().Config()) {
+		route = ""
 	}
-	if query := string(c.Request().URI().QueryString()); query != "" {
-		scope["query"] = query
+	if route == "" {
+		route, _, _ = strings.Cut(c.OriginalURL(), "?")
 	}
-	if len(scope) == 0 {
-		return nil
+	if route == "" {
+		return ""
 	}
-	return scope
+	return strings.ToUpper(c.Method()) + " " + route
 }
 
 // WritePaymentResponse writes the payment response for err and challenges,
