@@ -9,9 +9,11 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	"golang.org/x/net/idna"
 )
 
 // IsProofChallenge reports whether challenge is a zero-amount tempo/charge
@@ -42,12 +44,23 @@ func OriginOwnsRealm(u *url.URL, realm string) bool {
 	if u == nil || u.Scheme != "https" || (u.Port() != "" && u.Port() != "443") || realm == "" || u.Hostname() == "" {
 		return false
 	}
-	host, err := idna.Lookup.ToASCII(u.Hostname())
+	host, err := lookupHostname(u.Hostname())
 	if err != nil {
 		return false
 	}
-	name, err := idna.Lookup.ToASCII(realm)
+	name, err := lookupHostname(realm)
 	return err == nil && strings.EqualFold(name, host)
+}
+
+// Match net/http's hostname conversion: ASCII hostnames (including IP
+// literals) are passed through; Unicode names use the IDNA lookup profile.
+func lookupHostname(host string) (string, error) {
+	for _, r := range host {
+		if r >= utf8.RuneSelf {
+			return idna.Lookup.ToASCII(host)
+		}
+	}
+	return host, nil
 }
 
 // Origin returns the lowercase scheme://host[:port] origin of u, or "" for nil.

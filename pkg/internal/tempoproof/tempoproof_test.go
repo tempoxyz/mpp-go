@@ -53,7 +53,10 @@ func TestOriginOwnsRealmIDNA(t *testing.T) {
 		{"bücher.example", "xn--bcher-kva.example", true},
 		{"xn--bcher-kva.example", "bücher.example", true},
 		{"API.example", "api.example", true},
-		{"bad_host.example", "bad_host.example", false},
+		{"bad_host.example", "bad_host.example", true},
+		{"r3---sn-abc.example.com", "r3---sn-abc.example.com", true},
+		{"[::1]", "::1", true},
+		{"[::1]", "::2", false},
 		{"", "", false},
 	} {
 		t.Run(tc.host+"/"+tc.realm, func(t *testing.T) {
