@@ -110,6 +110,12 @@ Each type has one canonical Parse/Format pair:
   response returns, once the whole set is issued and serializes (a composed
   flow reports them itself, through `chargeWithEvents(..., false)`). Hooks
   run under `safeCall`: a panic is recovered and ignored.
+- Issued Challenges carry a random `_mppx_nonce` in their opaque metadata
+  by default, as mppx's `ChallengeMeta.withNonce` does. Verification also
+  accepts `_mpp_nonce` (issued by earlier releases) and no nonce, and both
+  keys stay reserved in `ChargeParams.Meta`. Releases 0.4.0 to 0.6.0 reject
+  `_mppx_nonce`, so a mixed fleet sets `WithChallengeNonce(false)` (or
+  `VerifyParams.DisableChallengeNonce`) until every replica runs this release.
 - A composed HTTP flow keeps the header a Credential arrived in: an offer
   created `WithRequiresAuth` accepts it only from `Payment-Authorization`,
   any other offer only from `Authorization`. A Credential sent in the other
