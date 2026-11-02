@@ -213,6 +213,23 @@ func TestChargeMiddlewareUseBindsRequestPath(t *testing.T) {
 	assert.Equal(t, http.StatusPaymentRequired, otherResponse.StatusCode)
 }
 
+func TestChargeMiddlewareGroupWithParamsBindsRequestPath(t *testing.T) {
+	t.Parallel()
+
+	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+	app := fiberfw.New()
+	group := app.Group("/tenants/:tid", ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
+	group.Get("/a", func(c *fiberfw.Ctx) error { return c.SendString("a") })
+
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/tenants/7/a", nil))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	challenge, err := mpp.ParseChallenge(response.Header.Get("WWW-Authenticate"))
+	require.NoError(t, err)
+	// The group prefix matches only part of the path, so the request path is bound.
+	assert.Equal(t, "GET /tenants/7/a", challenge.Opaque["_mppx_scope"])
+}
+
 func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 	t.Parallel()
 
