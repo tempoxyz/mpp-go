@@ -224,7 +224,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				return resp, nil
 			}
 		}
-		if (problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload) {
+		if problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload {
 			delete(credentials, sentCredential)
 		}
 		drainAndClose(resp.Body)
