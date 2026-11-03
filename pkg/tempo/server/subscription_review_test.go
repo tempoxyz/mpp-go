@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,7 +41,7 @@ func (s *faultyStore) CompareAndSwap(ctx context.Context, key string, old *strin
 	return s.MemoryStore.CompareAndSwap(ctx, key, old, next)
 }
 
-func TestSubscriptionStoreClearsCommittingMarkerOnError(t *testing.T) {
+func TestSubscriptionStoreKeepsSettledActivationOnCommitError(t *testing.T) {
 	ctx := context.Background()
 	var failing atomic.Bool
 	backing := &faultyStore{MemoryStore: tempo.NewMemoryStore()}
@@ -49,24 +50,71 @@ func TestSubscriptionStoreClearsCommittingMarkerOnError(t *testing.T) {
 	}
 	store, err := NewSubscriptionStore(backing, SubscriptionStoreOptions{})
 	require.NoError(t, err)
+	reusable := func(SubscriptionRecord) bool { return true }
 
-	_, _, _, err = store.activate(ctx, "challenge-1", "user:x", nil, func() (*SubscriptionResult, error) {
+	// The activation paid, then the commit failed.
+	_, _, _, err = store.activate(ctx, "challenge-1", "user:x", reusable, func() (*SubscriptionResult, error) {
 		failing.Store(true)
 		return &SubscriptionResult{Subscription: SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_1"}}, nil
 	}, nil)
-
 	require.ErrorContains(t, err, "store unavailable")
+	marker, _, err := getJSON[activationMarker](ctx, backing, store.activationKey("user:x"))
+	require.NoError(t, err)
+	require.NotNil(t, marker, "a paid activation keeps its marker")
+	require.NotNil(t, marker.Settled)
+	assert.Equal(t, "sub_1", marker.Settled.SubscriptionID)
+	assert.True(t, marker.Retry)
+
+	// The next attempt finishes that commit instead of paying again.
+	failing.Store(false)
+	status, _, existing, err := store.activate(ctx, "challenge-2", "user:x", reusable, func() (*SubscriptionResult, error) {
+		t.Fatal("a settled activation must not be paid again")
+		return nil, nil
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, activationExisting, status)
+	require.NotNil(t, existing)
+	assert.Equal(t, "sub_1", existing.SubscriptionID)
 	_, ok, err := backing.Get(ctx, store.activationKey("user:x"))
 	require.NoError(t, err)
-	assert.False(t, ok, "a failed commit releases its committing marker")
+	assert.False(t, ok, "the finished commit releases the marker")
+}
 
-	failing.Store(false)
-	status, _, _, err := store.activate(ctx, "challenge-2", "user:x", nil, func() (*SubscriptionResult, error) {
-		return &SubscriptionResult{Subscription: SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_2"}}, nil
-	}, nil)
-
+func TestSubscriptionStoreFinishesStaleSettledActivation(t *testing.T) {
+	ctx := context.Background()
+	backing := tempo.NewMemoryStore()
+	store, err := NewSubscriptionStore(backing, SubscriptionStoreOptions{ActivationTimeout: time.Minute})
 	require.NoError(t, err)
-	assert.Equal(t, activationActivated, status)
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	anchor := store.timestamp()
+
+	// A replica crashed after making sub_1 current and renewing it, before
+	// it released its committing marker.
+	settled := SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_1", BillingAnchor: anchor}
+	renewed := settled
+	renewed.LastChargedPeriod = 3
+	require.NoError(t, store.Put(ctx, renewed))
+	marker, err := json.Marshal(activationMarker{ChallengeID: "crashed", CommittingAt: anchor, StartedAt: anchor, Settled: &settled})
+	require.NoError(t, err)
+	require.NoError(t, backing.Put(ctx, store.activationKey("user:x"), string(marker)))
+	create := func() (*SubscriptionResult, error) {
+		t.Fatal("a settled activation must not be paid again")
+		return nil, nil
+	}
+	reusable := func(SubscriptionRecord) bool { return true }
+
+	status, _, existing, err := store.activate(ctx, "challenge-1", "user:x", nil, create, nil)
+	require.NoError(t, err)
+	assert.Equal(t, activationInFlight, status, "a live committing marker holds the lock")
+	assert.Nil(t, existing)
+
+	now = now.Add(time.Minute)
+	status, _, existing, err = store.activate(ctx, "challenge-2", "user:x", reusable, create, nil)
+	require.NoError(t, err)
+	assert.Equal(t, activationExisting, status, "a stale committing marker is finished, not paid again")
+	require.NotNil(t, existing)
+	assert.Equal(t, int64(3), existing.LastChargedPeriod, "finishing the commit keeps later renewals")
 }
 
 func TestSubscriptionStoreRecoversAbandonedCommittingMarker(t *testing.T) {
@@ -375,6 +423,92 @@ func TestSubscriptionRenewalRetriesRejectedPendingPayment(t *testing.T) {
 	require.NotNil(t, renewed)
 	require.Len(t, rpc.sentRawTxs, 4)
 	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[3])), renewed.Receipt.Reference)
+}
+
+func TestSubscriptionRenewalAfterBroadcastGetsNoChallenge(t *testing.T) {
+	ctx := context.Background()
+	rpc, sent := subscriptionChain(t, nil)
+	var failing atomic.Bool
+	backing := &faultyStore{MemoryStore: tempo.NewMemoryStore()}
+	backing.fail = func(key string) bool {
+		return failing.Load() && strings.HasPrefix(key, defaultSubscriptionAccessKeyPrefix)
+	}
+	store, err := NewSubscriptionStore(backing, SubscriptionStoreOptions{})
+	require.NoError(t, err)
+	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) {
+		config.RPC = rpc
+		config.Store = store
+	})
+	store.now = h.clock
+	h.store = store
+	_, authorization := h.pay("sam", subscriptionPayerKey)
+	activated, err := h.subscribe("sam", authorization)
+	require.NoError(t, err)
+	require.Len(t, *sent, 1)
+
+	// The renewal pays, then the store fails: no Challenge, so an
+	// auto-paying client does not pay the period again.
+	h.advance(25 * time.Hour)
+	credit := rpc.onSend
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		// The store fails once the payment is on its way, before the
+		// renewal keeps its access key.
+		stored, err := store.GetAccessKey(ctx, "user:sam")
+		require.NoError(t, err)
+		require.NoError(t, backing.Delete(ctx, store.accessKeyAddressKey(stored.AccessKeyAddress)))
+		failing.Store(true)
+		return credit(raw)
+	}
+	result, err := h.subscribe("sam", "")
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	assert.Nil(t, result)
+	require.Len(t, *sent, 2)
+	record, err := h.store.Get(ctx, activated.Receipt.SubscriptionID)
+	require.NoError(t, err)
+	require.NotNil(t, record.InFlightPayment, "the renewal keeps its claim and payment")
+
+	// The next request settles that payment without a new one.
+	failing.Store(false)
+	rpc.onSend = credit
+	served, err := h.subscribe("sam", "")
+	require.NoError(t, err)
+	require.False(t, served.IsChallenge())
+	assert.Len(t, *sent, 2)
+	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[1])), served.Receipt.Reference)
+}
+
+func TestSubscriptionHeldRenewalGetsNoChallenge(t *testing.T) {
+	held := false
+	rpc, sent := subscriptionChain(t, &held)
+	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) { config.RPC = rpc })
+	_, authorization := h.pay("tia", subscriptionPayerKey)
+	_, err := h.subscribe("tia", authorization)
+	require.NoError(t, err)
+
+	h.advance(25 * time.Hour)
+	held = true
+	result, err := h.subscribe("tia", "")
+	assert.ErrorContains(t, err, "was not credited to the recipient")
+	assert.Nil(t, result, "a broadcast renewal gets no Challenge")
+	assert.Len(t, *sent, 2)
+}
+
+func TestSubscriptionRenewalNotSentGetsChallenge(t *testing.T) {
+	var renewals []SubscriptionRenewParams
+	var h *subscriptionHarness
+	h = newSubscriptionHarness(t, func(config *SubscriptionConfig) {
+		manualHooks(&h, &renewals)(config)
+		config.Renew = func(context.Context, SubscriptionRenewParams) (*SubscriptionResult, error) {
+			return nil, fmt.Errorf("card declined: %w", ErrSubscriptionPaymentNotSent)
+		}
+	})
+	_, authorization := h.pay("uma", subscriptionPayerKey)
+	_, err := h.subscribe("uma", authorization)
+	require.NoError(t, err)
+	h.advance(25 * time.Hour)
+	result, err := h.subscribe("uma", "")
+	require.NoError(t, err)
+	assert.True(t, result.IsChallenge(), "a renewal that charged nothing offers a fresh Challenge")
 }
 
 func TestSubscriptionChallengeMustExpireBeforeSubscription(t *testing.T) {

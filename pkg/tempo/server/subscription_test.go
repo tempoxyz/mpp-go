@@ -336,11 +336,11 @@ func TestSubscriptionRejectsRenewalsChangingTheSubscription(t *testing.T) {
 	_, err := h.subscribe("frank", authorization)
 	require.NoError(t, err)
 	h.advance(25 * time.Hour)
-	// The request path cannot renew, so it offers a fresh Challenge instead
-	// of failing every request until the subscription expires.
+	// Renew returned a result, so it may have charged the period: a fresh
+	// Challenge would make an auto-paying client pay it twice.
 	result, err := h.subscribe("frank", "")
-	require.NoError(t, err)
-	assert.True(t, result.IsChallenge(), "a failed renewal falls through to a Challenge")
+	assert.ErrorContains(t, err, "subscriptionId does not match the active subscription")
+	assert.Nil(t, result, "a renewal that may have charged gets no Challenge")
 	_, err = h.sub.Renew(context.Background(), "sub_frank")
 	assert.ErrorContains(t, err, "subscriptionId does not match the active subscription")
 	record, err := h.store.Get(context.Background(), "sub_frank")

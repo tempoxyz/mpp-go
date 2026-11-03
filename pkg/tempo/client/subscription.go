@@ -23,8 +23,10 @@ type SubscriptionConfig struct {
 	// AccessKey overrides the access key the Challenge names. Leave it nil to
 	// authorize the key the server put in methodDetails.accessKey.
 	AccessKey *tempo.SubscriptionAccessKey
-	// ChainID is the chain to authorize when the Challenge names none. Zero
-	// uses Tempo Moderato, as mppx does.
+	// ChainID is the chain to authorize when the Challenge names none. When
+	// set, a Challenge naming another chain is rejected, as the charge client
+	// does. Zero uses Tempo Moderato for a Challenge that names none, as mppx
+	// does.
 	ChainID int64
 	// ValidateRequest authorizes a subscription before anything is signed:
 	// it must reject an amount, currency, recipient, period or expiry the
@@ -114,6 +116,9 @@ func (m *SubscriptionMethod) CreateCredential(ctx context.Context, challenge *mp
 	}
 	chainID := m.chainID
 	if request.ChainID != nil {
+		if m.chainID != 0 && *request.ChainID != m.chainID {
+			return nil, fmt.Errorf("tempo client: challenge chain id mismatch (challenge=%d, expected=%d)", *request.ChainID, m.chainID)
+		}
 		chainID = *request.ChainID
 	}
 	if chainID == 0 {

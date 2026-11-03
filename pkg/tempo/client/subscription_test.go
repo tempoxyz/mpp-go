@@ -100,6 +100,26 @@ func TestSubscriptionClientFailsClosedWithoutValidateRequest(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSubscriptionValidateRequired)
 }
 
+func TestSubscriptionClientRejectsOtherChain(t *testing.T) {
+	validated := false
+	method, err := NewSubscription(SubscriptionConfig{
+		ChainID:    tempo.ChainIDModerato,
+		PrivateKey: subscriptionClientKey,
+		ValidateRequest: func(context.Context, tempo.SubscriptionRequest) error {
+			validated = true
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	_, err = method.CreateCredential(context.Background(), subscriptionChallenge(t, tempo.ChainIDMainnet, subscriptionClientAccessKey))
+	assert.ErrorContains(t, err, "challenge chain id mismatch (challenge=4217, expected=42431)")
+	assert.False(t, validated, "nothing is signed for another chain")
+
+	credential, err := method.CreateCredential(context.Background(), subscriptionChallenge(t, tempo.ChainIDModerato, subscriptionClientAccessKey))
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(credential.Source, "did:pkh:eip155:42431:"))
+}
+
 func TestSubscriptionClientUsesConfiguredAccessKey(t *testing.T) {
 	override := &tempo.SubscriptionAccessKey{AccessKeyAddress: "0x" + strings.Repeat("cd", 20), KeyType: tempo.SubscriptionKeyTypeSecp256k1}
 	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey, AccessKey: override, ValidateRequest: acceptSubscription})
