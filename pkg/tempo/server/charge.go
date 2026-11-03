@@ -1271,14 +1271,16 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 
 // isDuplicateSubmission reports whether eth_sendRawTransaction failed because
 // the node already holds the transaction, as geth- and reth-based nodes answer
-// a re-broadcast of a pending transaction.
+// a re-broadcast of a pending transaction, and as Tempo answers with
+// ExpiringNonceReplay when an expiring-nonce transaction with this hash was
+// already accepted, such as when a transport retries a send the node took.
 func isDuplicateSubmission(err error) bool {
 	var rpcErr *temporpc.JSONRPCError
 	if !errors.As(err, &rpcErr) {
 		return false
 	}
 	message := strings.ToLower(rpcErr.Message)
-	for _, marker := range []string{"already known", "known transaction", "already imported", "alreadyknown"} {
+	for _, marker := range []string{"already known", "known transaction", "already imported", "alreadyknown", "expiringnoncereplay"} {
 		if strings.Contains(message, marker) {
 			return true
 		}

@@ -2093,11 +2093,26 @@ func TestChargeFlow_TransactionCredentialChecksOnceAfterRejectedSubmission(t *te
 
 func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testing.T) {
 	t.Parallel()
-	for _, mined := range []bool{true, false} {
-		t.Run(fmt.Sprintf("mined=%t", mined), func(t *testing.T) {
+	const expiringNonceReplay = "nonce manager error: Tempo Transaction nonce error: ExpiringNonceReplay(ExpiringNonceReplay)"
+	for _, tc := range []struct {
+		name     string
+		message  string
+		feePayer bool
+		mined    bool
+	}{
+		{name: "already known mined", message: "already known", mined: true},
+		{name: "already known pending", message: "already known"},
+		// Tempo rejects a retried send of an expiring-nonce transaction it
+		// already accepted.
+		{name: "expiring nonce replay mined", message: expiringNonceReplay, mined: true},
+		{name: "expiring nonce replay pending", message: expiringNonceReplay},
+		{name: "sponsored expiring nonce replay mined", message: expiringNonceReplay, feePayer: true, mined: true},
+	} {
+		mined := tc.mined
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			request := buildRequest(t, false, nil)
+			request := buildRequest(t, tc.feePayer, nil)
 			rpc := newMockRPC(request)
 			var receipt map[string]any
 			// The node still holds the transaction an earlier attempt
@@ -2112,7 +2127,7 @@ func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testin
 					return "", nil, err
 				}
 				receipt = buildReceipt(raw, request, sender)
-				return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "already known"})
+				return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: tc.message})
 			}
 			lookups := 0
 			rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
@@ -2127,7 +2142,11 @@ func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testin
 			}
 			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
 			require.NoError(t, err)
-			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			config := IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc}
+			if tc.feePayer {
+				config.FeePayerPrivateKey = feePayerKey
+			}
+			intent, err := NewIntent(config)
 			require.NoError(t, err)
 
 			got, err := intent.Verify(ctx, credential, request.Map())
