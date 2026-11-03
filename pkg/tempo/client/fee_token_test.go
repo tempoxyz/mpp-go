@@ -27,7 +27,6 @@ func TestFeeTokenPaysUnsponsoredFees(t *testing.T) {
 		{name: "without FeeToken the fee is paid in the currency", credentialType: tempo.CredentialTypeTransaction, want: common.HexToAddress(testCurrency)},
 		{name: "a sponsored pull ignores FeeToken", credentialType: tempo.CredentialTypeTransaction, feePayer: true, feeToken: tempo.OUSDAddress},
 	} {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
