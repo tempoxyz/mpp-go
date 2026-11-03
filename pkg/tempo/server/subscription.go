@@ -1344,6 +1344,27 @@ func subscriptionPaymentFailed(err *mpp.PaymentError, cause error) error {
 // receipt, it can never land, so its period may be billed again.
 const subscriptionValidBeforeWindow = 5 * time.Minute
 
+// subscriptionNonceReuseGrace is how long a pending payment whose nonce was
+// first seen used by another transaction, past its valid_before and with no
+// receipt, must still have no receipt before it counts as failed. A lagging
+// RPC replica can briefly answer null for the receipt of a payment that
+// landed; this is several times the longest receipt wait (receiptWaitBudget).
+const subscriptionNonceReuseGrace = 2 * time.Minute
+
+// subscriptionNonceSpentError reports that a pending payment's nonce was
+// used, past its valid_before, with no receipt for the payment: at is when
+// this attempt saw it. The outcome stays unknown until
+// subscriptionNonceReuseGrace after the first such observation, which the
+// store records on the payment (NonceSpentAt).
+type subscriptionNonceSpentError struct {
+	hash string
+	at   time.Time
+}
+
+func (e *subscriptionNonceSpentError) Error() string {
+	return "tempo server: subscription payment's nonce was used by another transaction and no receipt was found for it"
+}
+
 // broadcastPayment broadcasts a newly signed payment and confirms it,
 // recovering a transaction included before its RPC reply failed, as charge.go
 // does. A JSON-RPC rejection fails the payment: nothing broadcast it before.
@@ -1482,10 +1503,17 @@ func nonceAt(ctx context.Context, rpc tempo.RPCClient, account string, number ui
 // included, proven by one consistent observation: a block at or past its
 // valid_before in which its sender's nonce, read at that same block, is
 // still the payment's. Blocks only move forward in time, so no later block
-// can include it. A nonce already used proves nothing on its own (the payer
-// may have spent it elsewhere), so the receipt is read again and returned if
-// the payment landed after all; otherwise the outcome stays unknown, as it
-// does for a lower nonce, which no node at that block can report.
+// can include it. The payment signs with nonce key 0, the sender's
+// protocol nonce, which is what eth_getTransactionCount reads.
+//
+// A nonce already used at that block means the payment landed or another
+// transaction took its nonce, so the receipt is read again and returned if
+// the payment landed. With still no receipt, a lagging replica could be
+// hiding it, so the payment fails only once a later attempt, at least
+// subscriptionNonceReuseGrace after the first one that saw this
+// (pending.NonceSpentAt), still finds none; until then it returns a
+// *subscriptionNonceSpentError for the store to record. A lower nonce,
+// which no node at that block can report, leaves the outcome unknown.
 func (s *Subscription) expiredPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment, sender string) (map[string]any, bool, error) {
 	tx, err := tempotx.Deserialize(pending.Transaction)
 	if err != nil || tx.ValidBefore == 0 || uint64(s.now().Unix()) < tx.ValidBefore || !common.IsHexAddress(sender) { //nolint:gosec // G115: the clock is past 1970.
@@ -1506,10 +1534,14 @@ func (s *Subscription) expiredPayment(ctx context.Context, rpc tempo.RPCClient, 
 		return nil, false, nil
 	}
 	receipt, err := readPaymentReceipt(ctx, rpc, pending.Hash)
-	if err != nil {
-		return nil, false, err
+	if err != nil || receipt != nil {
+		return receipt, false, err
 	}
-	return receipt, false, nil
+	now := s.now()
+	if first, err := time.Parse(time.RFC3339Nano, pending.NonceSpentAt); err == nil && now.Sub(first) >= subscriptionNonceReuseGrace {
+		return nil, true, nil
+	}
+	return nil, false, &subscriptionNonceSpentError{hash: pending.Hash, at: now}
 }
 
 // checkPaymentReceipt returns the hash of an included payment that credited
@@ -1546,8 +1578,10 @@ func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, r
 // unknown: an included transaction settles it, and one not yet included is
 // broadcast again, which the node accepts at most once. It returns
 // errSubscriptionPaymentFailed only on proof the payment did not move the
-// payer's funds (a revert, or expiry proven by expiredPayment); a held
-// transfer, read errors and refusals keep the period locked.
+// payer's funds (a revert, or expiry proven by expiredPayment, including a
+// nonce another transaction used with no receipt for this one through the
+// grace period); a held transfer, read errors and refusals keep the period
+// locked.
 func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionPendingPayment, record SubscriptionRecord, activation bool) (string, error) {
 	rpc, err := s.resolveRPC(pending.ChainID)
 	if err != nil {
