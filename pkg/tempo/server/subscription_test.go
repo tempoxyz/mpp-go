@@ -556,13 +556,15 @@ func TestSubscriptionStoreSerializesActivations(t *testing.T) {
 			close(started)
 			<-release
 			return &SubscriptionResult{Subscription: record}, nil
-		})
+		}, nil)
+
 		done <- status
 	}()
 	<-started
 	status, _, _, err := store.activate(ctx, "challenge-2", "user:x", nil, func() (*SubscriptionResult, error) {
 		return nil, errors.New("must not run")
-	})
+	}, nil)
+
 	require.NoError(t, err)
 	assert.Equal(t, activationInFlight, status)
 	close(release)
@@ -574,18 +576,21 @@ func TestSubscriptionStoreSerializesActivations(t *testing.T) {
 	// A failed activation releases the lock for a retry.
 	_, _, _, err = store.activate(ctx, "challenge-3", "user:y", nil, func() (*SubscriptionResult, error) {
 		return nil, errors.New("settlement failed")
-	})
+	}, nil)
+
 	assert.Error(t, err)
 	status, _, _, err = store.activate(ctx, "challenge-4", "user:y", nil, func() (*SubscriptionResult, error) {
 		return &SubscriptionResult{Subscription: SubscriptionRecord{LookupKey: "user:y", SubscriptionID: "sub_y"}}, nil
-	})
+	}, nil)
+
 	require.NoError(t, err)
 	assert.Equal(t, activationActivated, status)
 
 	// A new activation replaces and cancels the previous subscription.
 	status, _, _, err = store.activate(ctx, "challenge-5", "user:x", nil, func() (*SubscriptionResult, error) {
 		return &SubscriptionResult{Subscription: SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_x2"}}, nil
-	})
+	}, nil)
+
 	require.NoError(t, err)
 	assert.Equal(t, activationActivated, status)
 	previous, err := store.Get(ctx, "sub_x")

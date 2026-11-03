@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
@@ -35,6 +36,7 @@ type SubscriptionRecord struct {
 	Currency            string                       `json:"currency"`
 	ExternalID          string                       `json:"externalId,omitempty"`
 	InFlightAttempt     string                       `json:"inFlightAttempt,omitempty"`
+	InFlightPayment     *SubscriptionPendingPayment  `json:"inFlightPayment,omitempty"`
 	InFlightPeriod      *int64                       `json:"inFlightPeriod,omitempty"`
 	InFlightReference   string                       `json:"inFlightReference,omitempty"`
 	InFlightStartedAt   string                       `json:"inFlightStartedAt,omitempty"`
@@ -51,6 +53,37 @@ type SubscriptionRecord struct {
 	SubscriptionID      string                       `json:"subscriptionId"`
 	Timestamp           string                       `json:"timestamp"`
 }
+
+// SubscriptionPendingPayment is a signed automatic billing payment, kept with
+// its activation or renewal lock from before it is broadcast until its
+// outcome is known, so a later attempt finds whether it was included instead
+// of billing the period again with a new nonce.
+type SubscriptionPendingPayment struct {
+	// Amount is the transfer amount in base units.
+	Amount string `json:"amount"`
+	// ChainID is the chain the transaction was signed for.
+	ChainID int64 `json:"chainId"`
+	// Currency is the TIP-20 token transferred.
+	Currency string `json:"currency"`
+	// Hash is the transaction hash, computed before broadcasting.
+	Hash string `json:"hash"`
+	// Memo is the transfer's attribution memo.
+	Memo string `json:"memo"`
+	// Recipient is the payee.
+	Recipient string `json:"recipient"`
+	// Transaction is the signed, serialized transaction, broadcast again
+	// while it is not included.
+	Transaction string `json:"transaction"`
+	// Unknown is set once the attempt that broadcast it ended without
+	// learning its outcome, so the next attempt resolves it at once.
+	Unknown bool `json:"unknown,omitempty"`
+}
+
+// pendingResolver resolves a pending payment of record: it returns the
+// payment's reference once it paid, an error wrapping
+// errSubscriptionPaymentFailed once it cannot, and any other error while its
+// outcome is still unknown.
+type pendingResolver func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error)
 
 // SubscriptionAccessKeyRecord is a server-owned access key the subscription
 // store keeps for billing.
@@ -427,17 +460,24 @@ type activationMarker struct {
 	ChallengeID  string `json:"challengeId,omitempty"`
 	CommittingAt string `json:"committingAt,omitempty"`
 	StartedAt    string `json:"startedAt,omitempty"`
+	// Payment and Subscription are the activation's signed payment and the
+	// subscription it creates, kept until the payment's outcome is known.
+	Payment      *SubscriptionPendingPayment `json:"payment,omitempty"`
+	Subscription *SubscriptionRecord         `json:"subscription,omitempty"`
 }
 
 // activate runs create once for a Challenge and lookup key: it claims the
 // Challenge, returns an existing reusable subscription, or takes the lookup
 // key's activation lock, creates the subscription and makes it current,
-// canceling the one it replaces.
+// canceling the one it replaces. A lock left with a payment whose outcome is
+// unknown is resolved first with resolve: a payment that landed commits the
+// subscription it created, and one that did not lets create run.
 func (s *SubscriptionStore) activate(
 	ctx context.Context,
 	challengeID, lookupKey string,
 	isReusable func(SubscriptionRecord) bool,
 	create func() (*SubscriptionResult, error),
+	resolve pendingResolver,
 ) (subscriptionActivationStatus, *SubscriptionResult, *SubscriptionRecord, error) {
 	claim, _ := json.Marshal(map[string]string{"claimedAt": s.timestamp()})
 	claimed, err := s.store.CompareAndSwap(ctx, s.credentialKey(challengeID), nil, string(claim))
@@ -447,33 +487,81 @@ func (s *SubscriptionStore) activate(
 	if !claimed {
 		return activationReplayed, nil, nil, nil
 	}
-	existing, err := s.GetByKey(ctx, lookupKey)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	if existing != nil && isReusable != nil && isReusable(*existing) {
-		return activationExisting, nil, existing, nil
-	}
+	// A recovered activation is committed first, then the Challenge is
+	// checked against the subscription it made current.
+	for range 2 {
+		existing, err := s.GetByKey(ctx, lookupKey)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		if existing != nil && isReusable != nil && isReusable(*existing) {
+			return activationExisting, nil, existing, nil
+		}
 
-	started, err := s.startActivation(ctx, lookupKey, challengeID)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	if !started {
-		return activationInFlight, nil, nil, nil
-	}
-	if existing, err := s.GetByKey(ctx, lookupKey); err != nil {
-		_ = s.clearActivation(ctx, lookupKey, challengeID)
-		return 0, nil, nil, err
-	} else if existing != nil && isReusable != nil && isReusable(*existing) {
-		return activationExisting, nil, existing, s.clearActivation(ctx, lookupKey, challengeID)
-	}
+		started, resumed, err := s.startActivation(ctx, lookupKey, challengeID)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		if !started {
+			return activationInFlight, nil, nil, nil
+		}
+		if resumed == nil {
+			if existing, err := s.GetByKey(ctx, lookupKey); err != nil {
+				_ = s.clearActivation(ctx, lookupKey, challengeID)
+				return 0, nil, nil, err
+			} else if existing != nil && isReusable != nil && isReusable(*existing) {
+				return activationExisting, nil, existing, s.clearActivation(ctx, lookupKey, challengeID)
+			}
+		} else {
+			if resolve == nil {
+				return 0, nil, nil, errors.New("tempo server: subscription activation has a pending payment and no resolver")
+			}
+			reference, err := resolve(*resumed.Payment, *resumed.Subscription)
+			switch {
+			case err == nil:
+				record := *resumed.Subscription
+				record.Reference = reference
+				status, result, current, err := s.commitActivation(ctx, challengeID, &SubscriptionResult{Receipt: subscriptionReceipt(record), Subscription: record})
+				if err != nil || status != activationActivated {
+					return status, result, current, err
+				}
+				continue
+			case errors.Is(err, errSubscriptionPaymentFailed):
+				if _, err := s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
+					if marker == nil || marker.ChallengeID != challengeID {
+						return nil
+					}
+					next := *marker
+					next.Payment, next.Subscription = nil, nil
+					return &next
+				}); err != nil {
+					return 0, nil, nil, err
+				}
+			default:
+				_ = s.markActivationUnknown(ctx, lookupKey, challengeID)
+				return 0, nil, nil, err
+			}
+		}
 
-	result, err := create()
-	if err != nil {
-		_ = s.clearActivation(ctx, lookupKey, challengeID)
-		return 0, nil, nil, err
+		result, err := create()
+		if err != nil {
+			if errors.Is(err, errSubscriptionPaymentUnknown) {
+				// The payment may land: keep the lock and the payment, so
+				// the next attempt resolves it instead of paying again.
+				_ = s.markActivationUnknown(ctx, lookupKey, challengeID)
+			} else {
+				_ = s.clearActivation(ctx, lookupKey, challengeID)
+			}
+			return 0, nil, nil, err
+		}
+		return s.commitActivation(ctx, challengeID, result)
 	}
+	return activationInFlight, nil, nil, nil
+}
+
+// commitActivation makes the subscription of a settled activation current
+// while challengeID still holds the lookup key's activation lock.
+func (s *SubscriptionStore) commitActivation(ctx context.Context, challengeID string, result *SubscriptionResult) (subscriptionActivationStatus, *SubscriptionResult, *SubscriptionRecord, error) {
 	subscription := result.Subscription
 	committed, err := s.updateActivation(ctx, subscription.LookupKey, func(marker *activationMarker) *activationMarker {
 		if marker == nil || marker.ChallengeID != challengeID {
@@ -485,7 +573,7 @@ func (s *SubscriptionStore) activate(
 		return &next
 	})
 	if err != nil {
-		_ = s.clearActivation(ctx, lookupKey, challengeID)
+		_ = s.clearActivation(ctx, subscription.LookupKey, challengeID)
 		return 0, nil, nil, err
 	}
 	if !committed {
@@ -544,14 +632,64 @@ func (s *SubscriptionStore) activate(
 	return activationActivated, result, nil, nil
 }
 
-// startActivation takes the lookup key's activation lock unless a live one holds it.
-func (s *SubscriptionStore) startActivation(ctx context.Context, lookupKey, challengeID string) (bool, error) {
-	return s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
-		if marker != nil && !s.isStale(marker.StartedAt, marker.CommittingAt, s.activationTimeout) {
+// startActivation takes the lookup key's activation lock unless a live one
+// holds it. It takes over a lock whose payment's outcome is unknown, or a
+// stale one, and returns the marker it then holds when that lock carried a
+// payment to resolve.
+func (s *SubscriptionStore) startActivation(ctx context.Context, lookupKey, challengeID string) (bool, *activationMarker, error) {
+	var resumed *activationMarker
+	started, err := s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
+		resumed = nil
+		stale := marker == nil || s.isStale(marker.StartedAt, marker.CommittingAt, s.activationTimeout)
+		if marker != nil && marker.Payment != nil && marker.Subscription != nil && (stale || marker.Payment.Unknown) {
+			payment := *marker.Payment
+			payment.Unknown = false
+			resumed = &activationMarker{ChallengeID: challengeID, StartedAt: s.timestamp(), Payment: &payment, Subscription: marker.Subscription}
+			return resumed
+		}
+		if !stale {
 			return nil
 		}
 		return &activationMarker{ChallengeID: challengeID, StartedAt: s.timestamp()}
 	})
+	return started, resumed, err
+}
+
+// recordActivationPayment keeps payment and the subscription it creates with
+// challengeID's activation lock, before the payment is broadcast.
+func (s *SubscriptionStore) recordActivationPayment(ctx context.Context, lookupKey, challengeID string, payment SubscriptionPendingPayment, record SubscriptionRecord) error {
+	recorded, err := s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
+		if marker == nil || marker.ChallengeID != challengeID {
+			return nil
+		}
+		next := *marker
+		next.Payment, next.Subscription = &payment, &record
+		return &next
+	})
+	if err != nil {
+		return err
+	}
+	if !recorded {
+		return mpp.ErrVerificationFailed("subscription activation lock was lost")
+	}
+	return nil
+}
+
+// markActivationUnknown flags challengeID's pending activation payment as
+// unknown, so the next attempt resolves it without waiting for the lock to
+// go stale.
+func (s *SubscriptionStore) markActivationUnknown(ctx context.Context, lookupKey, challengeID string) error {
+	_, err := s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
+		if marker == nil || marker.ChallengeID != challengeID || marker.Payment == nil {
+			return nil
+		}
+		next := *marker
+		payment := *marker.Payment
+		payment.Unknown = true
+		next.Payment = &payment
+		return &next
+	})
+	return err
 }
 
 // updateActivation atomically replaces the activation marker with next(current);
@@ -638,75 +776,142 @@ const (
 
 // renew bills period periodIndex of subscription id once: it locks the
 // period on the record, runs charge, and commits its record while the lock
-// and the lookup key are still the subscription's.
+// and the lookup key are still the subscription's. A lock left with a
+// payment whose outcome is unknown is resolved first with resolve: a payment
+// that landed commits its period, and one that did not frees it.
 func (s *SubscriptionStore) renew(
 	ctx context.Context,
 	id string,
 	periodIndex int64,
 	inFlightReference string,
 	charge func(SubscriptionRecord) (*SubscriptionResult, error),
+	resolve pendingResolver,
 ) (subscriptionRenewalStatus, *SubscriptionResult, *SubscriptionRecord, error) {
 	attemptBytes := make([]byte, 16)
 	if _, err := rand.Read(attemptBytes); err != nil {
 		return 0, nil, nil, err
 	}
 	attempt := hex.EncodeToString(attemptBytes)
-	var started SubscriptionRecord
-	for tries := 0; ; tries++ {
-		if tries == subscriptionStoreMaxAttempts {
-			return 0, nil, nil, errSubscriptionStoreContention
+	// A resolved payment frees or commits its period, then the requested
+	// period is billed.
+	for range 3 {
+		var started SubscriptionRecord
+		resumed := false
+		for tries := 0; ; tries++ {
+			if tries == subscriptionStoreMaxAttempts {
+				return 0, nil, nil, errSubscriptionStoreContention
+			}
+			current, raw, err := getJSON[SubscriptionRecord](ctx, s.store, s.recordKey(id))
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			if current == nil {
+				return renewalMissing, nil, nil, nil
+			}
+			if current.LastChargedPeriod >= periodIndex {
+				return renewalCharged, nil, current, nil
+			}
+			next := *current
+			resumed = false
+			if current.InFlightPeriod != nil {
+				stale := s.isStale(current.InFlightStartedAt, "", s.renewalTimeout)
+				if payment := current.InFlightPayment; payment != nil && (stale || payment.Unknown) {
+					// Keep the period, reference and payment: only their
+					// outcome decides whether the period is paid.
+					resumed = true
+					resumedPayment := *payment
+					resumedPayment.Unknown = false
+					next.InFlightPayment = &resumedPayment
+				} else if !stale {
+					return renewalInFlight, nil, current, nil
+				}
+			}
+			if !resumed {
+				period := periodIndex
+				next.InFlightPayment = nil
+				next.InFlightPeriod = &period
+				next.InFlightReference = inFlightReference
+			}
+			next.InFlightAttempt = attempt
+			next.InFlightStartedAt = s.timestamp()
+			encoded, err := json.Marshal(next)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			swapped, err := s.store.CompareAndSwap(ctx, s.recordKey(id), &raw, string(encoded))
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			if swapped {
+				started = next
+				break
+			}
 		}
-		current, raw, err := getJSON[SubscriptionRecord](ctx, s.store, s.recordKey(id))
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		if current == nil {
-			return renewalMissing, nil, nil, nil
-		}
-		if current.LastChargedPeriod >= periodIndex {
-			return renewalCharged, nil, current, nil
-		}
-		if current.InFlightPeriod != nil && !s.isStale(current.InFlightStartedAt, "", s.renewalTimeout) {
-			return renewalInFlight, nil, current, nil
-		}
-		next := *current
-		period := periodIndex
-		next.InFlightAttempt = attempt
-		next.InFlightPeriod = &period
-		next.InFlightReference = inFlightReference
-		next.InFlightStartedAt = s.timestamp()
-		encoded, err := json.Marshal(next)
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		swapped, err := s.store.CompareAndSwap(ctx, s.recordKey(id), &raw, string(encoded))
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		if swapped {
-			started = next
-			break
-		}
-	}
-	if active, err := s.GetByKey(ctx, started.LookupKey); err != nil || active == nil || active.SubscriptionID != id {
-		clearErr := s.clearRenewal(ctx, id, periodIndex, attempt)
-		if err == nil {
-			err = clearErr
-		}
-		return renewalSuperseded, nil, &started, err
-	}
 
-	result, err := charge(started)
-	if err != nil {
-		_ = s.clearRenewal(ctx, id, periodIndex, attempt)
-		return 0, nil, nil, err
+		if resumed {
+			period := *started.InFlightPeriod
+			if resolve == nil {
+				return 0, nil, nil, errors.New("tempo server: subscription renewal has a pending payment and no resolver")
+			}
+			reference, err := resolve(*started.InFlightPayment, started)
+			switch {
+			case err == nil:
+				record := clearRenewalFields(started)
+				record.LastChargedPeriod = period
+				record.Reference = reference
+				record.Timestamp = s.timestamp()
+				status, result, current, err := s.commitRenewal(ctx, id, period, attempt, &SubscriptionResult{Receipt: subscriptionReceipt(record), Subscription: record})
+				if err != nil || status != renewalRenewed || period >= periodIndex {
+					return status, result, current, err
+				}
+			case errors.Is(err, errSubscriptionPaymentFailed):
+				if err := s.clearRenewal(ctx, id, period, attempt); err != nil {
+					return 0, nil, nil, err
+				}
+			default:
+				_ = s.markRenewalUnknown(ctx, id, period, attempt)
+				return 0, nil, nil, err
+			}
+			continue
+		}
+
+		if active, err := s.GetByKey(ctx, started.LookupKey); err != nil || active == nil || active.SubscriptionID != id {
+			clearErr := s.clearRenewal(ctx, id, periodIndex, attempt)
+			if err == nil {
+				err = clearErr
+			}
+			return renewalSuperseded, nil, &started, err
+		}
+
+		result, err := charge(started)
+		if err != nil {
+			if errors.Is(err, errSubscriptionPaymentUnknown) {
+				// The payment may land: keep the lock and the payment, so
+				// the next attempt resolves it instead of paying again.
+				_ = s.markRenewalUnknown(ctx, id, periodIndex, attempt)
+			} else {
+				_ = s.clearRenewal(ctx, id, periodIndex, attempt)
+			}
+			return 0, nil, nil, err
+		}
+		committed := result.Subscription
+		committed.LastChargedPeriod = periodIndex
+		return s.commitRenewal(ctx, id, periodIndex, attempt, &SubscriptionResult{Receipt: result.Receipt, Subscription: committed})
 	}
-	if active, err := s.GetByKey(ctx, result.Subscription.LookupKey); err != nil || active == nil || active.SubscriptionID != id {
+	return renewalInFlight, nil, nil, nil
+}
+
+// commitRenewal writes the settled record of periodIndex while attempt still
+// holds the period's lock, and reports whether the lookup key is still the
+// subscription's.
+func (s *SubscriptionStore) commitRenewal(ctx context.Context, id string, periodIndex int64, attempt string, result *SubscriptionResult) (subscriptionRenewalStatus, *SubscriptionResult, *SubscriptionRecord, error) {
+	lookupKey := result.Subscription.LookupKey
+	if active, err := s.GetByKey(ctx, lookupKey); err != nil || active == nil || active.SubscriptionID != id {
 		clearErr := s.clearRenewal(ctx, id, periodIndex, attempt)
 		if err == nil {
 			err = clearErr
 		}
-		return renewalSuperseded, nil, &started, err
+		return renewalSuperseded, nil, nil, err
 	}
 	for tries := 0; ; tries++ {
 		if tries == subscriptionStoreMaxAttempts {
@@ -741,14 +946,70 @@ func (s *SubscriptionStore) renew(
 			break
 		}
 	}
-	owns, err := s.store.CompareAndSwap(ctx, s.lookupKey(result.Subscription.LookupKey), &id, id)
+	owns, err := s.store.CompareAndSwap(ctx, s.lookupKey(lookupKey), &id, id)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	if !owns {
-		return renewalSuperseded, nil, &started, nil
+		return renewalSuperseded, nil, nil, nil
 	}
 	return renewalRenewed, result, nil, nil
+}
+
+// recordRenewalPayment keeps payment with attempt's lock on periodIndex,
+// before the payment is broadcast.
+func (s *SubscriptionStore) recordRenewalPayment(ctx context.Context, id string, periodIndex int64, attempt string, payment SubscriptionPendingPayment) error {
+	recorded, err := s.updateRenewal(ctx, id, periodIndex, attempt, func(record *SubscriptionRecord) {
+		record.InFlightPayment = &payment
+	})
+	if err != nil {
+		return err
+	}
+	if !recorded {
+		return mpp.ErrVerificationFailed("subscription renewal lock was lost")
+	}
+	return nil
+}
+
+// markRenewalUnknown flags attempt's pending renewal payment as unknown, so
+// the next attempt resolves it without waiting for the lock to go stale.
+func (s *SubscriptionStore) markRenewalUnknown(ctx context.Context, id string, periodIndex int64, attempt string) error {
+	_, err := s.updateRenewal(ctx, id, periodIndex, attempt, func(record *SubscriptionRecord) {
+		if record.InFlightPayment != nil {
+			payment := *record.InFlightPayment
+			payment.Unknown = true
+			record.InFlightPayment = &payment
+		}
+	})
+	return err
+}
+
+// updateRenewal applies update to the record while attempt holds its lock on
+// periodIndex, and reports whether it did.
+func (s *SubscriptionStore) updateRenewal(ctx context.Context, id string, periodIndex int64, attempt string, update func(*SubscriptionRecord)) (bool, error) {
+	for range subscriptionStoreMaxAttempts {
+		current, raw, err := getJSON[SubscriptionRecord](ctx, s.store, s.recordKey(id))
+		if err != nil {
+			return false, err
+		}
+		if current == nil || current.InFlightPeriod == nil || *current.InFlightPeriod != periodIndex || current.InFlightAttempt != attempt {
+			return false, nil
+		}
+		next := *current
+		update(&next)
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			return false, err
+		}
+		swapped, err := s.store.CompareAndSwap(ctx, s.recordKey(id), &raw, string(encoded))
+		if err != nil {
+			return false, err
+		}
+		if swapped {
+			return true, nil
+		}
+	}
+	return false, errSubscriptionStoreContention
 }
 
 func (s *SubscriptionStore) clearRenewal(ctx context.Context, id string, periodIndex int64, attempt string) error {
@@ -774,6 +1035,7 @@ func (s *SubscriptionStore) clearRenewal(ctx context.Context, id string, periodI
 
 func clearRenewalFields(record SubscriptionRecord) SubscriptionRecord {
 	record.InFlightAttempt = ""
+	record.InFlightPayment = nil
 	record.InFlightPeriod = nil
 	record.InFlightReference = ""
 	record.InFlightStartedAt = ""

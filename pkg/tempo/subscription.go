@@ -460,6 +460,14 @@ func NewSubscriptionKeyAuthorization(
 		WithWitness(witness), nil
 }
 
+// isKeychainSignature reports whether sig is a keychain signature envelope.
+// A 65-byte signature is a primitive secp256k1 one whatever its first byte,
+// as ox's SignatureEnvelope.from decides by size: one whose r starts with
+// 0x04 is not a keychain envelope.
+func isKeychainSignature(sig []byte) bool {
+	return len(sig) != 65 && len(sig) > 0 && sig[0] == 0x04
+}
+
 // SignSubscriptionKeyAuthorization builds and signs the subscription key
 // authorization with the subscriber's root key and returns it serialized, as
 // a subscription Credential's signature carries it.
@@ -481,7 +489,7 @@ func SignSubscriptionKeyAuthorization(
 	if err != nil {
 		return "", err
 	}
-	if sig, ok := signed[1].([]byte); ok && len(sig) > 0 && sig[0] == 0x04 {
+	if sig, ok := signed[1].([]byte); ok && isKeychainSignature(sig) {
 		return "", errors.New("tempo: keyAuthorization must use a primitive signature")
 	}
 	return SerializeKeyAuthorization(signed)
@@ -545,7 +553,7 @@ func VerifySubscriptionKeyAuthorization(
 		return nil, err
 	}
 	if len(signed) == 2 {
-		if sig, ok := signed[1].([]byte); ok && len(sig) > 0 && sig[0] == 0x04 {
+		if sig, ok := signed[1].([]byte); ok && isKeychainSignature(sig) {
 			return nil, errors.New("tempo: keyAuthorization must use a primitive signature")
 		}
 	}

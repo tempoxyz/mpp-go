@@ -243,3 +243,12 @@ func TestVerifySubscriptionKeyAuthorizationRequiresTransferWithMemo(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, root.Address(), verified.Source)
 }
+
+func TestIsKeychainSignatureDecidesBySize(t *testing.T) {
+	primitive := make([]byte, 65)
+	primitive[0] = 0x04 // r may start with the keychain type byte
+	assert.False(t, isKeychainSignature(primitive))
+	keychainSig := append([]byte{0x04}, make([]byte, 20+65)...)
+	assert.True(t, isKeychainSignature(keychainSig))
+	assert.False(t, isKeychainSignature(nil))
+}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
@@ -283,6 +284,14 @@ func (s *Subscription) Subscribe(ctx context.Context, params SubscribeParams) (*
 	})
 	if result == nil {
 		return nil, err
+	}
+	if result.Challenge != nil {
+		// Verify rejects a Challenge that expires no earlier than the
+		// subscription, so issuing one would only fail after the payer
+		// signed it: report the route's misconfiguration instead.
+		if timingErr := tempo.ValidateSubscriptionTiming(challengeRequest, result.Challenge.Expires); timingErr != nil {
+			return nil, fmt.Errorf("tempo server: subscription Challenge cannot be paid: %s (Challenge expires %s, subscription expires %s)", trimTempoPrefix(timingErr), result.Challenge.Expires, challengeRequest.SubscriptionExpires)
+		}
 	}
 	out := &mppserver.ChargeResult{Challenge: result.Challenge, Credential: result.Credential, Receipt: result.Receipt}
 	if result.Challenge != nil {
@@ -612,7 +621,9 @@ func (i *subscriptionIntent) Verify(ctx context.Context, credential *mpp.Credent
 		}
 		return result, nil
 	}
-	status, result, existing, err := s.config.Store.activate(ctx, credential.Challenge.ID, lookup.Key, isReusable, create)
+	status, result, existing, err := s.config.Store.activate(ctx, credential.Challenge.ID, lookup.Key, isReusable, create, func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error) {
+		return s.resolvePayment(ctx, payment, record, true)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -698,20 +709,6 @@ func (s *Subscription) activateSubscription(
 		}
 		return result, nil
 	}
-	reference, err := s.submitPayment(ctx, paymentParams{
-		accessKey:        accessKey,
-		keyAuthorization: payload.Signature,
-		lookupKey:        lookup.Key,
-		amount:           request.Amount,
-		currency:         request.Currency,
-		recipient:        request.Recipient,
-		chainID:          source.ChainID,
-		reference:        credential.Challenge.ID,
-		source:           source,
-	})
-	if err != nil {
-		return nil, err
-	}
 	id, err := newSubscriptionID()
 	if err != nil {
 		return nil, err
@@ -732,11 +729,30 @@ func (s *Subscription) activateSubscription(
 		PeriodCount:         request.PeriodCount,
 		PeriodUnit:          request.PeriodUnit,
 		Recipient:           request.Recipient,
-		Reference:           reference,
 		SubscriptionExpires: request.SubscriptionExpires,
 		SubscriptionID:      id,
 		Timestamp:           timestamp,
 	}
+	reference, err := s.submitPayment(ctx, paymentParams{
+		accessKey:        accessKey,
+		keyAuthorization: payload.Signature,
+		lookupKey:        lookup.Key,
+		amount:           request.Amount,
+		currency:         request.Currency,
+		recipient:        request.Recipient,
+		chainID:          source.ChainID,
+		reference:        credential.Challenge.ID,
+		source:           source,
+		record: func(payment SubscriptionPendingPayment) error {
+			pending := record
+			pending.Reference = payment.Hash
+			return s.config.Store.recordActivationPayment(ctx, lookup.Key, credential.Challenge.ID, payment, pending)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	record.Reference = reference
 	return &SubscriptionResult{Receipt: subscriptionReceipt(record), Subscription: record}, nil
 }
 
@@ -766,6 +782,9 @@ func (s *Subscription) renewalHandler(subscription SubscriptionRecord) renewalFu
 			chainID:   chainID,
 			reference: params.InFlightReference,
 			source:    *record.Payer,
+			record: func(payment SubscriptionPendingPayment) error {
+				return s.config.Store.recordRenewalPayment(ctx, record.SubscriptionID, params.PeriodIndex, record.InFlightAttempt, payment)
+			},
 		})
 		if err != nil {
 			return nil, err
@@ -808,6 +827,8 @@ func (s *Subscription) settleRenewal(
 			return nil, err
 		}
 		return renewed, nil
+	}, func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error) {
+		return s.resolvePayment(ctx, payment, record, false)
 	})
 	if err != nil {
 		return 0, nil, nil, err
@@ -991,11 +1012,17 @@ type paymentParams struct {
 	chainID                     int64
 	reference                   string
 	source                      SubscriptionPayer
+	// record persists the signed payment before it is broadcast; an error
+	// stops the broadcast.
+	record func(SubscriptionPendingPayment) error
 }
 
 // submitPayment bills one period on chain: a transferWithMemo from the
 // payer, signed by the server-owned access key (with the key authorization
 // on activation), and, unless Optimistic, confirms the recipient was credited.
+// It hands the signed transaction to params.record before broadcasting it, so
+// a payment whose outcome stays unknown is resolved by a later attempt
+// instead of charged again with a new nonce.
 func (s *Subscription) submitPayment(ctx context.Context, params paymentParams) (string, error) {
 	store := s.config.Store
 	stored, err := store.GetAccessKeyByAddress(ctx, params.accessKey.AccessKeyAddress, params.accessKey.KeyToken)
@@ -1078,22 +1105,27 @@ func (s *Subscription) submitPayment(ctx context.Context, params paymentParams) 
 	if err != nil {
 		return "", fmt.Errorf("tempo server: serialize subscription transaction: %w", err)
 	}
-	hash, err := rpc.SendRawTransaction(ctx, serialized)
+	hash, err := tempotx.ComputeHash(serialized)
 	if err != nil {
-		return "", mpp.ErrVerificationFailed("subscription transaction was rejected").WithCause(err)
+		return "", fmt.Errorf("tempo server: hash subscription transaction: %w", err)
 	}
-	if !s.config.Optimistic {
-		receipt, err := fetchReceipt(ctx, rpc, hash)
-		if err != nil {
+	pending := SubscriptionPendingPayment{
+		Amount:      params.amount,
+		ChainID:     params.chainID,
+		Currency:    params.currency,
+		Hash:        strings.ToLower(hash.Hex()),
+		Memo:        memo,
+		Recipient:   params.recipient,
+		Transaction: serialized,
+	}
+	if params.record != nil {
+		if err := params.record(pending); err != nil {
 			return "", err
 		}
-		if !receiptCredits(receipt, token, common.HexToAddress(params.recipient), amount, memo) {
-			return "", mpp.ErrVerificationFailed(fmt.Sprintf("subscription transfer was not credited to the recipient (funds may have been held by a receive policy): %s", hash))
-		}
-		hash = asString(receipt["transactionHash"])
-		if hash == "" {
-			hash = asString(receipt["hash"])
-		}
+	}
+	reference, err := s.broadcastPayment(ctx, rpc, pending)
+	if err != nil {
+		return "", err
 	}
 	// Only an activation makes the key the lookup key's: a renewal of an
 	// older subscription must not undo a rotation to a fresh key.
@@ -1103,9 +1135,129 @@ func (s *Subscription) submitPayment(ctx context.Context, params paymentParams) 
 		err = store.retainAccessKeyAddress(ctx, *stored)
 	}
 	if err != nil {
-		return "", err
+		return "", subscriptionPaymentUnknown(pending, err)
+	}
+	return reference, nil
+}
+
+// errSubscriptionPaymentUnknown marks a payment that may have been included:
+// its lock stays, with the signed transaction, until a later attempt finds
+// the outcome.
+var errSubscriptionPaymentUnknown = errors.New("tempo server: subscription payment outcome is unknown")
+
+// errSubscriptionPaymentFailed marks a payment known not to have paid the
+// recipient (rejected, reverted or held), so the period may be billed again.
+var errSubscriptionPaymentFailed = errors.New("tempo server: subscription payment failed")
+
+func subscriptionPaymentUnknown(pending SubscriptionPendingPayment, cause error) error {
+	unknown := mpp.ErrPaymentOutcomeUnknown(pending.Hash)
+	unknown.Detail += " The subscription transaction may still be included; it is checked before this period is billed again."
+	if cause != nil {
+		return unknown.WithCause(fmt.Errorf("%w: %w", errSubscriptionPaymentUnknown, cause))
+	}
+	return unknown.WithCause(errSubscriptionPaymentUnknown)
+}
+
+func subscriptionPaymentFailed(err *mpp.PaymentError, cause error) error {
+	if cause != nil {
+		return err.WithCause(fmt.Errorf("%w: %w", errSubscriptionPaymentFailed, cause))
+	}
+	return err.WithCause(errSubscriptionPaymentFailed)
+}
+
+// broadcastPayment broadcasts a signed payment and confirms it, recovering a
+// transaction included before its RPC reply failed, as charge.go does.
+func (s *Subscription) broadcastPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment) (string, error) {
+	sent, err := rpc.SendRawTransaction(ctx, pending.Transaction)
+	if err != nil {
+		_, receipt, ok := lookupConfirmedReceipt(ctx, rpc, pending.Transaction, err)
+		if !ok {
+			// A node that already holds the transaction may include it
+			// later; a transport error leaves the send itself unknown.
+			var rpcErr *temporpc.JSONRPCError
+			if isDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
+				return "", subscriptionPaymentUnknown(pending, nil)
+			}
+			return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription transaction was rejected"), err)
+		}
+		return s.checkPaymentReceipt(pending, receipt)
+	}
+	if !strings.EqualFold(sent, pending.Hash) {
+		return "", subscriptionPaymentUnknown(pending, errors.New("broadcast transaction hash does not match the signed transaction"))
+	}
+	if s.config.Optimistic {
+		return pending.Hash, nil
+	}
+	// The receipt wait must outlive a canceled request: abandoning it would
+	// leave an included payment unrecorded.
+	receiptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), receiptWaitBudget)
+	receipt, err := fetchReceipt(receiptCtx, rpc, pending.Hash)
+	cancel()
+	if err != nil {
+		if isTransactionReverted(err) {
+			return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription transaction reverted: "+pending.Hash), nil)
+		}
+		return "", subscriptionPaymentUnknown(pending, err)
+	}
+	return s.checkPaymentReceipt(pending, receipt)
+}
+
+// checkPaymentReceipt returns the hash of an included payment that credited
+// the recipient.
+func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, receipt map[string]any) (string, error) {
+	if asString(receipt["status"]) != "0x1" {
+		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription transaction reverted: "+pending.Hash), nil)
+	}
+	amount, ok := new(big.Int).SetString(pending.Amount, 10)
+	if !ok {
+		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription amount is invalid"), nil)
+	}
+	if !receiptCredits(receipt, common.HexToAddress(pending.Currency), common.HexToAddress(pending.Recipient), amount, pending.Memo) {
+		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed(fmt.Sprintf("subscription transfer was not credited to the recipient (funds may have been held by a receive policy): %s", pending.Hash)), nil)
+	}
+	hash := asString(receipt["transactionHash"])
+	if hash == "" {
+		hash = asString(receipt["hash"])
+	}
+	if hash == "" {
+		hash = pending.Hash
 	}
 	return strings.ToLower(hash), nil
+}
+
+// resolvePayment finds the outcome of a payment an earlier attempt left
+// unknown: an included transaction settles it, and one not yet included is
+// broadcast again, which the node accepts at most once. It returns
+// errSubscriptionPaymentFailed only when the payment did not pay the
+// recipient; every other error leaves the outcome unknown.
+func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionPendingPayment, record SubscriptionRecord, activation bool) (string, error) {
+	rpc, err := s.resolveRPC(pending.ChainID)
+	if err != nil {
+		return "", subscriptionPaymentUnknown(pending, err)
+	}
+	var reference string
+	if receipt := lookupIncludedReceipt(ctx, rpc, pending.Hash); receipt != nil {
+		reference, err = s.checkPaymentReceipt(pending, receipt)
+	} else {
+		reference, err = s.broadcastPayment(ctx, rpc, pending)
+	}
+	if err != nil {
+		return "", err
+	}
+	if record.AccessKey != nil {
+		stored, err := s.config.Store.GetAccessKeyByAddress(ctx, record.AccessKey.AccessKeyAddress, record.AccessKey.KeyToken)
+		if err == nil && stored != nil {
+			if activation {
+				err = s.config.Store.RetainAccessKey(ctx, record.LookupKey, *stored)
+			} else {
+				err = s.config.Store.retainAccessKeyAddress(ctx, *stored)
+			}
+		}
+		if err != nil {
+			return "", subscriptionPaymentUnknown(pending, err)
+		}
+	}
+	return reference, nil
 }
 
 func (s *Subscription) resolveRPC(chainID int64) (tempo.RPCClient, error) {
