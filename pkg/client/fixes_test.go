@@ -480,3 +480,52 @@ func TestTransport_ExpiredTransportCredentialAfterCallerCredentialPaysFreshChall
 	assert.Equal(t, 2, method.calls)
 	assert.Equal(t, 3, rounds)
 }
+
+func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.T) {
+	for _, header := range []string{mpp.HeaderAuthorization, mpp.HeaderPaymentAuthorization} {
+		t.Run(header, func(t *testing.T) {
+			original := challengeForURL(t, "http://api.example.com", "tempo", nil)
+			if header == mpp.HeaderPaymentAuthorization {
+				original.Header = header
+			}
+			_, authorization := callerAuthorization(t, original)
+			replacement := *original
+			replacement.ID = "replacement"
+			fresh := *original
+			fresh.ID = "fresh"
+			rounds := 0
+			inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				rounds++
+				h := http.Header{}
+				body := ""
+				switch rounds {
+				case 1:
+					assert.Equal(t, authorization, req.Header.Get(header))
+					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(&replacement))
+				case 2:
+					assert.NotEqual(t, authorization, req.Header.Get(header))
+					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(original))
+				case 3:
+					assert.Equal(t, authorization, req.Header.Get(header))
+					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(&fresh))
+					h.Set("Content-Type", "application/problem+json")
+					body = `{"type":"https://paymentauth.org/problems/payment-expired","status":402}`
+				default:
+					t.Error("authorized another payment after the caller credential expired")
+					return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
+				}
+				return &http.Response{StatusCode: http.StatusPaymentRequired, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+			})
+			method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+			req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+			require.NoError(t, err)
+			req.Header.Set(header, authorization)
+			resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+			assert.Equal(t, 1, method.calls)
+			assert.Equal(t, 3, rounds)
+		})
+	}
+}
