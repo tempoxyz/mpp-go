@@ -13,8 +13,9 @@ const (
 
 // MPP payment intent names.
 const (
-	IntentCharge  = "charge"
-	IntentSession = "session"
+	IntentCharge       = "charge"
+	IntentSession      = "session"
+	IntentSubscription = "subscription"
 )
 
 // MPP HTTP authentication schemes.
