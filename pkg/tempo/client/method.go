@@ -568,6 +568,10 @@ func checkSponsoredSignable(expires string, validBefore uint64, now time.Time) e
 				ErrSponsoredChallengeExpiresTooSoon, remaining.Truncate(time.Millisecond), expires, tempo.FeePayerMinRemainingValidity)
 		}
 	}
+	// A valid_before past int64 seconds is unbounded for this check.
+	if validBefore > math.MaxInt64 {
+		return nil
+	}
 	if remaining := time.Unix(int64(validBefore), 0).Sub(now); remaining < tempo.FeePayerMinRemainingValidity {
 		return fmt.Errorf("%w: %s of its validity left, need at least %s",
 			ErrSponsoredPreparationTooSlow, remaining.Truncate(time.Millisecond), tempo.FeePayerMinRemainingValidity)
