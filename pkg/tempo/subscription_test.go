@@ -252,3 +252,22 @@ func TestIsKeychainSignatureDecidesBySize(t *testing.T) {
 	assert.True(t, isKeychainSignature(keychainSig))
 	assert.False(t, isKeychainSignature(nil))
 }
+
+func TestSubscriptionRequestRejectsNonPositiveChainID(t *testing.T) {
+	_, err := NormalizeSubscriptionRequest(SubscriptionRequestParams{
+		Amount:              "10",
+		Currency:            PathUSDAddress,
+		Recipient:           subscriptionTestRecipient,
+		PeriodCount:         "30",
+		PeriodUnit:          SubscriptionPeriodDay,
+		SubscriptionExpires: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+		ChainID:             -1,
+	})
+	require.ErrorContains(t, err, "chainId must be a positive integer")
+	for _, chainID := range []any{0, -4217} {
+		request := subscriptionTestRequest(t).Map()
+		request["methodDetails"].(map[string]any)["chainId"] = chainID
+		_, err := ParseSubscriptionRequest(request)
+		require.ErrorContains(t, err, "chainId must be a positive integer", "chainId %v", chainID)
+	}
+}

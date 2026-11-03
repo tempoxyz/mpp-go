@@ -131,7 +131,9 @@ type SubscriptionConfig struct {
 	// period on chain with it.
 	Activate func(context.Context, SubscriptionActivateParams) (*SubscriptionResult, error)
 	// Renew bills an overdue period itself. Without it the method bills on
-	// chain with the stored access key. Return an error wrapping
+	// chain with the stored access key, but only without Activate: a
+	// subscription a custom Activate settled is renewed only by Renew, since
+	// the store holds no access key for it. Return an error wrapping
 	// ErrSubscriptionPaymentNotSent when nothing was charged: only then does
 	// a request without a Credential get a fresh Challenge. Any other error
 	// is returned as is, since the period may have been charged and paying a
@@ -433,15 +435,16 @@ func (s *Subscription) challengeRequest(
 	credential *mpp.Credential,
 ) (tempo.SubscriptionRequest, error) {
 	var accessKey *tempo.SubscriptionAccessKey
-	if credential != nil && credential.Challenge.Method == tempo.MethodName && credential.Challenge.Intent == tempo.IntentSubscription {
-		if echoed, err := mpp.B64Decode(credential.Challenge.Request); err == nil {
-			if parsed, err := tempo.ParseSubscriptionRequest(echoed); err == nil {
-				accessKey = parsed.AccessKey
-			}
+	// Only a Challenge this server issued names an access key it vouches
+	// for: a forged Credential's echo must never be signed into a retry
+	// Challenge, which would have the next payer authorize its key.
+	if echoed, ok := s.issuedRequest(credential); ok {
+		if parsed, err := tempo.ParseSubscriptionRequest(echoed); err == nil {
+			accessKey = parsed.AccessKey
 		}
 	}
-	// A foreign or malformed Credential names no access key: resolve one as
-	// for a request without a Credential, so the caller gets a fresh
+	// A foreign, forged or malformed Credential names no access key: resolve
+	// one as for a request without a Credential, so the caller gets a fresh
 	// Challenge rather than an error.
 	if accessKey == nil {
 		resolved, err := s.config.Resolve(ctx, SubscriptionResolveParams{Request: input, Subscription: request})
@@ -485,6 +488,41 @@ func (s *Subscription) challengeRequest(
 	key := *accessKey
 	request.AccessKey = &key
 	return request, nil
+}
+
+// issuedRequest returns the request of a subscription Challenge this server
+// issued, which a Credential echoes: its ID must be the HMAC this server
+// computes over the echoed fields, as server.VerifyOrChallenge checks.
+func (s *Subscription) issuedRequest(credential *mpp.Credential) (map[string]any, bool) {
+	if credential == nil {
+		return nil, false
+	}
+	echo := credential.Challenge
+	if echo.Realm != s.config.Realm || echo.Method != tempo.MethodName || echo.Intent != tempo.IntentSubscription {
+		return nil, false
+	}
+	request, err := mpp.B64Decode(echo.Request)
+	if err != nil {
+		return nil, false
+	}
+	var opts []mpp.ChallengeOption
+	if echo.Expires != "" {
+		opts = append(opts, mpp.WithExpires(echo.Expires))
+	}
+	if echo.Digest != "" {
+		opts = append(opts, mpp.WithDigest(echo.Digest))
+	}
+	if echo.Opaque != nil {
+		opts = append(opts, mpp.WithMeta(echo.Opaque))
+	}
+	if echo.Header != "" {
+		opts = append(opts, mpp.WithHeader(echo.Header))
+	}
+	issued, err := mpp.NewChallengeWithError(s.secretKey, echo.Realm, echo.Method, echo.Intent, request, opts...)
+	if err != nil || !mpp.ConstantTimeEqual(issued.ID, echo.ID) {
+		return nil, false
+	}
+	return request, true
 }
 
 // automaticAccessKey returns the lookup key's server-owned access key for a
@@ -568,9 +606,6 @@ func (s *Subscription) authorize(ctx context.Context, input *http.Request, reque
 	case renewalInFlight:
 		return &mppserver.ChargeResult{Receipt: subscriptionReceipt(*current)}, ErrSubscriptionRenewalInFlight
 	case renewalRenewed:
-		if s.config.OnRenewed != nil {
-			s.config.OnRenewed(ctx, periodIndex, *result)
-		}
 		return &mppserver.ChargeResult{Receipt: result.Receipt}, nil
 	}
 	return nil, nil
@@ -638,6 +673,9 @@ func (i *subscriptionIntent) Verify(ctx context.Context, credential *mpp.Credent
 		return nil, mpp.ErrVerificationFailed("subscription could not be resolved")
 	}
 	lookup := *resolved
+	if err := s.checkAccessKey(ctx, input, request, lookup, *accessKey); err != nil {
+		return nil, err
+	}
 	binding := bindingOfRequest(request)
 
 	isReusable := func(record SubscriptionRecord) bool { return s.isReusable(record, binding) }
@@ -655,9 +693,18 @@ func (i *subscriptionIntent) Verify(ctx context.Context, credential *mpp.Credent
 		}
 		return result, nil
 	}
-	status, result, existing, err := s.config.Store.activate(ctx, credential.Challenge.ID, lookup.Key, isReusable, create, func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error) {
-		return s.resolvePayment(ctx, payment, record, true)
-	})
+	hooks := &activationHooks{
+		resolve: func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error) {
+			return s.resolvePayment(ctx, payment, record, true)
+		},
+		recovered: func(result SubscriptionResult) { s.activated(ctx, result) },
+	}
+	// The claim may expire with the Challenge: no Credential for it
+	// verifies after that.
+	if until, ok := replayClaimExpiry(credential); ok {
+		hooks.claimUntil = until
+	}
+	status, result, existing, err := s.config.Store.activate(ctx, credential.Challenge.ID, lookup.Key, isReusable, create, hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -700,17 +747,71 @@ func (i *subscriptionIntent) Verify(ctx context.Context, credential *mpp.Credent
 			}
 			return nil, mpp.ErrVerificationFailed("subscription renewal is already in flight").WithCause(ErrSubscriptionRenewalInFlight)
 		case renewalRenewed:
-			if s.config.OnRenewed != nil {
-				s.config.OnRenewed(ctx, periodIndex, *renewed)
-			}
 			return renewed.Receipt, nil
 		}
 		return nil, mpp.ErrVerificationFailed("subscription renewal failed")
 	}
-	if s.config.OnActivated != nil {
-		s.config.OnActivated(ctx, *result)
-	}
+	s.activated(ctx, *result)
 	return result.Receipt, nil
+}
+
+// activated reports an activation to OnActivated. Each paid activation
+// reaches it once, from the attempt that committed it.
+func (s *Subscription) activated(ctx context.Context, result SubscriptionResult) {
+	if s.config.OnActivated != nil {
+		s.config.OnActivated(ctx, result)
+	}
+}
+
+// renewed reports a renewed period to OnRenewed. Each paid period reaches
+// it once, from the attempt that committed it.
+func (s *Subscription) renewed(ctx context.Context, periodIndex int64, result SubscriptionResult) {
+	if s.config.OnRenewed != nil {
+		s.config.OnRenewed(ctx, periodIndex, result)
+	}
+}
+
+// checkAccessKey rejects a Credential whose access key is not one the
+// server names for the lookup key: in automatic mode its stored key (or a
+// key sealed into the Challenge for a caller not yet resolved), with Activate
+// the lookup's or AccessKey's key when there is one; the current
+// subscription's key is accepted too, for a Credential that reuses it.
+func (s *Subscription) checkAccessKey(ctx context.Context, input *http.Request, request tempo.SubscriptionRequest, lookup SubscriptionLookup, accessKey tempo.SubscriptionAccessKey) error {
+	var expected *tempo.SubscriptionAccessKey
+	if s.config.Activate == nil {
+		if accessKey.KeyToken != "" {
+			// Sealed by this server for this Challenge; signing opens it.
+			return nil
+		}
+		stored, err := s.config.Store.GetAccessKey(ctx, lookup.Key)
+		if err != nil {
+			return err
+		}
+		if stored != nil {
+			expected = &stored.SubscriptionAccessKey
+		}
+	} else {
+		named, err := s.resolveAccessKey(ctx, input, request, lookup)
+		if err != nil {
+			return err
+		}
+		if named == nil {
+			// The application names no key: Activate checks it.
+			return nil
+		}
+		expected = named
+	}
+	if expected != nil && strings.EqualFold(expected.AccessKeyAddress, accessKey.AccessKeyAddress) {
+		return nil
+	}
+	current, err := s.config.Store.GetByKey(ctx, lookup.Key)
+	if err != nil {
+		return err
+	}
+	if current != nil && current.AccessKey != nil && strings.EqualFold(current.AccessKey.AccessKeyAddress, accessKey.AccessKeyAddress) {
+		return nil
+	}
+	return mpp.ErrVerificationFailed("subscription accessKey is not this subscription's")
 }
 
 // activateSubscription settles the first period: through Activate, or by
@@ -798,7 +899,9 @@ func (s *Subscription) renewalHandler(subscription SubscriptionRecord) renewalFu
 	if s.config.Renew != nil {
 		return s.config.Renew
 	}
-	if subscription.AccessKey == nil || subscription.Payer == nil {
+	// Only a subscription this method created bills automatically: the
+	// store holds no access key for one a custom Activate settled.
+	if s.config.Activate != nil || subscription.AccessKey == nil || subscription.Payer == nil {
 		return nil
 	}
 	return func(ctx context.Context, params SubscriptionRenewParams) (*SubscriptionResult, error) {
@@ -830,8 +933,9 @@ func (s *Subscription) renewalHandler(subscription SubscriptionRecord) renewalFu
 	}
 }
 
-// settleRenewal bills periodIndex once through the store and validates the
-// result keeps the subscription's identity and terms.
+// settleRenewal bills periodIndex once through the store, validates the
+// result keeps the subscription's identity and terms, and reports every
+// period it paid or recovered to OnRenewed.
 func (s *Subscription) settleRenewal(
 	ctx context.Context,
 	lookupKey string,
@@ -861,14 +965,22 @@ func (s *Subscription) settleRenewal(
 			return nil, err
 		}
 		return renewed, nil
-	}, func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error) {
-		return s.resolvePayment(ctx, payment, record, false)
+	}, &renewalHooks{
+		resolve: func(payment SubscriptionPendingPayment, record SubscriptionRecord) (string, error) {
+			return s.resolvePayment(ctx, payment, record, false)
+		},
+		recovered: func(period int64, result SubscriptionResult) { s.renewed(ctx, period, result) },
 	})
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	if status == renewalClaimMismatch {
 		return 0, nil, nil, mpp.ErrVerificationFailed("subscription renewal claim mismatch")
+	}
+	// A paid period is reported even when a concurrent activation
+	// superseded the subscription while it was charged.
+	if result != nil && (status == renewalRenewed || status == renewalSuperseded) {
+		s.renewed(ctx, periodIndex, *result)
 	}
 	return status, result, current, nil
 }
@@ -896,9 +1008,6 @@ func (s *Subscription) Renew(ctx context.Context, subscriptionID string) (*Subsc
 	status, result, _, err := s.settleRenewal(ctx, record.LookupKey, periodIndex, renew, nil, *record)
 	if err != nil || status != renewalRenewed {
 		return nil, err
-	}
-	if s.config.OnRenewed != nil {
-		s.config.OnRenewed(ctx, periodIndex, *result)
 	}
 	return result, nil
 }
@@ -1202,9 +1311,17 @@ func (s *Subscription) signPayment(ctx context.Context, params paymentParams) (*
 // the outcome.
 var errSubscriptionPaymentUnknown = errors.New("tempo server: subscription payment outcome is unknown")
 
-// errSubscriptionPaymentFailed marks a payment known not to have paid the
-// recipient (rejected, reverted or held), so the period may be billed again.
+// errSubscriptionPaymentFailed marks a payment known not to have moved the
+// payer's funds (rejected, reverted or expired), so the period may be billed
+// again.
 var errSubscriptionPaymentFailed = errors.New("tempo server: subscription payment failed")
+
+// errSubscriptionPaymentHeld marks a payment included with success that did
+// not credit the recipient, such as one a receive policy (TIP-1028) holds:
+// the payer's funds went out, so its lock stays and the period is never
+// billed again on its own. mppx frees the period instead, which would charge
+// the payer twice.
+var errSubscriptionPaymentHeld = errors.New("tempo server: subscription payment was held")
 
 func subscriptionPaymentUnknown(pending SubscriptionPendingPayment, cause error) error {
 	unknown := mpp.ErrPaymentOutcomeUnknown(pending.Hash)
@@ -1314,63 +1431,102 @@ func readPaymentReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (
 	return receipt, nil
 }
 
-// latestBlockTimestamp returns the timestamp of the chain's latest block.
-func latestBlockTimestamp(ctx context.Context, rpc tempo.RPCClient) (uint64, error) {
+// latestBlock returns the number and timestamp of the chain's latest block.
+func latestBlock(ctx context.Context, rpc tempo.RPCClient) (uint64, uint64, error) {
 	response, err := rpc.SendRequest(ctx, "eth_getBlockByNumber", "latest", false)
+	if err != nil {
+		return 0, 0, err
+	}
+	if response == nil {
+		return 0, 0, errors.New("tempo server: empty block response")
+	}
+	if err := response.CheckError(); err != nil {
+		return 0, 0, err
+	}
+	block, ok := response.Result.(map[string]any)
+	if !ok {
+		return 0, 0, errors.New("tempo server: malformed latest block")
+	}
+	number, err := hexutil.DecodeUint64(asString(block["number"]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("tempo server: malformed latest block number: %w", err)
+	}
+	timestamp, err := hexutil.DecodeUint64(asString(block["timestamp"]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("tempo server: malformed latest block timestamp: %w", err)
+	}
+	return number, timestamp, nil
+}
+
+// nonceAt returns account's nonce in block number. A node that does not have
+// that block yet fails rather than answer for an older one.
+func nonceAt(ctx context.Context, rpc tempo.RPCClient, account string, number uint64) (uint64, error) {
+	response, err := rpc.SendRequest(ctx, "eth_getTransactionCount", account, hexutil.EncodeUint64(number))
 	if err != nil {
 		return 0, err
 	}
 	if response == nil {
-		return 0, errors.New("tempo server: empty block response")
+		return 0, errors.New("tempo server: empty transaction count response")
 	}
 	if err := response.CheckError(); err != nil {
 		return 0, err
 	}
-	block, ok := response.Result.(map[string]any)
-	if !ok {
-		return 0, errors.New("tempo server: malformed latest block")
-	}
-	timestamp, err := hexutil.DecodeUint64(asString(block["timestamp"]))
-	if err != nil {
-		return 0, fmt.Errorf("tempo server: malformed latest block timestamp: %w", err)
-	}
-	return timestamp, nil
+	return tempo.ParseHexUint64(asString(response.Result))
 }
 
-// expiredPayment reports whether a payment with no receipt can no longer be
-// included: the chain has a block at or past its valid_before, and its
-// receipt, read after that block, is still missing. It returns the receipt
-// when the payment landed after all.
-func (s *Subscription) expiredPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment) (map[string]any, bool, error) {
+// expiredPayment reports whether a payment with no receipt can never be
+// included, proven by one consistent observation: a block at or past its
+// valid_before in which its sender's nonce, read at that same block, is
+// still the payment's. Blocks only move forward in time, so no later block
+// can include it. A nonce already used proves nothing on its own (the payer
+// may have spent it elsewhere), so the receipt is read again and returned if
+// the payment landed after all; otherwise the outcome stays unknown, as it
+// does for a lower nonce, which no node at that block can report.
+func (s *Subscription) expiredPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment, sender string) (map[string]any, bool, error) {
 	tx, err := tempotx.Deserialize(pending.Transaction)
-	if err != nil || tx.ValidBefore == 0 || uint64(s.now().Unix()) < tx.ValidBefore { //nolint:gosec // G115: the clock is past 1970.
+	if err != nil || tx.ValidBefore == 0 || uint64(s.now().Unix()) < tx.ValidBefore || !common.IsHexAddress(sender) { //nolint:gosec // G115: the clock is past 1970.
 		return nil, false, nil
 	}
-	timestamp, err := latestBlockTimestamp(ctx, rpc)
+	number, timestamp, err := latestBlock(ctx, rpc)
 	if err != nil || timestamp < tx.ValidBefore {
 		return nil, false, err
 	}
-	// Read the receipt after the block: a payment included before that
-	// block has its receipt by now.
+	nonce, err := nonceAt(ctx, rpc, sender, number)
+	if err != nil {
+		return nil, false, err
+	}
+	switch {
+	case nonce == tx.Nonce:
+		return nil, true, nil
+	case nonce < tx.Nonce:
+		return nil, false, nil
+	}
 	receipt, err := readPaymentReceipt(ctx, rpc, pending.Hash)
 	if err != nil {
 		return nil, false, err
 	}
-	return receipt, receipt == nil, nil
+	return receipt, false, nil
 }
 
 // checkPaymentReceipt returns the hash of an included payment that credited
 // the recipient.
+// A reverted payment failed; a successful one that credited someone else
+// (held) keeps its period locked, as does an unreadable status.
 func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, receipt map[string]any) (string, error) {
-	if asString(receipt["status"]) != "0x1" {
+	switch asString(receipt["status"]) {
+	case "0x1":
+	case "0x0":
 		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription transaction reverted: "+pending.Hash), nil)
+	default:
+		return "", subscriptionPaymentUnknown(pending, errors.New("transaction receipt has no readable status"))
 	}
 	amount, ok := new(big.Int).SetString(pending.Amount, 10)
 	if !ok {
 		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription amount is invalid"), nil)
 	}
 	if !receiptCredits(receipt, common.HexToAddress(pending.Currency), common.HexToAddress(pending.Recipient), amount, pending.Memo) {
-		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed(fmt.Sprintf("subscription transfer was not credited to the recipient (funds may have been held by a receive policy): %s", pending.Hash)), nil)
+		held := mpp.ErrVerificationFailed(fmt.Sprintf("subscription transfer was not credited to the recipient (funds may have been held by a receive policy): %s; the period stays locked and is not billed again", pending.Hash))
+		return "", held.WithCause(errSubscriptionPaymentHeld)
 	}
 	hash := asString(receipt["transactionHash"])
 	if hash == "" {
@@ -1385,9 +1541,9 @@ func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, r
 // resolvePayment finds the outcome of a payment an earlier attempt left
 // unknown: an included transaction settles it, and one not yet included is
 // broadcast again, which the node accepts at most once. It returns
-// errSubscriptionPaymentFailed only on proof the payment did not pay the
-// recipient (a revert, a held transfer, or expiry without a receipt); read
-// errors and refusals leave the outcome unknown, keeping the period locked.
+// errSubscriptionPaymentFailed only on proof the payment did not move the
+// payer's funds (a revert, or expiry proven by expiredPayment); a held
+// transfer, read errors and refusals keep the period locked.
 func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionPendingPayment, record SubscriptionRecord, activation bool) (string, error) {
 	rpc, err := s.resolveRPC(pending.ChainID)
 	if err != nil {
@@ -1398,8 +1554,12 @@ func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionP
 		return "", subscriptionPaymentUnknown(pending, err)
 	}
 	if receipt == nil {
+		sender := ""
+		if record.Payer != nil {
+			sender = record.Payer.Address
+		}
 		var expired bool
-		if receipt, expired, err = s.expiredPayment(ctx, rpc, pending); err != nil {
+		if receipt, expired, err = s.expiredPayment(ctx, rpc, pending, sender); err != nil {
 			return "", subscriptionPaymentUnknown(pending, err)
 		}
 		if expired {

@@ -284,6 +284,9 @@ func (r SubscriptionRequest) normalized() (SubscriptionRequest, error) {
 	if _, err := SubscriptionExpirySeconds(r.SubscriptionExpires); err != nil {
 		return SubscriptionRequest{}, err
 	}
+	if r.ChainID != nil && *r.ChainID <= 0 {
+		return SubscriptionRequest{}, errors.New("tempo: chainId must be a positive integer")
+	}
 	if r.AccessKey != nil {
 		key := *r.AccessKey
 		if key.AccessKeyAddress, err = lowerAddress("accessKeyAddress", key.AccessKeyAddress); err != nil {
