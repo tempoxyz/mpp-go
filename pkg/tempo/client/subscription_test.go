@@ -34,10 +34,13 @@ func subscriptionChallenge(t *testing.T, chainID int64, accessKey *tempo.Subscri
 	return mpptest.NewChallenge("subscription-client-test-secret-key-01", "api.example.com", tempo.MethodName, tempo.IntentSubscription, request.Map(), mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)))
 }
 
+// acceptSubscription accepts every subscription, for tests only.
+func acceptSubscription(context.Context, tempo.SubscriptionRequest) error { return nil }
+
 var subscriptionClientAccessKey = &tempo.SubscriptionAccessKey{AccessKeyAddress: "0x" + strings.Repeat("ab", 20), KeyType: tempo.SubscriptionKeyTypeSecp256k1}
 
 func TestSubscriptionClientSignsScopedKeyAuthorization(t *testing.T) {
-	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey})
+	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey, ValidateRequest: acceptSubscription})
 	require.NoError(t, err)
 	assert.Equal(t, tempo.IntentSubscription, method.Intent())
 	challenge := subscriptionChallenge(t, 0, subscriptionClientAccessKey)
@@ -73,7 +76,7 @@ func TestSubscriptionClientValidatesBeforeSigning(t *testing.T) {
 }
 
 func TestSubscriptionClientRejectsChallenges(t *testing.T) {
-	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey})
+	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey, ValidateRequest: acceptSubscription})
 	require.NoError(t, err)
 	_, err = method.CreateCredential(context.Background(), subscriptionChallenge(t, 0, nil))
 	assert.ErrorContains(t, err, "no subscription access key")
@@ -83,13 +86,23 @@ func TestSubscriptionClientRejectsChallenges(t *testing.T) {
 	_, err = method.CreateCredential(context.Background(), charge)
 	assert.ErrorContains(t, err, "unsupported challenge intent")
 
-	_, err = NewSubscription(SubscriptionConfig{})
+	_, err = NewSubscription(SubscriptionConfig{ValidateRequest: acceptSubscription})
 	assert.Error(t, err)
+}
+
+func TestSubscriptionClientFailsClosedWithoutValidateRequest(t *testing.T) {
+	_, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey})
+	assert.ErrorIs(t, err, ErrSubscriptionValidateRequired)
+
+	// A zero-value method never signs either.
+	var method SubscriptionMethod
+	_, err = method.CreateCredential(context.Background(), subscriptionChallenge(t, 0, subscriptionClientAccessKey))
+	assert.ErrorIs(t, err, ErrSubscriptionValidateRequired)
 }
 
 func TestSubscriptionClientUsesConfiguredAccessKey(t *testing.T) {
 	override := &tempo.SubscriptionAccessKey{AccessKeyAddress: "0x" + strings.Repeat("cd", 20), KeyType: tempo.SubscriptionKeyTypeSecp256k1}
-	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey, AccessKey: override})
+	method, err := NewSubscription(SubscriptionConfig{PrivateKey: subscriptionClientKey, AccessKey: override, ValidateRequest: acceptSubscription})
 	require.NoError(t, err)
 	challenge := subscriptionChallenge(t, 0, nil)
 	credential, err := method.CreateCredential(context.Background(), challenge)

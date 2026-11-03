@@ -26,11 +26,25 @@ type SubscriptionConfig struct {
 	// ChainID is the chain to authorize when the Challenge names none. Zero
 	// uses Tempo Moderato, as mppx does.
 	ChainID int64
-	// ValidateRequest, when set, runs before anything is signed and can
-	// reject a subscription the subscriber does not accept, such as an
-	// amount, period or expiry it does not want to authorize.
+	// ValidateRequest authorizes a subscription before anything is signed:
+	// it must reject an amount, currency, recipient, period or expiry the
+	// subscriber does not accept. Required: a key authorization lets the
+	// server bill every period until the subscription expires, so the client
+	// fails closed instead of signing any Challenge, as the charge client
+	// does without a PaymentPolicy. For example:
+	//
+	//	ValidateRequest: func(_ context.Context, r tempo.SubscriptionRequest) error {
+	//		if r.Recipient != merchant || r.Amount != "1000000" || r.PeriodUnit != tempo.SubscriptionPeriodWeek {
+	//			return errors.New("subscription not accepted")
+	//		}
+	//		return nil
+	//	},
 	ValidateRequest func(context.Context, tempo.SubscriptionRequest) error
 }
+
+// ErrSubscriptionValidateRequired is returned when a subscription client has
+// no SubscriptionConfig.ValidateRequest to authorize what it signs.
+var ErrSubscriptionValidateRequired = errors.New("tempo client: a subscription ValidateRequest is required to authorize subscriptions")
 
 // SubscriptionMethod creates Tempo subscription Credentials: it signs a key
 // authorization scoped to the Challenge's amount, currency, recipient, period
@@ -50,6 +64,9 @@ var _ interface {
 
 // NewSubscription constructs a Tempo subscription client method.
 func NewSubscription(config SubscriptionConfig) (*SubscriptionMethod, error) {
+	if config.ValidateRequest == nil {
+		return nil, ErrSubscriptionValidateRequired
+	}
 	root := config.Signer
 	if root == nil {
 		if config.PrivateKey == "" {
@@ -112,10 +129,11 @@ func (m *SubscriptionMethod) CreateCredential(ctx context.Context, challenge *mp
 	if err := tempo.ValidateSubscriptionTiming(request, ""); err != nil {
 		return nil, fmt.Errorf("tempo client: %w", err)
 	}
-	if m.validateRequest != nil {
-		if err := m.validateRequest(ctx, request); err != nil {
-			return nil, err
-		}
+	if m.validateRequest == nil {
+		return nil, ErrSubscriptionValidateRequired
+	}
+	if err := m.validateRequest(ctx, request); err != nil {
+		return nil, err
 	}
 	signature, err := tempo.SignSubscriptionKeyAuthorization(m.signer, *accessKey, challenge.ID, chainID, request)
 	if err != nil {

@@ -69,14 +69,24 @@ const (
 	defaultSubscriptionPendingPrefix    = "tempo:subscription:pending-access-key:"
 	defaultSubscriptionCredentialPrefix = "tempo:subscription:credential:"
 	defaultSubscriptionLockTimeout      = 15 * time.Minute
+	// subscriptionStoreMaxAttempts bounds every compare-and-swap retry loop,
+	// so a store that never accepts a swap (or a key under constant
+	// contention) fails the request instead of spinning.
+	subscriptionStoreMaxAttempts = 64
 )
+
+// errSubscriptionStoreContention is returned when a compare-and-swap loop
+// runs out of attempts.
+var errSubscriptionStoreContention = errors.New("tempo server: subscription store is contended: compare-and-swap kept failing")
 
 // SubscriptionStoreOptions configures a SubscriptionStore.
 type SubscriptionStoreOptions struct {
 	// KeyPrefix is prepended to every key the store writes.
 	KeyPrefix string
 	// ActivationTimeout is how long an activation lock lasts before another
-	// attempt may replace it. Zero is 15 minutes; negative never expires.
+	// attempt may replace it, counted from when the activation started or,
+	// once its payment settled, from when it started committing. Zero is 15
+	// minutes; negative never expires.
 	ActivationTimeout time.Duration
 	// RenewalTimeout is how long a renewal lock lasts before another attempt
 	// may replace it. Zero is 15 minutes; negative never expires.
@@ -94,8 +104,9 @@ type SubscriptionStore struct {
 	now               func() time.Time
 }
 
-// NewSubscriptionStore wraps store for subscriptions. Use a store whose
-// values never expire (a RedisStore with no TTL).
+// NewSubscriptionStore wraps store for subscriptions. It writes every value
+// with CompareAndSwap, whose values never expire, so a RedisStore with a TTL
+// works too.
 func NewSubscriptionStore(store tempo.AtomicStore, options SubscriptionStoreOptions) (*SubscriptionStore, error) {
 	if store == nil {
 		return nil, errors.New("tempo server: subscription store requires an AtomicStore")
@@ -155,12 +166,35 @@ func getJSON[T any](ctx context.Context, store tempo.Store, key string) (*T, str
 	return &value, raw, nil
 }
 
-func putJSON(ctx context.Context, store tempo.Store, key string, value any) error {
+// put stores value under key with CompareAndSwap, so it never expires
+// whatever TTL the store applies to Put.
+func (s *SubscriptionStore) put(ctx context.Context, key, value string) error {
+	for range subscriptionStoreMaxAttempts {
+		current, ok, err := s.store.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		if ok && current == value {
+			return nil
+		}
+		var old *string
+		if ok {
+			old = &current
+		}
+		swapped, err := s.store.CompareAndSwap(ctx, key, old, value)
+		if err != nil || swapped {
+			return err
+		}
+	}
+	return errSubscriptionStoreContention
+}
+
+func (s *SubscriptionStore) putJSON(ctx context.Context, key string, value any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return store.Put(ctx, key, string(encoded))
+	return s.put(ctx, key, string(encoded))
 }
 
 // Get returns the subscription with id, or nil.
@@ -180,10 +214,10 @@ func (s *SubscriptionStore) GetByKey(ctx context.Context, key string) (*Subscrip
 
 // Put stores record and makes it its lookup key's current subscription.
 func (s *SubscriptionStore) Put(ctx context.Context, record SubscriptionRecord) error {
-	if err := putJSON(ctx, s.store, s.recordKey(record.SubscriptionID), record); err != nil {
+	if err := s.putJSON(ctx, s.recordKey(record.SubscriptionID), record); err != nil {
 		return err
 	}
-	return s.store.Put(ctx, s.lookupKey(record.LookupKey), record.SubscriptionID)
+	return s.put(ctx, s.lookupKey(record.LookupKey), record.SubscriptionID)
 }
 
 // ReleaseCredential releases a Challenge's activation claim so it can be retried.
@@ -228,12 +262,28 @@ func (s *SubscriptionStore) GetAccessKeyByAddress(ctx context.Context, address, 
 // GetOrCreateAccessKey returns the server-owned access key of a lookup key,
 // creating it on first use.
 func (s *SubscriptionStore) GetOrCreateAccessKey(ctx context.Context, key string) (*SubscriptionAccessKeyRecord, error) {
-	for {
-		existing, _, err := getJSON[SubscriptionAccessKeyRecord](ctx, s.store, s.accessKeyKey(key))
+	return s.accessKeyFor(ctx, key, "")
+}
+
+// rotateAccessKey replaces the lookup key's server-owned access key with a
+// fresh one while it is still retired, the address of a key a subscription
+// already authorized. The Tempo keychain refuses to authorize a key ID an
+// account registered before (KeyAlreadyExists, KeyAlreadyRevoked), so a new
+// subscription needs a new key; the retired one stays reachable by address
+// for renewals of the subscription that holds it.
+func (s *SubscriptionStore) rotateAccessKey(ctx context.Context, key, retired string) (*SubscriptionAccessKeyRecord, error) {
+	return s.accessKeyFor(ctx, key, retired)
+}
+
+// accessKeyFor returns the lookup key's access key, creating one when there
+// is none or when the current one has address retired.
+func (s *SubscriptionStore) accessKeyFor(ctx context.Context, key, retired string) (*SubscriptionAccessKeyRecord, error) {
+	for range subscriptionStoreMaxAttempts {
+		existing, raw, err := getJSON[SubscriptionAccessKeyRecord](ctx, s.store, s.accessKeyKey(key))
 		if err != nil {
 			return nil, err
 		}
-		if existing != nil {
+		if existing != nil && (retired == "" || !strings.EqualFold(existing.AccessKeyAddress, retired)) {
 			return existing, s.indexAccessKey(ctx, *existing)
 		}
 		privateKey := make([]byte, 32)
@@ -244,18 +294,28 @@ func (s *SubscriptionStore) GetOrCreateAccessKey(ctx context.Context, key string
 		if err != nil {
 			return nil, err
 		}
+		// Index the candidate first so a key the lookup slot names is always
+		// reachable by address.
+		if err := s.indexAccessKey(ctx, *candidate); err != nil {
+			return nil, err
+		}
 		encoded, err := json.Marshal(candidate) //nolint:gosec // G117: the store keeps server-owned access keys to bill with, as mppx's does.
 		if err != nil {
 			return nil, err
 		}
-		stored, err := s.store.CompareAndSwap(ctx, s.accessKeyKey(key), nil, string(encoded))
+		var old *string
+		if existing != nil {
+			old = &raw
+		}
+		stored, err := s.store.CompareAndSwap(ctx, s.accessKeyKey(key), old, string(encoded))
 		if err != nil {
 			return nil, err
 		}
 		if stored {
-			return candidate, s.indexAccessKey(ctx, *candidate)
+			return candidate, nil
 		}
 	}
+	return nil, errSubscriptionStoreContention
 }
 
 // CreateChallengeAccessKey creates an access key sealed into its own
@@ -282,14 +342,22 @@ func (s *SubscriptionStore) CreateChallengeAccessKey(ctx context.Context) (*Subs
 	return record, nil
 }
 
-// RetainAccessKey keeps an access key after a payment it signed was
-// submitted, for later renewals.
+// RetainAccessKey keeps an access key after an activation payment it signed
+// was submitted, for later renewals, and makes it the lookup key's.
 func (s *SubscriptionStore) RetainAccessKey(ctx context.Context, key string, record SubscriptionAccessKeyRecord) error {
 	record.KeyToken = ""
-	if err := putJSON(ctx, s.store, s.accessKeyKey(key), record); err != nil {
+	if err := s.putJSON(ctx, s.accessKeyKey(key), record); err != nil {
 		return err
 	}
-	return putJSON(ctx, s.store, s.accessKeyAddressKey(record.AccessKeyAddress), record)
+	return s.putJSON(ctx, s.accessKeyAddressKey(record.AccessKeyAddress), record)
+}
+
+// retainAccessKeyAddress keeps an access key reachable by its address after
+// a renewal it signed, without making it the lookup key's again: the lookup
+// key may have rotated to a fresh key for a new subscription.
+func (s *SubscriptionStore) retainAccessKeyAddress(ctx context.Context, record SubscriptionAccessKeyRecord) error {
+	record.KeyToken = ""
+	return s.putJSON(ctx, s.accessKeyAddressKey(record.AccessKeyAddress), record)
 }
 
 func (s *SubscriptionStore) indexAccessKey(ctx context.Context, record SubscriptionAccessKeyRecord) error {
@@ -417,6 +485,7 @@ func (s *SubscriptionStore) activate(
 		return &next
 	})
 	if err != nil {
+		_ = s.clearActivation(ctx, lookupKey, challengeID)
 		return 0, nil, nil, err
 	}
 	if !committed {
@@ -424,37 +493,50 @@ func (s *SubscriptionStore) activate(
 		if canceled.CanceledAt == "" {
 			canceled.CanceledAt = s.timestamp()
 		}
-		if err := putJSON(ctx, s.store, s.recordKey(canceled.SubscriptionID), canceled); err != nil {
+		if err := s.putJSON(ctx, s.recordKey(canceled.SubscriptionID), canceled); err != nil {
 			return 0, nil, nil, err
 		}
 		return activationClaimMismatch, nil, nil, nil
 	}
-	previous, err := s.GetByKey(ctx, subscription.LookupKey)
-	if err != nil {
+	// From here this attempt holds a committing marker: release it on every
+	// error, so a failed commit does not lock the lookup key out until the
+	// marker goes stale.
+	fail := func(err error) (subscriptionActivationStatus, *SubscriptionResult, *SubscriptionRecord, error) {
+		_ = s.clearActivation(ctx, subscription.LookupKey, challengeID)
 		return 0, nil, nil, err
 	}
+	previous, err := s.GetByKey(ctx, subscription.LookupKey)
+	if err != nil {
+		return fail(err)
+	}
 	if previous != nil && previous.SubscriptionID != subscription.SubscriptionID {
-		if owns, err := s.ownsActivation(ctx, subscription.LookupKey, challengeID); err != nil || !owns {
-			return activationClaimMismatch, nil, nil, err
+		if owns, err := s.ownsActivation(ctx, subscription.LookupKey, challengeID); err != nil {
+			return fail(err)
+		} else if !owns {
+			return activationClaimMismatch, nil, nil, nil
 		}
 		if previous.CanceledAt == "" {
 			previous.CanceledAt = s.timestamp()
 		}
-		if err := putJSON(ctx, s.store, s.recordKey(previous.SubscriptionID), previous); err != nil {
-			return 0, nil, nil, err
+		if err := s.putJSON(ctx, s.recordKey(previous.SubscriptionID), previous); err != nil {
+			return fail(err)
 		}
 	}
-	if owns, err := s.ownsActivation(ctx, subscription.LookupKey, challengeID); err != nil || !owns {
-		return activationClaimMismatch, nil, nil, err
+	if owns, err := s.ownsActivation(ctx, subscription.LookupKey, challengeID); err != nil {
+		return fail(err)
+	} else if !owns {
+		return activationClaimMismatch, nil, nil, nil
 	}
-	if err := putJSON(ctx, s.store, s.recordKey(subscription.SubscriptionID), subscription); err != nil {
-		return 0, nil, nil, err
+	if err := s.putJSON(ctx, s.recordKey(subscription.SubscriptionID), subscription); err != nil {
+		return fail(err)
 	}
-	if owns, err := s.ownsActivation(ctx, subscription.LookupKey, challengeID); err != nil || !owns {
-		return activationClaimMismatch, nil, nil, err
+	if owns, err := s.ownsActivation(ctx, subscription.LookupKey, challengeID); err != nil {
+		return fail(err)
+	} else if !owns {
+		return activationClaimMismatch, nil, nil, nil
 	}
-	if err := s.store.Put(ctx, s.lookupKey(subscription.LookupKey), subscription.SubscriptionID); err != nil {
-		return 0, nil, nil, err
+	if err := s.put(ctx, s.lookupKey(subscription.LookupKey), subscription.SubscriptionID); err != nil {
+		return fail(err)
 	}
 	if err := s.clearActivation(ctx, subscription.LookupKey, challengeID); err != nil {
 		return 0, nil, nil, err
@@ -476,7 +558,7 @@ func (s *SubscriptionStore) startActivation(ctx context.Context, lookupKey, chal
 // a nil next leaves it unchanged and reports false.
 func (s *SubscriptionStore) updateActivation(ctx context.Context, lookupKey string, next func(*activationMarker) *activationMarker) (bool, error) {
 	key := s.activationKey(lookupKey)
-	for {
+	for range subscriptionStoreMaxAttempts {
 		marker, raw, err := getJSON[activationMarker](ctx, s.store, key)
 		if err != nil {
 			return false, err
@@ -501,6 +583,7 @@ func (s *SubscriptionStore) updateActivation(ctx context.Context, lookupKey stri
 			return true, nil
 		}
 	}
+	return false, errSubscriptionStoreContention
 }
 
 func (s *SubscriptionStore) clearActivation(ctx context.Context, lookupKey, challengeID string) error {
@@ -521,12 +604,18 @@ func (s *SubscriptionStore) ownsActivation(ctx context.Context, lookupKey, chall
 	return marker != nil && marker.ChallengeID == challengeID, nil
 }
 
+// isStale reports whether a lock started at startedAt, or committing since
+// committingAt, has outlived timeout. Unlike mppx, a committing activation
+// goes stale too, counted from when it started committing: committing only
+// writes the store, so a marker still there after the timeout belongs to a
+// replica that crashed or lost the store, and would otherwise lock the
+// lookup key out for good.
 func (s *SubscriptionStore) isStale(startedAt, committingAt string, timeout time.Duration) bool {
 	if timeout < 0 {
 		return false
 	}
 	if committingAt != "" {
-		return false
+		startedAt = committingAt
 	}
 	started, err := time.Parse(time.RFC3339Nano, startedAt)
 	if err != nil {
@@ -563,7 +652,10 @@ func (s *SubscriptionStore) renew(
 	}
 	attempt := hex.EncodeToString(attemptBytes)
 	var started SubscriptionRecord
-	for {
+	for tries := 0; ; tries++ {
+		if tries == subscriptionStoreMaxAttempts {
+			return 0, nil, nil, errSubscriptionStoreContention
+		}
 		current, raw, err := getJSON[SubscriptionRecord](ctx, s.store, s.recordKey(id))
 		if err != nil {
 			return 0, nil, nil, err
@@ -616,7 +708,11 @@ func (s *SubscriptionStore) renew(
 		}
 		return renewalSuperseded, nil, &started, err
 	}
-	for {
+	for tries := 0; ; tries++ {
+		if tries == subscriptionStoreMaxAttempts {
+			_ = s.clearRenewal(ctx, id, periodIndex, attempt)
+			return 0, nil, nil, errSubscriptionStoreContention
+		}
 		existing, raw, err := getJSON[SubscriptionRecord](ctx, s.store, s.recordKey(id))
 		if err != nil {
 			return 0, nil, nil, err
@@ -656,7 +752,7 @@ func (s *SubscriptionStore) renew(
 }
 
 func (s *SubscriptionStore) clearRenewal(ctx context.Context, id string, periodIndex int64, attempt string) error {
-	for {
+	for range subscriptionStoreMaxAttempts {
 		current, raw, err := getJSON[SubscriptionRecord](ctx, s.store, s.recordKey(id))
 		if err != nil {
 			return err
@@ -673,6 +769,7 @@ func (s *SubscriptionStore) clearRenewal(ctx context.Context, id string, periodI
 			return err
 		}
 	}
+	return errSubscriptionStoreContention
 }
 
 func clearRenewalFields(record SubscriptionRecord) SubscriptionRecord {

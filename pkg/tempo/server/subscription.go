@@ -178,8 +178,9 @@ type SubscribeParams struct {
 }
 
 // ErrSubscriptionRenewalInFlight is returned, with the current receipt, when
-// another request is already renewing the caller's subscription. Respond 409
-// with Retry-After: 1, as mppx does; Subscription.Middleware does.
+// another request is already renewing the caller's subscription; a
+// Credential rejected for that reason wraps it. Respond 409 with
+// Retry-After: 1, as mppx does; Subscription.Middleware does.
 var ErrSubscriptionRenewalInFlight = errors.New("tempo server: subscription renewal is already in flight")
 
 // Subscription is the Tempo subscription server method
@@ -251,9 +252,13 @@ func (s *Subscription) Subscribe(ctx context.Context, params SubscribeParams) (*
 		}
 	}
 	if credential == nil && !s.config.RequireCredential {
-		if result, err := s.authorize(ctx, params.Request, request); result != nil || err != nil {
+		result, err := s.authorize(ctx, params.Request, request)
+		if errors.Is(err, ErrSubscriptionRenewalInFlight) || err == nil && result != nil {
 			return result, err
 		}
+		// A renewal that failed leaves the caller without a usable
+		// subscription: issue a fresh Challenge so it can subscribe again
+		// instead of failing every request until the subscription expires.
 	}
 	challengeRequest, err := s.challengeRequest(ctx, params.Request, request, credential)
 	if err != nil {
@@ -385,13 +390,17 @@ func (s *Subscription) challengeRequest(
 	credential *mpp.Credential,
 ) (tempo.SubscriptionRequest, error) {
 	var accessKey *tempo.SubscriptionAccessKey
-	if credential != nil {
+	if credential != nil && credential.Challenge.Method == tempo.MethodName && credential.Challenge.Intent == tempo.IntentSubscription {
 		if echoed, err := mpp.B64Decode(credential.Challenge.Request); err == nil {
 			if parsed, err := tempo.ParseSubscriptionRequest(echoed); err == nil {
 				accessKey = parsed.AccessKey
 			}
 		}
-	} else {
+	}
+	// A foreign or malformed Credential names no access key: resolve one as
+	// for a request without a Credential, so the caller gets a fresh
+	// Challenge rather than an error.
+	if accessKey == nil {
 		resolved, err := s.config.Resolve(ctx, SubscriptionResolveParams{Request: input, Subscription: request})
 		if err != nil {
 			return tempo.SubscriptionRequest{}, err
@@ -400,7 +409,7 @@ func (s *Subscription) challengeRequest(
 		case resolved != nil && s.config.Activate == nil:
 			// Automatic mode owns the access key, so applications issue
 			// Challenges from only their lookup key.
-			stored, err := s.config.Store.GetOrCreateAccessKey(ctx, resolved.Key)
+			stored, err := s.automaticAccessKey(ctx, resolved.Key, request)
 			if err != nil {
 				return tempo.SubscriptionRequest{}, err
 			}
@@ -433,6 +442,39 @@ func (s *Subscription) challengeRequest(
 	key := *accessKey
 	request.AccessKey = &key
 	return request, nil
+}
+
+// automaticAccessKey returns the lookup key's server-owned access key for a
+// new Challenge. Once the lookup key's subscription authorized that key, a
+// Challenge that would create another subscription (the old one ended, was
+// replaced or changed terms) gets a fresh key: the Tempo keychain refuses to
+// authorize a key ID the payer registered before. mppx reuses the key, which
+// the keychain then rejects.
+func (s *Subscription) automaticAccessKey(ctx context.Context, lookupKey string, request tempo.SubscriptionRequest) (*SubscriptionAccessKeyRecord, error) {
+	store := s.config.Store
+	stored, err := store.GetOrCreateAccessKey(ctx, lookupKey)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := store.GetByKey(ctx, lookupKey)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.AccessKey == nil ||
+		!strings.EqualFold(existing.AccessKey.AccessKeyAddress, stored.AccessKeyAddress) ||
+		s.isReusable(*existing, bindingOfRequest(request)) {
+		return stored, nil
+	}
+	return store.rotateAccessKey(ctx, lookupKey, stored.AccessKeyAddress)
+}
+
+// isReusable reports whether record serves a Credential for binding without
+// a new subscription.
+func (s *Subscription) isReusable(record SubscriptionRecord, binding subscriptionBinding) bool {
+	if !s.isActive(record) || !subscriptionMatches(record, binding) {
+		return false
+	}
+	return s.config.RequireCredential || s.periodIndex(record) <= record.LastChargedPeriod
 }
 
 func (s *Subscription) resolveAccessKey(
@@ -555,12 +597,7 @@ func (i *subscriptionIntent) Verify(ctx context.Context, credential *mpp.Credent
 	lookup := *resolved
 	binding := bindingOfRequest(request)
 
-	isReusable := func(record SubscriptionRecord) bool {
-		if s.config.RequireCredential {
-			return s.isActive(record) && subscriptionMatches(record, binding)
-		}
-		return s.isActive(record) && subscriptionMatches(record, binding) && s.periodIndex(record) <= record.LastChargedPeriod
-	}
+	isReusable := func(record SubscriptionRecord) bool { return s.isReusable(record, binding) }
 	create := func() (*SubscriptionResult, error) {
 		result, err := s.activateSubscription(ctx, *accessKey, credential, payload, input, request, lookup, source)
 		if err != nil {
@@ -616,7 +653,7 @@ func (i *subscriptionIntent) Verify(ctx context.Context, credential *mpp.Credent
 			if err := s.config.Store.ReleaseCredential(ctx, credential.Challenge.ID); err != nil {
 				return nil, err
 			}
-			return nil, mpp.ErrVerificationFailed("subscription renewal is already in flight")
+			return nil, mpp.ErrVerificationFailed("subscription renewal is already in flight").WithCause(ErrSubscriptionRenewalInFlight)
 		case renewalRenewed:
 			if s.config.OnRenewed != nil {
 				s.config.OnRenewed(ctx, periodIndex, *renewed)
@@ -1058,7 +1095,14 @@ func (s *Subscription) submitPayment(ctx context.Context, params paymentParams) 
 			hash = asString(receipt["hash"])
 		}
 	}
-	if err := store.RetainAccessKey(ctx, params.lookupKey, *stored); err != nil {
+	// Only an activation makes the key the lookup key's: a renewal of an
+	// older subscription must not undo a rotation to a fresh key.
+	if params.keyAuthorization != "" {
+		err = store.RetainAccessKey(ctx, params.lookupKey, *stored)
+	} else {
+		err = store.retainAccessKeyAddress(ctx, *stored)
+	}
+	if err != nil {
 		return "", err
 	}
 	return strings.ToLower(hash), nil

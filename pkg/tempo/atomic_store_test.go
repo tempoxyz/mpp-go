@@ -3,6 +3,7 @@ package tempo
 import (
 	"context"
 	"testing"
+	"time"
 
 	miniredis "github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -54,4 +55,29 @@ func TestAtomicStores(t *testing.T) {
 			assert.False(t, ok)
 		})
 	}
+}
+
+func TestRedisStoreCompareAndSwapIgnoresTTL(t *testing.T) {
+	ctx := context.Background()
+	server := miniredis.RunT(t)
+	store := NewRedisStore(redis.NewClient(&redis.Options{Addr: server.Addr()}), time.Minute)
+
+	swapped, err := store.CompareAndSwap(ctx, "new", nil, "a")
+	require.NoError(t, err)
+	require.True(t, swapped)
+	assert.Zero(t, server.TTL("new"), "CompareAndSwap must not apply the store's TTL")
+
+	require.NoError(t, store.Put(ctx, "put", "a"))
+	require.Positive(t, server.TTL("put"))
+	old := "a"
+	swapped, err = store.CompareAndSwap(ctx, "put", &old, "b")
+	require.NoError(t, err)
+	require.True(t, swapped)
+	assert.Zero(t, server.TTL("put"), "a swapped value persists")
+
+	server.FastForward(2 * time.Minute)
+	value, ok, err := store.Get(ctx, "put")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "b", value)
 }

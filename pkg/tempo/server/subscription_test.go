@@ -108,12 +108,15 @@ func (h *subscriptionHarness) pay(user, key string) (*mpp.Credential, string) {
 	result, err := h.subscribe(user, "")
 	require.NoError(h.t, err)
 	require.True(h.t, result.IsChallenge(), "want a Challenge")
-	client, err := chargeclient.NewSubscription(chargeclient.SubscriptionConfig{PrivateKey: key})
+	client, err := chargeclient.NewSubscription(chargeclient.SubscriptionConfig{PrivateKey: key, ValidateRequest: acceptSubscription})
 	require.NoError(h.t, err)
 	credential, err := client.CreateCredential(context.Background(), result.Challenge)
 	require.NoError(h.t, err)
 	return credential, mpptest.FormatCredential(credential)
 }
+
+// acceptSubscription accepts every subscription, for tests only.
+func acceptSubscription(context.Context, tempo.SubscriptionRequest) error { return nil }
 
 func testTxHash(n int) string { return fmt.Sprintf("0x%064x", n) }
 
@@ -246,8 +249,9 @@ func TestSubscriptionRejectsInvalidCredentials(t *testing.T) {
 		result, err := h.subscribe("carol", "")
 		require.NoError(t, err)
 		client, err := chargeclient.NewSubscription(chargeclient.SubscriptionConfig{
-			PrivateKey: subscriptionPayerKey,
-			AccessKey:  &tempo.SubscriptionAccessKey{AccessKeyAddress: "0x" + strings.Repeat("cd", 20), KeyType: tempo.SubscriptionKeyTypeSecp256k1},
+			PrivateKey:      subscriptionPayerKey,
+			ValidateRequest: acceptSubscription,
+			AccessKey:       &tempo.SubscriptionAccessKey{AccessKeyAddress: "0x" + strings.Repeat("cd", 20), KeyType: tempo.SubscriptionKeyTypeSecp256k1},
 		})
 		require.NoError(t, err)
 		credential, err := client.CreateCredential(context.Background(), result.Challenge)
@@ -332,8 +336,11 @@ func TestSubscriptionRejectsRenewalsChangingTheSubscription(t *testing.T) {
 	_, err := h.subscribe("frank", authorization)
 	require.NoError(t, err)
 	h.advance(25 * time.Hour)
-	_, err = h.subscribe("frank", "")
-	assert.ErrorContains(t, err, "subscriptionId does not match the active subscription")
+	// The request path cannot renew, so it offers a fresh Challenge instead
+	// of failing every request until the subscription expires.
+	result, err := h.subscribe("frank", "")
+	require.NoError(t, err)
+	assert.True(t, result.IsChallenge(), "a failed renewal falls through to a Challenge")
 	_, err = h.sub.Renew(context.Background(), "sub_frank")
 	assert.ErrorContains(t, err, "subscriptionId does not match the active subscription")
 	record, err := h.store.Get(context.Background(), "sub_frank")
@@ -521,7 +528,7 @@ func TestSubscriptionAnonymousChallengeUsesSealedKey(t *testing.T) {
 	request, err := tempo.ParseSubscriptionRequest(challenge.Challenge.Request)
 	require.NoError(t, err)
 	require.NotEmpty(t, request.AccessKey.KeyToken)
-	client, err := chargeclient.NewSubscription(chargeclient.SubscriptionConfig{PrivateKey: subscriptionPayerKey})
+	client, err := chargeclient.NewSubscription(chargeclient.SubscriptionConfig{PrivateKey: subscriptionPayerKey, ValidateRequest: acceptSubscription})
 	require.NoError(t, err)
 	credential, err := client.CreateCredential(context.Background(), challenge.Challenge)
 	require.NoError(t, err)

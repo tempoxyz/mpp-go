@@ -8,10 +8,16 @@ import (
 // AtomicStore is a Store that can replace or delete a key only while it still
 // holds an expected value. The Tempo subscription store needs it to claim
 // activations and renewals once across replicas, as mppx's AtomicStore.update.
+//
+// A wrapper that changes how keys or values are stored (a key prefix,
+// encryption) must override CompareAndSwap and CompareAndDelete as well as
+// Get and Put: methods promoted from an embedded store bypass the wrapper.
 type AtomicStore interface {
 	Store
 	// CompareAndSwap stores next under key only while key holds *old, or,
-	// with old nil, only while key is unset. It reports whether it stored next.
+	// with old nil, only while key is unset. It reports whether it stored
+	// next. Values it stores never expire, whatever TTL the store applies to
+	// Put, so subscriptions, access keys and claims written with it persist.
 	CompareAndSwap(ctx context.Context, key string, old *string, next string) (bool, error)
 	// CompareAndDelete deletes key only while it holds old. It reports
 	// whether it deleted key.
@@ -24,7 +30,7 @@ var (
 )
 
 // CompareAndSwap stores next under key only while key holds *old, or, with
-// old nil, only while key is unset.
+// old nil, only while key is unset. The value never expires.
 func (s *MemoryStore) CompareAndSwap(_ context.Context, key string, old *string, next string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -51,8 +57,8 @@ func (s *MemoryStore) CompareAndDelete(_ context.Context, key, old string) (bool
 	return true, nil
 }
 
-// compareAndSwapScript sets KEYS[1] to ARGV[3] (with a PX TTL of ARGV[4]
-// when positive) only while it is unset (ARGV[1] = "0") or holds ARGV[2].
+// compareAndSwapScript sets KEYS[1] to ARGV[3], without a TTL, only while it
+// is unset (ARGV[1] = "0") or holds ARGV[2].
 const compareAndSwapScript = `
 local current = redis.call('GET', KEYS[1])
 if ARGV[1] == '0' then
@@ -60,11 +66,7 @@ if ARGV[1] == '0' then
 elseif current ~= ARGV[2] then
   return 0
 end
-if tonumber(ARGV[4]) > 0 then
-  redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[4])
-else
-  redis.call('SET', KEYS[1], ARGV[3])
-end
+redis.call('SET', KEYS[1], ARGV[3])
 return 1
 `
 
@@ -77,14 +79,16 @@ return 0
 `
 
 // CompareAndSwap stores next under key only while key holds *old, or, with
-// old nil, only while key is unset, atomically with a Lua script. It applies
-// the store's TTL as Put does: use a RedisStore with no TTL for subscriptions.
+// old nil, only while key is unset, atomically with a Lua script. Unlike
+// Put, it never applies the store's TTL, as PutIfAbsent does not: the
+// subscription store writes every value through it, so a RedisStore with a
+// TTL for replay protection does not silently expire subscriptions.
 func (s *RedisStore) CompareAndSwap(ctx context.Context, key string, old *string, next string) (bool, error) {
 	hasOld, oldValue := "0", ""
 	if old != nil {
 		hasOld, oldValue = "1", *old
 	}
-	result, err := s.client.Eval(ctx, compareAndSwapScript, []string{key}, hasOld, oldValue, next, s.ttl.Milliseconds()).Int()
+	result, err := s.client.Eval(ctx, compareAndSwapScript, []string{key}, hasOld, oldValue, next).Int()
 	if err != nil {
 		return false, err
 	}
