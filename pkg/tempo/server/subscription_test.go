@@ -499,16 +499,17 @@ func TestSubscriptionAutomaticActivationAndRenewal(t *testing.T) {
 	assert.NotEqual(t, result.Receipt.Reference, renewed.Receipt.Reference)
 }
 
-func TestSubscriptionAutomaticActivationRejectsHeldTransfer(t *testing.T) {
+func TestSubscriptionAutomaticActivationRecordsHeldTransfer(t *testing.T) {
 	held := true
 	rpc, _ := subscriptionChain(t, &held)
 	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) { config.RPC = rpc })
 	_, authorization := h.pay("kim", subscriptionPayerKey)
 	_, err := h.subscribe("kim", authorization)
-	assert.ErrorContains(t, err, "was not credited to the recipient")
+	require.NoError(t, err)
 	record, err := h.store.GetByKey(context.Background(), "user:kim")
 	require.NoError(t, err)
-	assert.Nil(t, record)
+	require.NotNil(t, record)
+	assert.True(t, record.Held, "the record shows its payment was held")
 }
 
 func TestSubscriptionAnonymousChallengeUsesSealedKey(t *testing.T) {

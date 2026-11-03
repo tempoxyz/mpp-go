@@ -579,7 +579,7 @@ func TestSubscriptionRenewalAfterBroadcastGetsNoChallenge(t *testing.T) {
 	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[1])), served.Receipt.Reference)
 }
 
-func TestSubscriptionHeldRenewalGetsNoChallenge(t *testing.T) {
+func TestSubscriptionHeldRenewalIsServed(t *testing.T) {
 	held := false
 	rpc, sent := subscriptionChain(t, &held)
 	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) { config.RPC = rpc })
@@ -590,8 +590,8 @@ func TestSubscriptionHeldRenewalGetsNoChallenge(t *testing.T) {
 	h.advance(25 * time.Hour)
 	held = true
 	result, err := h.subscribe("tia", "")
-	assert.ErrorContains(t, err, "was not credited to the recipient")
-	assert.Nil(t, result, "a broadcast renewal gets no Challenge")
+	require.NoError(t, err)
+	assert.False(t, result.IsChallenge(), "a held renewal is paid, not offered a new Challenge")
 	assert.Len(t, *sent, 2)
 }
 

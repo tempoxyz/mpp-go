@@ -143,6 +143,13 @@ type SubscriptionConfig struct {
 	// OnActivated and OnRenewed run after a subscription is activated or renewed.
 	OnActivated func(context.Context, SubscriptionResult)
 	OnRenewed   func(context.Context, int64, SubscriptionResult)
+	// OnPaymentHeld runs, after OnActivated or OnRenewed, for an activation
+	// (period 0) or period whose automatic payment was included but did not
+	// credit the recipient, such as a transfer a receive policy (TIP-1028)
+	// holds. The payer's funds left their account, so it is committed as
+	// paid with the transaction hash as its Reference and Held set, and is
+	// not billed again; the operator recovers the funds from the guard.
+	OnPaymentHeld func(context.Context, int64, SubscriptionResult)
 	// RequireCredential requires a fresh Credential even while a
 	// subscription is active, binding reuse to the stored payer.
 	RequireCredential bool
@@ -761,6 +768,15 @@ func (s *Subscription) activated(ctx context.Context, result SubscriptionResult)
 	if s.config.OnActivated != nil {
 		s.config.OnActivated(ctx, result)
 	}
+	s.paymentHeld(ctx, 0, result)
+}
+
+// paymentHeld reports a committed activation (period 0) or period whose
+// payment was held to OnPaymentHeld, once, after OnActivated or OnRenewed.
+func (s *Subscription) paymentHeld(ctx context.Context, periodIndex int64, result SubscriptionResult) {
+	if result.Subscription.Held && s.config.OnPaymentHeld != nil {
+		s.config.OnPaymentHeld(ctx, periodIndex, result)
+	}
 }
 
 // renewed reports a renewed period to OnRenewed. Each paid period reaches
@@ -769,6 +785,7 @@ func (s *Subscription) renewed(ctx context.Context, periodIndex int64, result Su
 	if s.config.OnRenewed != nil {
 		s.config.OnRenewed(ctx, periodIndex, result)
 	}
+	s.paymentHeld(ctx, periodIndex, result)
 }
 
 // checkAccessKey rejects a Credential whose access key is not one the
@@ -884,7 +901,10 @@ func (s *Subscription) activateSubscription(
 			return s.config.Store.recordActivationPayment(ctx, lookup.Key, credential.Challenge.ID, payment, pending)
 		},
 	})
-	if err != nil {
+	if hash, held := heldPayment(err); held {
+		reference = hash
+		record.Held = true
+	} else if err != nil {
 		return nil, err
 	}
 	record.Reference = reference
@@ -923,9 +943,13 @@ func (s *Subscription) renewalHandler(subscription SubscriptionRecord) renewalFu
 				return s.config.Store.recordRenewalPayment(ctx, record.SubscriptionID, params.PeriodIndex, record.InFlightAttempt, payment)
 			},
 		})
-		if err != nil {
+		hash, held := heldPayment(err)
+		if held {
+			reference = hash
+		} else if err != nil {
 			return nil, err
 		}
+		record.Held = held
 		record.LastChargedPeriod = params.PeriodIndex
 		record.Reference = reference
 		record.Timestamp = formatTimestamp(s.now())
@@ -1174,9 +1198,13 @@ func (s *Subscription) submitPayment(ctx context.Context, params paymentParams) 
 	}
 	rpc, stored, pending := signed.rpc, signed.stored, signed.pending
 	reference, err := s.broadcastPayment(ctx, rpc, pending)
-	if err != nil {
+	// A held payment still installed the key and moved the payer's funds:
+	// retain the key as for a credited one, then report it held.
+	_, held := heldPayment(err)
+	if err != nil && !held {
 		return "", err
 	}
+	paid := err
 	// Only an activation makes the key the lookup key's: a renewal of an
 	// older subscription must not undo a rotation to a fresh key.
 	if params.keyAuthorization != "" {
@@ -1187,7 +1215,7 @@ func (s *Subscription) submitPayment(ctx context.Context, params paymentParams) 
 	if err != nil {
 		return "", subscriptionPaymentUnknown(pending, err)
 	}
-	return reference, nil
+	return reference, paid
 }
 
 // signedPayment is a payment signed and recorded, ready to broadcast.
@@ -1322,6 +1350,27 @@ var errSubscriptionPaymentFailed = errors.New("tempo server: subscription paymen
 // billed again on its own. mppx frees the period instead, which would charge
 // the payer twice.
 var errSubscriptionPaymentHeld = errors.New("tempo server: subscription payment was held")
+
+// subscriptionHeldError reports a held payment (errSubscriptionPaymentHeld)
+// with its transaction hash. The payer's funds left their account, so the
+// activation or period it paid is committed as paid with hash as its
+// Reference and marked Held, never billed again.
+type subscriptionHeldError struct {
+	hash string
+	err  error
+}
+
+func (e *subscriptionHeldError) Error() string { return e.err.Error() }
+func (e *subscriptionHeldError) Unwrap() error { return e.err }
+
+// heldPayment returns the transaction hash of a held payment err reports.
+func heldPayment(err error) (string, bool) {
+	var held *subscriptionHeldError
+	if errors.As(err, &held) {
+		return held.hash, true
+	}
+	return "", false
+}
 
 func subscriptionPaymentUnknown(pending SubscriptionPendingPayment, cause error) error {
 	unknown := mpp.ErrPaymentOutcomeUnknown(pending.Hash)
@@ -1547,7 +1596,8 @@ func (s *Subscription) expiredPayment(ctx context.Context, rpc tempo.RPCClient, 
 // checkPaymentReceipt returns the hash of an included payment that credited
 // the recipient.
 // A reverted payment failed; a successful one that credited someone else
-// (held) keeps its period locked, as does an unreadable status.
+// returns a *subscriptionHeldError with its hash, and an unreadable status
+// keeps its period locked.
 func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, receipt map[string]any) (string, error) {
 	switch asString(receipt["status"]) {
 	case "0x1":
@@ -1560,10 +1610,6 @@ func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, r
 	if !ok {
 		return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription amount is invalid"), nil)
 	}
-	if !receiptCredits(receipt, common.HexToAddress(pending.Currency), common.HexToAddress(pending.Recipient), amount, pending.Memo) {
-		held := mpp.ErrVerificationFailed(fmt.Sprintf("subscription transfer was not credited to the recipient (funds may have been held by a receive policy): %s; the period stays locked and is not billed again", pending.Hash))
-		return "", held.WithCause(errSubscriptionPaymentHeld)
-	}
 	hash := asString(receipt["transactionHash"])
 	if hash == "" {
 		hash = asString(receipt["hash"])
@@ -1571,7 +1617,12 @@ func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, r
 	if hash == "" {
 		hash = pending.Hash
 	}
-	return strings.ToLower(hash), nil
+	hash = strings.ToLower(hash)
+	if !receiptCredits(receipt, common.HexToAddress(pending.Currency), common.HexToAddress(pending.Recipient), amount, pending.Memo) {
+		held := mpp.ErrVerificationFailed(fmt.Sprintf("subscription transfer was not credited to the recipient (funds may have been held by a receive policy): %s; the period is recorded as paid and is not billed again", hash))
+		return "", &subscriptionHeldError{hash: hash, err: held.WithCause(errSubscriptionPaymentHeld)}
+	}
+	return hash, nil
 }
 
 // resolvePayment finds the outcome of a payment an earlier attempt left
@@ -1580,8 +1631,9 @@ func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, r
 // errSubscriptionPaymentFailed only on proof the payment did not move the
 // payer's funds (a revert, or expiry proven by expiredPayment, including a
 // nonce another transaction used with no receipt for this one through the
-// grace period); a held transfer, read errors and refusals keep the period
-// locked.
+// grace period); read errors and refusals keep the period locked, and a
+// held transfer returns a *subscriptionHeldError, which the store commits
+// as paid.
 func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionPendingPayment, record SubscriptionRecord, activation bool) (string, error) {
 	rpc, err := s.resolveRPC(pending.ChainID)
 	if err != nil {
@@ -1610,9 +1662,12 @@ func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionP
 	} else {
 		reference, err = s.rebroadcastPayment(ctx, rpc, pending)
 	}
-	if err != nil {
+	// A held payment is retained as a credited one, then reported held.
+	_, held := heldPayment(err)
+	if err != nil && !held {
 		return "", err
 	}
+	paid := err
 	if record.AccessKey != nil {
 		stored, err := s.config.Store.GetAccessKeyByAddress(ctx, record.AccessKey.AccessKeyAddress, record.AccessKey.KeyToken)
 		if err == nil && stored != nil {
@@ -1626,7 +1681,7 @@ func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionP
 			return "", subscriptionPaymentUnknown(pending, err)
 		}
 	}
-	return reference, nil
+	return reference, paid
 }
 
 func (s *Subscription) resolveRPC(chainID int64) (tempo.RPCClient, error) {

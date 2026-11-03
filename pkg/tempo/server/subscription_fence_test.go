@@ -114,32 +114,50 @@ func TestSubscriptionStoreReportsRecoveredRenewal(t *testing.T) {
 	assert.Equal(t, []int64{1}, recovered, "the recovered period is reported once")
 }
 
-func TestSubscriptionHeldActivationKeepsLock(t *testing.T) {
+func TestSubscriptionHeldActivationIsCommittedAsPaid(t *testing.T) {
 	held := true
 	rpc, sent := subscriptionChain(t, &held)
-	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) { config.RPC = rpc })
+	var reported []int64
+	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) {
+		config.RPC = rpc
+		config.OnPaymentHeld = func(_ context.Context, period int64, result SubscriptionResult) {
+			reported = append(reported, period)
+			assert.True(t, result.Subscription.Held)
+		}
+	})
 	_, authorization := h.pay("kai", subscriptionPayerKey)
-	_, err := h.subscribe("kai", authorization)
-	require.ErrorContains(t, err, "is not billed again")
+	result, err := h.subscribe("kai", authorization)
+	require.NoError(t, err, "a held activation is paid: the payer's funds left their account")
 	require.Len(t, *sent, 1)
+	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[0])), result.Receipt.Reference)
+	assert.Equal(t, []int64{0}, reported, "the held activation is reported once")
 
-	// A new Credential finds the held payment and pays nothing.
-	held = false
-	_, authorization = h.pay("kai", subscriptionPayerKey)
-	_, err = h.subscribe("kai", authorization)
-	require.ErrorContains(t, err, "was not credited to the recipient")
-	assert.Len(t, *sent, 1, "a held activation is not paid again")
+	record, err := h.store.GetByKey(context.Background(), "user:kai")
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.True(t, record.Held)
+	assert.Equal(t, result.Receipt.Reference, record.Reference)
 	marker, _, err := getJSON[activationMarker](context.Background(), h.store.store, h.store.activationKey("user:kai"))
 	require.NoError(t, err)
-	require.NotNil(t, marker)
-	assert.NotNil(t, marker.Payment, "the lock keeps the held payment")
+	assert.Nil(t, marker, "the activation lock is released")
+
+	// Later requests reuse it without paying again.
+	held = false
+	reused, err := h.subscribe("kai", "")
+	require.NoError(t, err)
+	assert.False(t, reused.IsChallenge())
+	assert.Len(t, *sent, 1, "a held activation is not paid again")
 }
 
-func TestSubscriptionHeldRenewalKeepsPeriodLocked(t *testing.T) {
+func TestSubscriptionHeldRenewalIsCommittedAsPaid(t *testing.T) {
 	ctx := context.Background()
 	held := false
 	rpc, sent := subscriptionChain(t, &held)
-	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) { config.RPC = rpc })
+	var reported []int64
+	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) {
+		config.RPC = rpc
+		config.OnPaymentHeld = func(_ context.Context, period int64, _ SubscriptionResult) { reported = append(reported, period) }
+	})
 	_, authorization := h.pay("lex", subscriptionPayerKey)
 	activated, err := h.subscribe("lex", authorization)
 	require.NoError(t, err)
@@ -147,16 +165,30 @@ func TestSubscriptionHeldRenewalKeepsPeriodLocked(t *testing.T) {
 
 	h.advance(25 * time.Hour)
 	held = true
-	_, err = h.sub.Renew(ctx, id)
-	require.ErrorContains(t, err, "was not credited to the recipient")
-	held = false
-	_, err = h.sub.Renew(ctx, id)
-	require.ErrorContains(t, err, "was not credited to the recipient")
+	renewed, err := h.sub.Renew(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, renewed)
+	assert.True(t, renewed.Subscription.Held)
+	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[1])), renewed.Receipt.Reference)
+	again, err := h.sub.Renew(ctx, id)
+	require.NoError(t, err)
+	assert.Nil(t, again, "the held period counts as paid")
 	assert.Len(t, *sent, 2, "a held renewal is not billed again")
+	assert.Equal(t, []int64{1}, reported)
 	record, err := h.store.Get(ctx, id)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), record.LastChargedPeriod)
-	assert.NotNil(t, record.InFlightPayment)
+	assert.Equal(t, int64(1), record.LastChargedPeriod)
+	assert.Nil(t, record.InFlightPayment)
+	assert.True(t, record.Held)
+
+	// The next period that credits the recipient clears Held.
+	h.advance(24 * time.Hour)
+	held = false
+	renewed, err = h.sub.Renew(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, renewed)
+	assert.False(t, renewed.Subscription.Held)
+	assert.Equal(t, []int64{1}, reported)
 }
 
 func TestSubscriptionExpiryProofReadsNonceAtObservedBlock(t *testing.T) {
@@ -349,7 +381,7 @@ func TestSubscriptionStoreReleasesUnpaidClaims(t *testing.T) {
 func TestSubscriptionStoreClaimsExpireWithChallenge(t *testing.T) {
 	ctx := context.Background()
 	server := miniredis.RunT(t)
-	store, err := NewSubscriptionStore(tempo.NewRedisStore(redis.NewClient(&redis.Options{Addr: server.Addr()}), 0), SubscriptionStoreOptions{})
+	store, err := NewSubscriptionStore(tempo.NewRedisStore(redis.NewClient(&redis.Options{Addr: server.Addr()}), 0), SubscriptionStoreOptions{ExpireCredentialClaims: true})
 	require.NoError(t, err)
 	status, _, _, err := store.activate(ctx, "challenge-1", "user:x", nil, func() (*SubscriptionResult, error) {
 		return &SubscriptionResult{Subscription: SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_1"}}, nil

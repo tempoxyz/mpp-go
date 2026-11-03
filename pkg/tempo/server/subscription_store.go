@@ -28,13 +28,18 @@ type SubscriptionPayer struct {
 
 // SubscriptionRecord is a persisted Tempo subscription, as mppx stores it.
 type SubscriptionRecord struct {
-	AccessKey           *tempo.SubscriptionAccessKey `json:"accessKey,omitempty"`
-	Amount              string                       `json:"amount"`
-	BillingAnchor       string                       `json:"billingAnchor"`
-	CanceledAt          string                       `json:"canceledAt,omitempty"`
-	ChainID             *int64                       `json:"chainId,omitempty"`
-	Currency            string                       `json:"currency"`
-	ExternalID          string                       `json:"externalId,omitempty"`
+	AccessKey     *tempo.SubscriptionAccessKey `json:"accessKey,omitempty"`
+	Amount        string                       `json:"amount"`
+	BillingAnchor string                       `json:"billingAnchor"`
+	CanceledAt    string                       `json:"canceledAt,omitempty"`
+	ChainID       *int64                       `json:"chainId,omitempty"`
+	Currency      string                       `json:"currency"`
+	ExternalID    string                       `json:"externalId,omitempty"`
+	// Held is set when the payment of Reference was included but did not
+	// credit the recipient, as a transfer a receive policy (TIP-1028) holds:
+	// the payer's funds went to the policy's guard, so the activation or
+	// period counts as paid and is not billed again.
+	Held                bool                         `json:"held,omitempty"`
 	InFlightAttempt     string                       `json:"inFlightAttempt,omitempty"`
 	InFlightPayment     *SubscriptionPendingPayment  `json:"inFlightPayment,omitempty"`
 	InFlightPeriod      *int64                       `json:"inFlightPeriod,omitempty"`
@@ -130,6 +135,13 @@ type SubscriptionStoreOptions struct {
 	// RenewalTimeout is how long a renewal lock lasts before another attempt
 	// may replace it. Zero is 15 minutes; negative never expires.
 	RenewalTimeout time.Duration
+	// ExpireCredentialClaims lets a Challenge's activation claim expire once
+	// the Challenge can no longer be verified, as the charge intent's
+	// ExpireReplayKeys does for replay keys. It requires a store that
+	// implements tempo.ExpiringStore; RedisStore's PutIfAbsentUntil needs
+	// Redis 6.2 or later (SET NX EXAT). Otherwise claims are kept until
+	// released.
+	ExpireCredentialClaims bool
 }
 
 // SubscriptionStore persists Tempo subscriptions, their server-owned access
@@ -140,17 +152,21 @@ type SubscriptionStore struct {
 	prefix            string
 	activationTimeout time.Duration
 	renewalTimeout    time.Duration
+	expireClaims      bool
 	now               func() time.Time
 }
 
 // NewSubscriptionStore wraps store for subscriptions. It writes every value
 // with CompareAndSwap, whose values never expire, so a RedisStore with a TTL
-// works too. The one exception is a Challenge's activation claim: on a
-// tempo.ExpiringStore it lasts only until the Challenge can no longer be
-// verified, and it is released when its attempt paid nothing.
+// works too. The one exception is a Challenge's activation claim: with
+// ExpireCredentialClaims it lasts only until the Challenge can no longer be
+// verified. A claim is released when its attempt paid nothing.
 func NewSubscriptionStore(store tempo.AtomicStore, options SubscriptionStoreOptions) (*SubscriptionStore, error) {
 	if store == nil {
 		return nil, errors.New("tempo server: subscription store requires an AtomicStore")
+	}
+	if _, ok := store.(tempo.ExpiringStore); options.ExpireCredentialClaims && !ok {
+		return nil, errors.New("tempo server: ExpireCredentialClaims requires a store that implements tempo.ExpiringStore")
 	}
 	activation := options.ActivationTimeout
 	if activation == 0 {
@@ -165,6 +181,7 @@ func NewSubscriptionStore(store tempo.AtomicStore, options SubscriptionStoreOpti
 		prefix:            options.KeyPrefix,
 		activationTimeout: activation,
 		renewalTimeout:    renewal,
+		expireClaims:      options.ExpireCredentialClaims,
 		now:               time.Now,
 	}, nil
 }
@@ -483,8 +500,8 @@ type activationMarker struct {
 
 // activationHooks are the optional parts of SubscriptionStore.activate.
 type activationHooks struct {
-	// claimUntil, when set, is when the Challenge's claim may expire on a
-	// tempo.ExpiringStore: past it no Credential for the Challenge verifies.
+	// claimUntil, when set, is when the Challenge's claim may expire with
+	// ExpireCredentialClaims: past it no Credential for the Challenge verifies.
 	claimUntil time.Time
 	// resolve resolves a payment an earlier attempt left pending.
 	resolve pendingResolver
@@ -566,10 +583,16 @@ func (s *SubscriptionStore) activate(
 				return unclaim(0, errors.New("tempo server: subscription activation has a pending payment and no resolver"))
 			}
 			reference, err := hooks.resolve(*resumed.Payment, *resumed.Subscription)
+			hash, held := heldPayment(err)
 			switch {
-			case err == nil:
+			case err == nil, held:
+				// A held payment moved the payer's funds too: it is
+				// committed as paid, never paid again.
 				record := *resumed.Subscription
-				record.Reference = reference
+				record.Reference, record.Held = reference, held
+				if held {
+					record.Reference = hash
+				}
 				recovered = &SubscriptionResult{Receipt: subscriptionReceipt(record), Subscription: record}
 			case errors.Is(err, errSubscriptionPaymentFailed):
 				if _, err := s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
@@ -615,12 +638,12 @@ func (s *SubscriptionStore) activate(
 	return unclaim(activationInFlight, nil)
 }
 
-// claimCredential claims a Challenge once. On a tempo.ExpiringStore, with
+// claimCredential claims a Challenge once. With ExpireCredentialClaims and
 // until set, the claim lasts until then, when the Challenge can no longer be
 // verified; otherwise it is kept until released.
 func (s *SubscriptionStore) claimCredential(ctx context.Context, challengeID string, until time.Time) (bool, error) {
 	claim, _ := json.Marshal(map[string]string{"claimedAt": s.timestamp()})
-	if expiring, ok := s.store.(tempo.ExpiringStore); ok && !until.IsZero() {
+	if expiring, ok := s.store.(tempo.ExpiringStore); ok && s.expireClaims && !until.IsZero() {
 		return expiring.PutIfAbsentUntil(ctx, s.credentialKey(challengeID), string(claim), until)
 	}
 	return s.store.CompareAndSwap(ctx, s.credentialKey(challengeID), nil, string(claim))
@@ -684,9 +707,7 @@ func (s *SubscriptionStore) commitActivation(ctx context.Context, challengeID st
 	if err != nil {
 		return fail(err)
 	}
-	// Create the record only once: an earlier attempt that created it may
-	// have renewed it since.
-	if _, err := s.store.CompareAndSwap(ctx, s.recordKey(id), nil, string(encoded)); err != nil {
+	if err := s.createActivationRecord(ctx, subscription, string(encoded)); err != nil {
 		return fail(err)
 	}
 	for tries := 0; ; tries++ {
@@ -733,6 +754,54 @@ func (s *SubscriptionStore) commitActivation(ctx context.Context, challengeID st
 		return activationClaimMismatch, nil, nil, nil
 	}
 	return activationActivated, result, nil, nil
+}
+
+// createActivationRecord stores a settled activation's record, encoded,
+// without ever dropping it or overwriting live state. A record already under
+// its ID is kept when it is this same activation's (same BillingAnchor, and
+// the same Reference or renewed since), which an earlier attempt of this
+// commit created and may have renewed since. Another activation's record,
+// such as one a custom Activate that returns a deterministic SubscriptionID
+// left, is replaced by compare-and-swap on what was read when it has ended
+// (canceled, revoked or expired) or belongs to the same lookup key, whose
+// current subscription this activation replaces anyway, and only while no
+// renewal is in flight on it. Anything else is an error, so the settled
+// record stays in the activation marker for a later attempt to commit.
+func (s *SubscriptionStore) createActivationRecord(ctx context.Context, subscription SubscriptionRecord, encoded string) error {
+	key := s.recordKey(subscription.SubscriptionID)
+	for range subscriptionStoreMaxAttempts {
+		existing, raw, err := getJSON[SubscriptionRecord](ctx, s.store, key)
+		if err != nil {
+			return err
+		}
+		var old *string
+		if existing != nil {
+			if existing.BillingAnchor == subscription.BillingAnchor &&
+				(existing.Reference == subscription.Reference || existing.LastChargedPeriod > subscription.LastChargedPeriod) {
+				return nil
+			}
+			if existing.InFlightPeriod != nil || existing.InFlightPayment != nil ||
+				!s.recordEnded(*existing) && existing.LookupKey != subscription.LookupKey {
+				return fmt.Errorf("tempo server: subscription %s already holds another activation; the settled activation is kept for a later attempt", subscription.SubscriptionID)
+			}
+			old = &raw
+		}
+		swapped, err := s.store.CompareAndSwap(ctx, key, old, encoded)
+		if err != nil || swapped {
+			return err
+		}
+	}
+	return errSubscriptionStoreContention
+}
+
+// recordEnded reports whether a subscription no longer bills: it was
+// canceled or revoked, or it expired.
+func (s *SubscriptionStore) recordEnded(record SubscriptionRecord) bool {
+	if record.CanceledAt != "" || record.RevokedAt != "" {
+		return true
+	}
+	expires, err := time.Parse(time.RFC3339Nano, record.SubscriptionExpires)
+	return err == nil && !expires.After(s.now())
 }
 
 // keepSupersededActivation keeps the paid subscription of an attempt that
@@ -1091,11 +1160,17 @@ func (s *SubscriptionStore) renew(
 				return 0, nil, nil, errors.New("tempo server: subscription renewal has a pending payment and no resolver")
 			}
 			reference, err := hooks.resolve(*started.InFlightPayment, started)
+			hash, held := heldPayment(err)
 			switch {
-			case err == nil:
+			case err == nil, held:
+				// A held payment moved the payer's funds too: its period
+				// is committed as paid, never billed again.
 				record := clearRenewalFields(started)
 				record.LastChargedPeriod = period
-				record.Reference = reference
+				record.Reference, record.Held = reference, held
+				if held {
+					record.Reference = hash
+				}
 				record.Timestamp = s.timestamp()
 				status, result, _, err := s.commitRenewal(ctx, id, period, attempt, &SubscriptionResult{Receipt: subscriptionReceipt(record), Subscription: record})
 				if err != nil || status == renewalClaimMismatch {
