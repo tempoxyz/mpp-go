@@ -677,3 +677,18 @@ func TestSubscriptionStoreLookupKeysNeverReachAddressIndex(t *testing.T) {
 	assert.Len(t, keys, 6)
 	assert.Equal(t, "tempo:subscription:access-key:user:x", store.accessKeyKey("user:x"))
 }
+
+func TestSubscriptionStoreDoesNotRenewCanceledSubscription(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSubscriptionStore(tempo.NewMemoryStore(), SubscriptionStoreOptions{})
+	require.NoError(t, err)
+	require.NoError(t, store.Put(ctx, SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_1", CanceledAt: "2026-11-03T00:00:00Z"}))
+	charged := false
+	status, _, _, err := store.renew(ctx, "sub_1", 1, "ref", func(SubscriptionRecord) (*SubscriptionResult, error) {
+		charged = true
+		return nil, errors.New("unexpected charge")
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, renewalMissing, status)
+	assert.False(t, charged, "a canceled subscription is never billed")
+}

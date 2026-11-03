@@ -1126,6 +1126,12 @@ func (s *SubscriptionStore) renew(
 				}
 			}
 			if !resumed {
+				// A subscription canceled or revoked before this claim must
+				// not be billed again; a payment already sent is still
+				// resolved above.
+				if current.CanceledAt != "" || current.RevokedAt != "" {
+					return renewalMissing, nil, nil, nil
+				}
 				period := periodIndex
 				next.InFlightPayment = nil
 				next.InFlightPeriod = &period
