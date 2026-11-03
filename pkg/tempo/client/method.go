@@ -484,8 +484,9 @@ func (m *Method) buildTransfer(
 		builder.AddCall(token, big.NewInt(0), common.FromHex(transferDataHex(transfer)))
 	}
 
+	var validBefore uint64
 	if sponsored {
-		validBefore, err := sponsoredValidBefore(challengeExpires, m.clock())
+		validBefore, err = sponsoredValidBefore(challengeExpires, m.clock())
 		if err != nil {
 			return "", err
 		}
@@ -512,6 +513,16 @@ func (m *Method) buildTransfer(
 			return "", err
 		}
 		tx.KeyAuthorization = authorization
+	}
+	if sponsored {
+		// Preparation (gas and keychain RPCs) is asynchronous: check again
+		// immediately before signing, against both the challenge expiry and
+		// the valid_before fixed before preparation, which the fee payer checks.
+		if err := checkSponsoredSignable(challengeExpires, validBefore, m.clock()); err != nil {
+			return "", err
+		}
+	}
+	if m.accessKey != nil {
 		if err := keychain.SignWithAccessKey(tx, m.signer, m.accessKey.Account); err != nil {
 			return "", fmt.Errorf("tempo client: sign transaction: %w", err)
 		}
@@ -534,6 +545,35 @@ func (m *Method) buildTransfer(
 // now. The client refuses it before signing or broadcasting anything, since a
 // server would reject the sponsored transaction for too little validity.
 var ErrSponsoredChallengeExpiresTooSoon = errors.New("tempo client: sponsored challenge expires too soon")
+
+// ErrSponsoredPreparationTooSlow reports a sponsored (fee-payer) charge
+// transaction whose valid_before has less than
+// tempo.FeePayerMinRemainingValidity left once it is prepared, such as after
+// slow RPCs. The client refuses to sign it, since the fee payer would reject
+// it; request a new challenge and try again.
+var ErrSponsoredPreparationTooSlow = errors.New("tempo client: sponsored transaction preparation took too long")
+
+// checkSponsoredSignable refuses to sign a sponsored transaction once the
+// challenge or the transaction's valid_before has less than
+// tempo.FeePayerMinRemainingValidity left at now, as mppx's pre-sign check
+// does.
+func checkSponsoredSignable(expires string, validBefore uint64, now time.Time) error {
+	if expires != "" {
+		expiry, err := mpp.ParseExpires(expires)
+		if err != nil {
+			return fmt.Errorf("tempo client: invalid challenge expires %q: %w", expires, err)
+		}
+		if remaining := expiry.Sub(now); remaining < tempo.FeePayerMinRemainingValidity {
+			return fmt.Errorf("%w: %s left before %s, need at least %s",
+				ErrSponsoredChallengeExpiresTooSoon, remaining.Truncate(time.Millisecond), expires, tempo.FeePayerMinRemainingValidity)
+		}
+	}
+	if remaining := time.Unix(int64(validBefore), 0).Sub(now); remaining < tempo.FeePayerMinRemainingValidity {
+		return fmt.Errorf("%w: %s of its validity left, need at least %s",
+			ErrSponsoredPreparationTooSlow, remaining.Truncate(time.Millisecond), tempo.FeePayerMinRemainingValidity)
+	}
+	return nil
+}
 
 // CanHandleChallenge skips a sponsored charge challenge that expires too soon
 // to sign, so a transport offered other challenges can pay with one of those
