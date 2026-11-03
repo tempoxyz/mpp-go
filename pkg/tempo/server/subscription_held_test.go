@@ -219,5 +219,5 @@ func (s *SubscriptionStore) startActivationForTest(ctx context.Context, lookupKe
 	if err := s.recordActivationPayment(ctx, lookupKey, challengeID, SubscriptionPendingPayment{Hash: testTxHash(5)}, record); err != nil {
 		return false, err
 	}
-	return true, s.markActivationUnknown(ctx, lookupKey, challengeID, nil)
+	return true, s.markActivationUnknown(ctx, lookupKey, challengeID)
 }

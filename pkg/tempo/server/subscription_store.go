@@ -82,11 +82,6 @@ type SubscriptionPendingPayment struct {
 	// Unknown is set once the attempt that broadcast it ended without
 	// learning its outcome, so the next attempt resolves it at once.
 	Unknown bool `json:"unknown,omitempty"`
-	// NonceSpentAt is when an attempt first found, past the transaction's
-	// valid_before, its nonce used by another transaction and no receipt for
-	// it. A later attempt that still finds no receipt at least
-	// subscriptionNonceReuseGrace after it fails the payment.
-	NonceSpentAt string `json:"nonceSpentAt,omitempty"`
 }
 
 // pendingResolver resolves a pending payment of record: it returns the
@@ -198,11 +193,33 @@ func (s *SubscriptionStore) activationKey(key string) string {
 func (s *SubscriptionStore) credentialKey(challengeID string) string {
 	return s.prefix + defaultSubscriptionCredentialPrefix + challengeID
 }
+
+// Segments under the access key prefix: the address index, and escaped
+// lookup keys (accessKeyKey).
+const (
+	subscriptionAccessKeyAddressSegment = "address:"
+	subscriptionAccessKeyLookupSegment  = "lookup:"
+)
+
+// accessKeyKey is where a lookup key's access key is stored: the access key
+// prefix and the lookup key, as mppx's, except that a lookup key starting
+// with "address:" would land on an address index entry (accessKeyAddressKey)
+// and could overwrite or read another subscriber's key. Such a key, and one
+// starting with "lookup:", is stored under "lookup:" + key instead, so no
+// lookup key reaches the index and no two share a slot. mppx keeps every
+// lookup key as is, so these two kinds alone are not shared with an mppx
+// server on the same store.
 func (s *SubscriptionStore) accessKeyKey(key string) string {
+	if strings.HasPrefix(key, subscriptionAccessKeyAddressSegment) || strings.HasPrefix(key, subscriptionAccessKeyLookupSegment) {
+		key = subscriptionAccessKeyLookupSegment + key
+	}
 	return s.prefix + defaultSubscriptionAccessKeyPrefix + key
 }
+
+// accessKeyAddressKey is the address index entry of the access key with
+// address, as mppx's.
 func (s *SubscriptionStore) accessKeyAddressKey(address string) string {
-	return s.prefix + defaultSubscriptionAccessKeyPrefix + "address:" + strings.ToLower(address)
+	return s.prefix + defaultSubscriptionAccessKeyPrefix + subscriptionAccessKeyAddressSegment + strings.ToLower(address)
 }
 func (s *SubscriptionStore) sealingKeyKey() string {
 	return s.prefix + defaultSubscriptionPendingPrefix + "sealing-key"
@@ -579,7 +596,7 @@ func (s *SubscriptionStore) activate(
 			recovered = &SubscriptionResult{Receipt: subscriptionReceipt(record), Subscription: record}
 		default:
 			if hooks.resolve == nil {
-				_ = s.markActivationUnknown(ctx, lookupKey, challengeID, nil)
+				_ = s.markActivationUnknown(ctx, lookupKey, challengeID)
 				return unclaim(0, errors.New("tempo server: subscription activation has a pending payment and no resolver"))
 			}
 			reference, err := hooks.resolve(*resumed.Payment, *resumed.Subscription)
@@ -606,7 +623,7 @@ func (s *SubscriptionStore) activate(
 					return unclaim(0, err)
 				}
 			default:
-				_ = s.markActivationUnknown(ctx, lookupKey, challengeID, err)
+				_ = s.markActivationUnknown(ctx, lookupKey, challengeID)
 				return unclaim(0, err)
 			}
 		}
@@ -680,7 +697,7 @@ func (s *SubscriptionStore) commitActivation(ctx context.Context, challengeID st
 		// The settled record may not be saved. Keep the lock (with a pending
 		// payment flagged for the next attempt to resolve) rather than
 		// release it and let another attempt pay again.
-		_ = s.markActivationUnknown(ctx, lookupKey, challengeID, nil)
+		_ = s.markActivationUnknown(ctx, lookupKey, challengeID)
 		return 0, nil, nil, err
 	}
 	if !committed {
@@ -911,16 +928,10 @@ func (s *SubscriptionStore) recordActivationPayment(ctx context.Context, lookupK
 // markActivationUnknown keeps challengeID's activation lock for the next
 // attempt to finish at once, without releasing it: a settled record is
 // flagged to commit, and a pending payment to resolve. A lock with neither
-// stays until it goes stale. A cause from resolving the payment that found
-// its nonce spent records when that was first seen (noteNonceSpent).
-func (s *SubscriptionStore) markActivationUnknown(ctx context.Context, lookupKey, challengeID string, cause error) error {
+// stays until it goes stale.
+func (s *SubscriptionStore) markActivationUnknown(ctx context.Context, lookupKey, challengeID string) error {
 	_, err := s.updateActivation(ctx, lookupKey, func(marker *activationMarker) *activationMarker {
-		next := flagActivation(marker, challengeID)
-		if next != nil && next.Payment != nil {
-			payment := noteNonceSpent(*next.Payment, cause)
-			next.Payment = &payment
-		}
-		return next
+		return flagActivation(marker, challengeID)
 	})
 	return err
 }
@@ -956,23 +967,6 @@ func flagActivation(marker *activationMarker, challengeID string) *activationMar
 		return nil
 	}
 	return &next
-}
-
-// noteNonceSpent returns payment with NonceSpentAt set to when cause, an
-// error from resolving it, first found its nonce spent with no receipt. A
-// time already recorded is kept, so the grace period counts from the first
-// observation; an unreadable one is replaced, so it cannot hold the payment
-// unresolved for good.
-func noteNonceSpent(payment SubscriptionPendingPayment, cause error) SubscriptionPendingPayment {
-	var spent *subscriptionNonceSpentError
-	if !errors.As(cause, &spent) || !strings.EqualFold(spent.hash, payment.Hash) {
-		return payment
-	}
-	if _, err := time.Parse(time.RFC3339Nano, payment.NonceSpentAt); err == nil {
-		return payment
-	}
-	payment.NonceSpentAt = formatTimestamp(spent.at)
-	return payment
 }
 
 // updateActivation atomically replaces the activation marker with next(current);
@@ -1156,7 +1150,7 @@ func (s *SubscriptionStore) renew(
 		if resumed {
 			period := *started.InFlightPeriod
 			if hooks.resolve == nil {
-				_ = s.markRenewalUnknown(ctx, id, period, attempt, nil)
+				_ = s.markRenewalUnknown(ctx, id, period, attempt)
 				return 0, nil, nil, errors.New("tempo server: subscription renewal has a pending payment and no resolver")
 			}
 			reference, err := hooks.resolve(*started.InFlightPayment, started)
@@ -1194,7 +1188,7 @@ func (s *SubscriptionStore) renew(
 					return 0, nil, nil, err
 				}
 			default:
-				_ = s.markRenewalUnknown(ctx, id, period, attempt, err)
+				_ = s.markRenewalUnknown(ctx, id, period, attempt)
 				return 0, nil, nil, err
 			}
 			continue
@@ -1294,13 +1288,11 @@ func (s *SubscriptionStore) recordRenewalPayment(ctx context.Context, id string,
 }
 
 // markRenewalUnknown flags attempt's pending renewal payment as unknown, so
-// the next attempt resolves it without waiting for the lock to go stale. A
-// cause from resolving the payment that found its nonce spent records when
-// that was first seen (noteNonceSpent).
-func (s *SubscriptionStore) markRenewalUnknown(ctx context.Context, id string, periodIndex int64, attempt string, cause error) error {
+// the next attempt resolves it without waiting for the lock to go stale.
+func (s *SubscriptionStore) markRenewalUnknown(ctx context.Context, id string, periodIndex int64, attempt string) error {
 	_, err := s.updateRenewal(ctx, id, periodIndex, attempt, func(record *SubscriptionRecord) {
 		if record.InFlightPayment != nil {
-			payment := noteNonceSpent(*record.InFlightPayment, cause)
+			payment := *record.InFlightPayment
 			payment.Unknown = true
 			record.InFlightPayment = &payment
 		}

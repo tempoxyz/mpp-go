@@ -215,7 +215,7 @@ func TestSubscriptionExpiryProofReadsNonceAtObservedBlock(t *testing.T) {
 		nonce string
 		err   error
 	}{
-		{name: "nonce used at that block", nonce: "0x8"},
+		{name: "nonce used at every block back to genesis", nonce: "0x8"},
 		{name: "block not reached by the node", err: errors.New("header not found")},
 		{name: "nonce below the payment's", nonce: "0x6"},
 	} {
@@ -230,7 +230,18 @@ func TestSubscriptionExpiryProofReadsNonceAtObservedBlock(t *testing.T) {
 		_, err := h.sub.Renew(ctx, id)
 		require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown, answer.name)
 		requireRenewalLocked(t, h, rpc, id)
-		assert.Equal(t, []string{"0x2a"}, blocks, "%s: the nonce is read at the observed block", answer.name)
+		require.NotEmpty(t, blocks)
+		assert.Equal(t, "0x2a", blocks[0], "%s: the nonce is read at the observed block", answer.name)
+		if answer.nonce == "0x8" {
+			// The search for the block that used it reads only numbered
+			// blocks below it, and finds none.
+			for _, block := range blocks[1:] {
+				assert.Regexp(t, "^0x[0-9a-f]+$", block)
+			}
+			assert.Equal(t, "0x0", blocks[len(blocks)-1])
+		} else {
+			assert.Len(t, blocks, 1, answer.name)
+		}
 	}
 }
 
@@ -450,12 +461,28 @@ func TestSubscriptionCustomActivationIsNotRenewedAutomatically(t *testing.T) {
 	assert.True(t, served.IsChallenge())
 }
 
+// nonceUsedBlock is the block nonceSpentRenewal's chain used the pending
+// renewal's nonce in, below its latest block, nonceSpentLatest.
+const (
+	nonceSpentLatest = 1000
+	nonceUsedBlock   = 977
+)
+
+// nonceSpentChain is the chain nonceSpentRenewal leaves: hidden hides the
+// pending payment's receipt, searchDown fails the nonce and block reads
+// below the latest block, and blockReads counts reads of numbered blocks.
+type nonceSpentChain struct {
+	hidden, searchDown atomic.Bool
+	blockReads         atomic.Int64
+}
+
 // nonceSpentRenewal leaves the first renewal of a new subscription pending
-// past its valid_before, with its nonce used at the latest block and no
-// receipt for it on the node, while hidden is set. credit restores the
-// node's broadcast, which accepts and credits a transaction once landed is
-// set.
-func nonceSpentRenewal(t *testing.T, user string, landed bool) (h *subscriptionHarness, rpc *mockRPC, id string, hidden, landedFlag *atomic.Bool, credit func(string) (string, map[string]any, error)) {
+// past its valid_before, its nonce used in block nonceUsedBlock. That block
+// lists the pending payment when landed (with its receipt on the node while
+// chain.hidden is unset), and otherwise only another transaction. credit
+// restores the node's broadcast, which accepts and credits a transaction
+// once landedFlag is set.
+func nonceSpentRenewal(t *testing.T, user string, landed bool) (h *subscriptionHarness, rpc *mockRPC, id string, chain *nonceSpentChain, landedFlag *atomic.Bool, credit func(string) (string, map[string]any, error)) {
 	t.Helper()
 	h, rpc, id, landedFlag, down := renewalLeftUnknown(t, user, landed)
 	down.Store(false)
@@ -463,10 +490,10 @@ func nonceSpentRenewal(t *testing.T, user string, landed bool) (h *subscriptionH
 	pendingHash := mustTxHash(rpc.sentRawTxs[1])
 	tx, err := tempotx.Deserialize(rpc.sentRawTxs[1])
 	require.NoError(t, err)
-	hidden = &atomic.Bool{}
-	hidden.Store(true)
+	chain = &nonceSpentChain{}
+	chain.hidden.Store(true)
 	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
-		if hidden.Load() && hash == pendingHash {
+		if chain.hidden.Load() && hash == pendingHash {
 			return &temporpc.JSONRPCResponse{Result: nil}, nil
 		}
 		return &temporpc.JSONRPCResponse{Result: rpc.receipts[hash]}, nil
@@ -474,71 +501,79 @@ func nonceSpentRenewal(t *testing.T, user string, landed bool) (h *subscriptionH
 	rpc.onSend = func(string) (string, map[string]any, error) {
 		return "", nil, &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"}
 	}
-	rpc.blockNumber = 42
+	rpc.blockNumber = nonceSpentLatest
 	rpc.nonceAt = func(_, block string) (*temporpc.JSONRPCResponse, error) {
-		return &temporpc.JSONRPCResponse{Result: hexutil.EncodeUint64(tx.Nonce + 1)}, nil
+		number, err := hexutil.DecodeUint64(block)
+		if err != nil {
+			// "pending", for a new payment's nonce.
+			return &temporpc.JSONRPCResponse{Result: hexutil.EncodeUint64(tx.Nonce + 1)}, nil
+		}
+		if number < nonceSpentLatest && chain.searchDown.Load() {
+			return nil, errors.New("missing trie node")
+		}
+		nonce := tx.Nonce
+		if number >= nonceUsedBlock {
+			nonce++
+		}
+		return &temporpc.JSONRPCResponse{Result: hexutil.EncodeUint64(nonce)}, nil
+	}
+	rpc.blockAt = func(number uint64) (*temporpc.JSONRPCResponse, error) {
+		chain.blockReads.Add(1)
+		if chain.searchDown.Load() {
+			return nil, errors.New("block unavailable")
+		}
+		transactions := []any{testTxHash(9)}
+		if number == nonceUsedBlock && landed {
+			transactions = append(transactions, pendingHash)
+		}
+		return &temporpc.JSONRPCResponse{Result: map[string]any{"number": hexutil.EncodeUint64(number), "transactions": transactions}}, nil
 	}
 	h.advance(subscriptionValidBeforeWindow + time.Second)
-	return h, rpc, id, hidden, landedFlag, credit
+	return h, rpc, id, chain, landedFlag, credit
 }
 
-func TestSubscriptionRenewalFailsReusedNonceAfterGrace(t *testing.T) {
+func TestSubscriptionRenewalFailsNonceTakenByAnotherTransaction(t *testing.T) {
 	ctx := context.Background()
-	h, rpc, id, _, landed, credit := nonceSpentRenewal(t, "noa", false)
+	h, rpc, id, chain, landed, credit := nonceSpentRenewal(t, "noa", false)
 
-	// The first attempt to see the nonce used records when, and keeps the
-	// period locked: a lagging replica may be hiding the receipt.
-	_, err := h.sub.Renew(ctx, id)
-	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-	requireRenewalLocked(t, h, rpc, id)
-	record, err := h.store.Get(ctx, id)
-	require.NoError(t, err)
-	first := record.InFlightPayment.NonceSpentAt
-	require.Equal(t, formatTimestamp(h.clock()), first)
-
-	// Within the grace period it stays unknown, counted from the first
-	// observation.
-	h.advance(subscriptionNonceReuseGrace - time.Second)
-	_, err = h.sub.Renew(ctx, id)
-	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-	requireRenewalLocked(t, h, rpc, id)
-	record, err = h.store.Get(ctx, id)
-	require.NoError(t, err)
-	assert.Equal(t, first, record.InFlightPayment.NonceSpentAt, "the first observation is kept")
-
-	// Still no receipt past the grace period: the payment failed and the
-	// period is billed afresh.
-	h.advance(time.Second)
-	rpc.nonceAt = nil
+	// The block that used the payment's nonce does not list it: another
+	// transaction took the nonce, so the payment failed and the period is
+	// billed afresh in the same attempt.
 	landed.Store(true)
 	rpc.onSend = credit
 	sentBefore := len(rpc.sentRawTxs)
 	renewed, err := h.sub.Renew(ctx, id)
 	require.NoError(t, err)
 	require.NotNil(t, renewed)
+	assert.Equal(t, int64(1), chain.blockReads.Load(), "only the block that used the nonce is read")
 	require.Len(t, rpc.sentRawTxs, sentBefore+1)
 	rebilled := rpc.sentRawTxs[len(rpc.sentRawTxs)-1]
 	assert.NotEqual(t, rpc.sentRawTxs[1], rebilled)
 	assert.Equal(t, strings.ToLower(mustTxHash(rebilled)), renewed.Receipt.Reference)
-	record, err = h.store.Get(ctx, id)
+	record, err := h.store.Get(ctx, id)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), record.LastChargedPeriod)
 	assert.Nil(t, record.InFlightPayment)
 }
 
-func TestSubscriptionRenewalReceiptDuringNonceGraceSettles(t *testing.T) {
+func TestSubscriptionRenewalPrunedReceiptOfIncludedPaymentKeepsLock(t *testing.T) {
 	ctx := context.Background()
-	h, rpc, id, hidden, _, _ := nonceSpentRenewal(t, "ora", true)
+	h, rpc, id, chain, _, _ := nonceSpentRenewal(t, "ora", true)
 	landedHash := mustTxHash(rpc.sentRawTxs[1])
 
-	_, err := h.sub.Renew(ctx, id)
-	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-	requireRenewalLocked(t, h, rpc, id)
+	// The block that used the nonce lists the payment but its receipt is
+	// gone (pruned, or a lagging replica): it landed, so it never fails and
+	// the period is never billed again, however long that lasts.
+	for range 2 {
+		_, err := h.sub.Renew(ctx, id)
+		require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+		require.NotErrorIs(t, err, errSubscriptionPaymentFailed)
+		requireRenewalLocked(t, h, rpc, id)
+		h.advance(time.Hour)
+	}
 
-	// The receipt shows up before the grace period ends: the landed
-	// payment settles the period, which is not billed again.
-	h.advance(subscriptionNonceReuseGrace / 2)
-	hidden.Store(false)
+	// Once its receipt reads again, the landed payment settles the period.
+	chain.hidden.Store(false)
 	renewed, err := h.sub.Renew(ctx, id)
 	require.NoError(t, err)
 	require.NotNil(t, renewed)
@@ -546,50 +581,99 @@ func TestSubscriptionRenewalReceiptDuringNonceGraceSettles(t *testing.T) {
 	for _, raw := range rpc.sentRawTxs[2:] {
 		assert.Equal(t, rpc.sentRawTxs[1], raw, "the period is not billed again")
 	}
-
-	// Even past the grace period, a found receipt settles the payment.
-	h2, rpc2, id2, hidden2, _, _ := nonceSpentRenewal(t, "pax", true)
-	_, err = h2.sub.Renew(ctx, id2)
-	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-	h2.advance(2 * subscriptionNonceReuseGrace)
-	hidden2.Store(false)
-	renewed, err = h2.sub.Renew(ctx, id2)
-	require.NoError(t, err)
-	require.NotNil(t, renewed)
-	assert.Equal(t, strings.ToLower(mustTxHash(rpc2.sentRawTxs[1])), renewed.Receipt.Reference)
-	for _, raw := range rpc2.sentRawTxs[2:] {
-		assert.Equal(t, rpc2.sentRawTxs[1], raw, "the period is not billed again")
-	}
 }
 
-func TestSubscriptionStoreRecordsFirstNonceSpentOnActivation(t *testing.T) {
+func TestSubscriptionRenewalNonceSearchErrorIsUnknown(t *testing.T) {
+	ctx := context.Background()
+	h, rpc, id, chain, landed, credit := nonceSpentRenewal(t, "pax", false)
+
+	// The nonce is past the payment's at the latest block, but the blocks
+	// below it cannot be read: that proves nothing, so the period stays
+	// locked.
+	chain.searchDown.Store(true)
+	_, err := h.sub.Renew(ctx, id)
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	require.NotErrorIs(t, err, errSubscriptionPaymentFailed)
+	requireRenewalLocked(t, h, rpc, id)
+
+	// Once the search reads, the payment is proven failed and re-billed.
+	chain.searchDown.Store(false)
+	landed.Store(true)
+	rpc.onSend = credit
+	renewed, err := h.sub.Renew(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, renewed)
+	assert.NotEqual(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[1])), renewed.Receipt.Reference)
+}
+
+func TestNonceUsedAtSearchIsBounded(t *testing.T) {
+	ctx := context.Background()
+	const account = "0x00000000000000000000000000000000000000aa"
+	chain := func(used uint64) (*mockRPC, *int) {
+		reads := 0
+		return &mockRPC{nonceAt: func(_, block string) (*temporpc.JSONRPCResponse, error) {
+			reads++
+			number, err := hexutil.DecodeUint64(block)
+			require.NoError(t, err, "every read names its block")
+			nonce := uint64(7)
+			if number >= used {
+				nonce = 9
+			}
+			return &temporpc.JSONRPCResponse{Result: hexutil.EncodeUint64(nonce)}, nil
+		}}, &reads
+	}
+
+	for _, used := range []uint64{1, 5, 999_999, 1_000_000, 123_456} {
+		rpc, reads := chain(used)
+		got, err := nonceUsedAt(ctx, rpc, account, 7, 1_000_000)
+		require.NoError(t, err)
+		assert.Equal(t, used, got)
+		assert.LessOrEqual(t, *reads, subscriptionNonceSearchReads)
+	}
+
+	// A nonce already past the payment's at genesis is no answer.
+	rpc, _ := chain(0)
+	_, err := nonceUsedAt(ctx, rpc, account, 7, 1_000_000)
+	require.ErrorIs(t, err, errSubscriptionNonceSearch)
+
+	// A search past its budget gives up rather than guess.
+	rpc, reads := chain(1 << 60)
+	_, err = nonceUsedAt(ctx, rpc, account, 7, 1<<62)
+	require.ErrorIs(t, err, errSubscriptionNonceSearch)
+	assert.Equal(t, subscriptionNonceSearchReads, *reads)
+}
+
+func TestSubscriptionStoreLookupKeysNeverReachAddressIndex(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewSubscriptionStore(tempo.NewMemoryStore(), SubscriptionStoreOptions{})
 	require.NoError(t, err)
-	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
-	store.now = func() time.Time { return now }
-	record := SubscriptionRecord{LookupKey: "user:x", SubscriptionID: "sub_1"}
-	_, _, _, err = store.activate(ctx, "challenge-1", "user:x", nil, func() (*SubscriptionResult, error) {
-		require.NoError(t, store.recordActivationPayment(ctx, "user:x", "challenge-1", SubscriptionPendingPayment{Hash: testTxHash(1)}, record))
-		return nil, errors.New("receipt unreadable")
-	}, nil)
-	require.Error(t, err)
+	victim, err := store.GetOrCreateAccessKey(ctx, "user:victim")
+	require.NoError(t, err)
 
-	seen := []time.Time{now, now.Add(time.Minute)}
-	for i, at := range seen {
-		hooks := &activationHooks{resolve: func(payment SubscriptionPendingPayment, _ SubscriptionRecord) (string, error) {
-			return "", subscriptionPaymentUnknown(payment, &subscriptionNonceSpentError{hash: payment.Hash, at: at})
-		}}
-		_, _, _, err = store.activate(ctx, "challenge-"+string(rune('2'+i)), "user:x", nil, mustNotCreate(t), hooks)
-		require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
-		marker, _, err := getJSON[activationMarker](ctx, store.store, store.activationKey("user:x"))
-		require.NoError(t, err)
-		require.NotNil(t, marker.Payment)
-		assert.Equal(t, formatTimestamp(seen[0]), marker.Payment.NonceSpentAt, "the first observation is kept")
-		assert.True(t, marker.Payment.Unknown)
+	// A lookup key spelled like the victim key's address index entry gets
+	// its own key, and leaves the victim's reachable by address.
+	colliding := "address:" + strings.ToLower(victim.AccessKeyAddress)
+	attacker, err := store.GetOrCreateAccessKey(ctx, colliding)
+	require.NoError(t, err)
+	assert.NotEqual(t, victim.AccessKeyAddress, attacker.AccessKeyAddress)
+	other, err := store.CreateChallengeAccessKey(ctx)
+	require.NoError(t, err)
+	require.NoError(t, store.RetainAccessKey(ctx, colliding, *other))
+	byAddress, err := store.GetAccessKeyByAddress(ctx, victim.AccessKeyAddress, "")
+	require.NoError(t, err)
+	require.NotNil(t, byAddress)
+	assert.Equal(t, victim.PrivateKey, byAddress.PrivateKey)
+	got, err := store.GetAccessKey(ctx, colliding)
+	require.NoError(t, err)
+	assert.Equal(t, other.AccessKeyAddress, got.AccessKeyAddress)
+
+	// Escaped lookup keys stay distinct from each other and from the index;
+	// any other lookup key keeps mppx's layout.
+	keys := map[string]bool{}
+	for _, key := range []string{"user:x", colliding, "lookup:" + colliding, "lookup:x", "x"} {
+		keys[store.accessKeyKey(key)] = true
 	}
-
-	// An observation for another transaction is not recorded.
-	other := noteNonceSpent(SubscriptionPendingPayment{Hash: testTxHash(2)}, &subscriptionNonceSpentError{hash: testTxHash(1), at: now})
-	assert.Empty(t, other.NonceSpentAt)
+	keys[store.accessKeyAddressKey(victim.AccessKeyAddress)] = true
+	assert.Len(t, keys, 6)
+	assert.Equal(t, "tempo:subscription:access-key:user:x", store.accessKeyKey("user:x"))
 }

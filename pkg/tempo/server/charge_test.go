@@ -97,6 +97,8 @@ type mockRPC struct {
 	// eth_getTransactionCount at a block, m.nonce when unset.
 	blockNumber uint64
 	nonceAt     func(account, block string) (*temporpc.JSONRPCResponse, error)
+	// blockAt answers eth_getBlockByNumber for a numbered block, when set.
+	blockAt func(number uint64) (*temporpc.JSONRPCResponse, error)
 	// balances answers TIP-20 balanceOf eth_calls by token address; those
 	// calls are recorded in balanceCalls, not callRequests or onCall.
 	balances     map[common.Address]*big.Int
@@ -204,6 +206,13 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 		}
 		return &temporpc.JSONRPCResponse{Result: m.receipts[hash]}, nil
 	case "eth_getBlockByNumber":
+		if tag, _ := params[0].(string); tag != "latest" && m.blockAt != nil {
+			number, err := hexutil.DecodeUint64(tag)
+			if err != nil {
+				return nil, err
+			}
+			return m.blockAt(number)
+		}
 		if m.blockTimestamp == nil {
 			return nil, fmt.Errorf("unexpected rpc method %q", method)
 		}
