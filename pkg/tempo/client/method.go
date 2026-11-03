@@ -76,6 +76,13 @@ type Config struct {
 	// names its own hostname as the realm, which over MCP is the HTTPS
 	// endpoint the session connected to.
 	TrustedProofRealms []TrustedProofRealm
+	// FeeToken is the TIP-20 token address the payer pays its transaction fee
+	// in when the challenge is not fee-sponsored, as mppx's charge client
+	// feeToken option. Empty pays the fee in the charge currency. Set it for
+	// an access key whose spending limits do not cover the charge currency's
+	// fee, such as a key limited to OUSD fees paying a USDC.e charge.
+	// Sponsored transactions ignore it: the fee payer chooses the fee token.
+	FeeToken string
 }
 
 // AccessKey is a Tempo access key that pays on behalf of Account. Payments
@@ -122,6 +129,8 @@ type Method struct {
 	credentialType tempo.CredentialType
 	paymentPolicy  func(context.Context, tempo.ChargeRequest) error
 	trustedRealms  []TrustedProofRealm
+	// feeToken pays unsponsored transaction fees; nil uses the charge currency.
+	feeToken *common.Address
 	// rpcClients reuses the RPC clients built from chain RPC URLs.
 	rpcClients rpccache.Cache
 
@@ -187,6 +196,14 @@ func New(config Config) (*Method, error) {
 	for i, trusted := range config.TrustedProofRealms {
 		trustedRealms[i] = TrustedProofRealm{Origin: tempoproof.NormalizeOrigin(trusted.Origin), Realm: trusted.Realm}
 	}
+	var feeToken *common.Address
+	if config.FeeToken != "" {
+		if !common.IsHexAddress(config.FeeToken) {
+			return nil, fmt.Errorf("tempo client: invalid FeeToken address %q", config.FeeToken)
+		}
+		address := common.HexToAddress(config.FeeToken)
+		feeToken = &address
+	}
 	rpc := config.RPC
 	if rpc == nil && config.RPCURL != "" {
 		// Build the client once rather than per credential.
@@ -202,6 +219,7 @@ func New(config Config) (*Method, error) {
 		credentialType: config.CredentialType,
 		paymentPolicy:  config.PaymentPolicy,
 		trustedRealms:  trustedRealms,
+		feeToken:       feeToken,
 	}, nil
 }
 
@@ -499,7 +517,11 @@ func (m *Method) buildTransfer(
 		if err != nil {
 			return "", fmt.Errorf("tempo client: get nonce: %w", err)
 		}
-		builder.SetNonce(nonce).SetFeeToken(token)
+		feeToken := token
+		if m.feeToken != nil {
+			feeToken = *m.feeToken
+		}
+		builder.SetNonce(nonce).SetFeeToken(feeToken)
 	}
 	tx, err := builder.BuildAndValidate()
 	if err != nil {
