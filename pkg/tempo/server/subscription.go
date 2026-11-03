@@ -1372,7 +1372,11 @@ func (s *Subscription) broadcastPayment(ctx context.Context, rpc tempo.RPCClient
 func (s *Subscription) rebroadcastPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment) (string, error) {
 	sent, err := rpc.SendRawTransaction(ctx, pending.Transaction)
 	if err != nil {
-		receipt, readErr := readPaymentReceipt(context.WithoutCancel(ctx), rpc, pending.Hash)
+		// Detached so a canceled request still learns the outcome, but bounded
+		// like confirmPayment's wait so a stalled RPC cannot hang the call.
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), receiptWaitBudget)
+		receipt, readErr := readPaymentReceipt(readCtx, rpc, pending.Hash)
+		cancel()
 		if readErr != nil || receipt == nil {
 			return "", subscriptionPaymentUnknown(pending, err)
 		}
