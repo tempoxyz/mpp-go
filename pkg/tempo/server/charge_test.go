@@ -90,6 +90,9 @@ type mockRPC struct {
 	onEstimateGas    func(params ...interface{}) (*temporpc.JSONRPCResponse, error)
 	onGetReceipt     func(hash string) (*temporpc.JSONRPCResponse, error)
 	onGetTransaction func(hash string) (*temporpc.JSONRPCResponse, error)
+	// blockTimestamp answers eth_getBlockByNumber with the latest block's
+	// timestamp, when set.
+	blockTimestamp func() uint64
 	// balances answers TIP-20 balanceOf eth_calls by token address; those
 	// calls are recorded in balanceCalls, not callRequests or onCall.
 	balances     map[common.Address]*big.Int
@@ -196,6 +199,11 @@ func (m *mockRPC) SendRequest(_ context.Context, method string, params ...interf
 			return m.onGetReceipt(hash)
 		}
 		return &temporpc.JSONRPCResponse{Result: m.receipts[hash]}, nil
+	case "eth_getBlockByNumber":
+		if m.blockTimestamp == nil {
+			return nil, fmt.Errorf("unexpected rpc method %q", method)
+		}
+		return &temporpc.JSONRPCResponse{Result: map[string]any{"timestamp": fmt.Sprintf("0x%x", m.blockTimestamp())}}, nil
 	case "eth_getTransactionByHash":
 		if m.onGetTransaction != nil {
 			return m.onGetTransaction(params[0].(string))

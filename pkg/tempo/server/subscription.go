@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
@@ -1130,6 +1131,9 @@ func (s *Subscription) signPayment(ctx context.Context, params paymentParams) (*
 	if err != nil {
 		return nil, fmt.Errorf("tempo server: get nonce: %w", err)
 	}
+	// A deadline lets a later attempt prove an unresolved payment can never
+	// land, instead of leaving its period locked for good.
+	validBefore := uint64(s.now().Add(subscriptionValidBeforeWindow).Unix()) //nolint:gosec // G115: the clock is past 1970.
 	build := func(gas uint64) (*tempotx.Tx, error) {
 		tx, err := tempotx.NewBuilder(big.NewInt(params.chainID)).
 			SetMaxFeePerGas(gasPrice).
@@ -1137,6 +1141,7 @@ func (s *Subscription) signPayment(ctx context.Context, params paymentParams) (*
 			SetGas(gas).
 			SetNonceKey(big.NewInt(0)).
 			SetNonce(nonce).
+			SetValidBefore(validBefore).
 			SetFeeToken(token).
 			AddCall(token, big.NewInt(0), common.FromHex(data)).
 			BuildAndValidate()
@@ -1217,8 +1222,14 @@ func subscriptionPaymentFailed(err *mpp.PaymentError, cause error) error {
 	return err.WithCause(errSubscriptionPaymentFailed)
 }
 
-// broadcastPayment broadcasts a signed payment and confirms it, recovering a
-// transaction included before its RPC reply failed, as charge.go does.
+// subscriptionValidBeforeWindow is how long a signed subscription payment
+// stays includable. Once the chain is past its valid_before and it has no
+// receipt, it can never land, so its period may be billed again.
+const subscriptionValidBeforeWindow = 5 * time.Minute
+
+// broadcastPayment broadcasts a newly signed payment and confirms it,
+// recovering a transaction included before its RPC reply failed, as charge.go
+// does. A JSON-RPC rejection fails the payment: nothing broadcast it before.
 func (s *Subscription) broadcastPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment) (string, error) {
 	sent, err := rpc.SendRawTransaction(ctx, pending.Transaction)
 	if err != nil {
@@ -1234,6 +1245,27 @@ func (s *Subscription) broadcastPayment(ctx context.Context, rpc tempo.RPCClient
 		}
 		return s.checkPaymentReceipt(pending, receipt)
 	}
+	return s.confirmPayment(ctx, rpc, pending, sent)
+}
+
+// rebroadcastPayment broadcasts again a payment an earlier attempt may have
+// sent. The node may refuse it because it is already on chain or held (nonce
+// too low, already known, a replay), so every refusal leaves the outcome
+// unknown unless its receipt shows up; only expiry fails it (resolvePayment).
+func (s *Subscription) rebroadcastPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment) (string, error) {
+	sent, err := rpc.SendRawTransaction(ctx, pending.Transaction)
+	if err != nil {
+		receipt, readErr := readPaymentReceipt(context.WithoutCancel(ctx), rpc, pending.Hash)
+		if readErr != nil || receipt == nil {
+			return "", subscriptionPaymentUnknown(pending, err)
+		}
+		return s.checkPaymentReceipt(pending, receipt)
+	}
+	return s.confirmPayment(ctx, rpc, pending, sent)
+}
+
+// confirmPayment waits for the receipt of a payment the node accepted.
+func (s *Subscription) confirmPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment, sent string) (string, error) {
 	if !strings.EqualFold(sent, pending.Hash) {
 		return "", subscriptionPaymentUnknown(pending, errors.New("broadcast transaction hash does not match the signed transaction"))
 	}
@@ -1252,6 +1284,79 @@ func (s *Subscription) broadcastPayment(ctx context.Context, rpc tempo.RPCClient
 		return "", subscriptionPaymentUnknown(pending, err)
 	}
 	return s.checkPaymentReceipt(pending, receipt)
+}
+
+// readPaymentReceipt reads the receipt of the transaction with hash once. It
+// returns nil only when the node answered that there is none, and an error
+// when the receipt could not be read, unlike lookupIncludedReceipt, so a read
+// error is never taken for a missing payment.
+func readPaymentReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[string]any, error) {
+	response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("tempo server: empty transaction receipt response")
+	}
+	if err := response.CheckError(); err != nil {
+		return nil, err
+	}
+	if response.Result == nil {
+		return nil, nil
+	}
+	receipt, ok := response.Result.(map[string]any)
+	if !ok {
+		return nil, errors.New("tempo server: malformed transaction receipt")
+	}
+	if len(receipt) == 0 {
+		return nil, nil
+	}
+	return receipt, nil
+}
+
+// latestBlockTimestamp returns the timestamp of the chain's latest block.
+func latestBlockTimestamp(ctx context.Context, rpc tempo.RPCClient) (uint64, error) {
+	response, err := rpc.SendRequest(ctx, "eth_getBlockByNumber", "latest", false)
+	if err != nil {
+		return 0, err
+	}
+	if response == nil {
+		return 0, errors.New("tempo server: empty block response")
+	}
+	if err := response.CheckError(); err != nil {
+		return 0, err
+	}
+	block, ok := response.Result.(map[string]any)
+	if !ok {
+		return 0, errors.New("tempo server: malformed latest block")
+	}
+	timestamp, err := hexutil.DecodeUint64(asString(block["timestamp"]))
+	if err != nil {
+		return 0, fmt.Errorf("tempo server: malformed latest block timestamp: %w", err)
+	}
+	return timestamp, nil
+}
+
+// expiredPayment reports whether a payment with no receipt can no longer be
+// included: the chain has a block at or past its valid_before, and its
+// receipt, read after that block, is still missing. It returns the receipt
+// when the payment landed after all.
+func (s *Subscription) expiredPayment(ctx context.Context, rpc tempo.RPCClient, pending SubscriptionPendingPayment) (map[string]any, bool, error) {
+	tx, err := tempotx.Deserialize(pending.Transaction)
+	if err != nil || tx.ValidBefore == 0 || uint64(s.now().Unix()) < tx.ValidBefore { //nolint:gosec // G115: the clock is past 1970.
+		return nil, false, nil
+	}
+	timestamp, err := latestBlockTimestamp(ctx, rpc)
+	if err != nil || timestamp < tx.ValidBefore {
+		return nil, false, err
+	}
+	// Read the receipt after the block: a payment included before that
+	// block has its receipt by now.
+	receipt, err := readPaymentReceipt(ctx, rpc, pending.Hash)
+	if err != nil {
+		return nil, false, err
+	}
+	return receipt, receipt == nil, nil
 }
 
 // checkPaymentReceipt returns the hash of an included payment that credited
@@ -1280,18 +1385,32 @@ func (s *Subscription) checkPaymentReceipt(pending SubscriptionPendingPayment, r
 // resolvePayment finds the outcome of a payment an earlier attempt left
 // unknown: an included transaction settles it, and one not yet included is
 // broadcast again, which the node accepts at most once. It returns
-// errSubscriptionPaymentFailed only when the payment did not pay the
-// recipient; every other error leaves the outcome unknown.
+// errSubscriptionPaymentFailed only on proof the payment did not pay the
+// recipient (a revert, a held transfer, or expiry without a receipt); read
+// errors and refusals leave the outcome unknown, keeping the period locked.
 func (s *Subscription) resolvePayment(ctx context.Context, pending SubscriptionPendingPayment, record SubscriptionRecord, activation bool) (string, error) {
 	rpc, err := s.resolveRPC(pending.ChainID)
 	if err != nil {
 		return "", subscriptionPaymentUnknown(pending, err)
 	}
+	receipt, err := readPaymentReceipt(ctx, rpc, pending.Hash)
+	if err != nil {
+		return "", subscriptionPaymentUnknown(pending, err)
+	}
+	if receipt == nil {
+		var expired bool
+		if receipt, expired, err = s.expiredPayment(ctx, rpc, pending); err != nil {
+			return "", subscriptionPaymentUnknown(pending, err)
+		}
+		if expired {
+			return "", subscriptionPaymentFailed(mpp.ErrVerificationFailed("subscription transaction expired without being included: "+pending.Hash), nil)
+		}
+	}
 	var reference string
-	if receipt := lookupIncludedReceipt(ctx, rpc, pending.Hash); receipt != nil {
+	if receipt != nil {
 		reference, err = s.checkPaymentReceipt(pending, receipt)
 	} else {
-		reference, err = s.broadcastPayment(ctx, rpc, pending)
+		reference, err = s.rebroadcastPayment(ctx, rpc, pending)
 	}
 	if err != nil {
 		return "", err

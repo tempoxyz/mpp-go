@@ -389,40 +389,142 @@ func TestSubscriptionRenewalRecoversAmbiguousPayment(t *testing.T) {
 	assert.Len(t, rpc.sentRawTxs, 2)
 }
 
-func TestSubscriptionRenewalRetriesRejectedPendingPayment(t *testing.T) {
+// renewalLeftUnknown activates a subscription on an ambiguousChain, then
+// leaves its first renewal unknown: the renewal lands when landed is true,
+// and its receipt read fails either way.
+func renewalLeftUnknown(t *testing.T, user string, landed bool) (*subscriptionHarness, *mockRPC, string, *atomic.Bool, *atomic.Bool) {
+	t.Helper()
 	ctx := context.Background()
-	rpc, landed, down := ambiguousChain(t)
-	landed.Store(true)
+	rpc, landedFlag, down := ambiguousChain(t)
+	landedFlag.Store(true)
 	h := newSubscriptionHarness(t, func(config *SubscriptionConfig) { config.RPC = rpc })
-	_, authorization := h.pay("rey", subscriptionPayerKey)
-	activated, err := h.subscribe("rey", authorization)
+	rpc.blockTimestamp = func() uint64 { return uint64(h.clock().Unix()) }
+	_, authorization := h.pay(user, subscriptionPayerKey)
+	activated, err := h.subscribe(user, authorization)
 	require.NoError(t, err)
 	id := activated.Receipt.SubscriptionID
 
 	h.advance(25 * time.Hour)
-	landed.Store(false)
+	landedFlag.Store(landed)
 	down.Store(true)
 	_, err = h.sub.Renew(ctx, id)
 	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	require.Len(t, rpc.sentRawTxs, 2)
+	return h, rpc, id, landedFlag, down
+}
 
-	// The node refuses the pending transaction outright and it is not on
-	// chain, so the period is billed afresh.
-	down.Store(false)
-	landed.Store(true)
-	credit := rpc.onSend
-	rejected := false
-	rpc.onSend = func(raw string) (string, map[string]any, error) {
-		if !rejected {
-			rejected = true
-			return "", nil, &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"}
-		}
-		return credit(raw)
+// requireRenewalLocked asserts the first renewal is still locked with its
+// payment, unpaid, and that no transaction other than it was signed.
+func requireRenewalLocked(t *testing.T, h *subscriptionHarness, rpc *mockRPC, id string) {
+	t.Helper()
+	record, err := h.store.Get(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), record.LastChargedPeriod)
+	require.NotNil(t, record.InFlightPayment, "the period stays locked with its payment")
+	for _, raw := range rpc.sentRawTxs[2:] {
+		assert.Equal(t, rpc.sentRawTxs[1], raw, "only the pending payment is broadcast again")
 	}
+}
+
+func TestSubscriptionRenewalKeepsLockWhileReceiptUnreadable(t *testing.T) {
+	ctx := context.Background()
+	h, rpc, id, _, down := renewalLeftUnknown(t, "rey", true)
+
+	// The receipt still cannot be read, and the node refuses the landed
+	// transaction: neither proves the payment failed.
+	credit := rpc.onSend
+	rpc.onSend = func(string) (string, map[string]any, error) {
+		return "", nil, &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"}
+	}
+	for range 2 {
+		_, err := h.sub.Renew(ctx, id)
+		require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+		requireRenewalLocked(t, h, rpc, id)
+	}
+	// Past its valid_before, an unreadable receipt is still no proof.
+	h.advance(2 * subscriptionValidBeforeWindow)
+	_, err := h.sub.Renew(ctx, id)
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	requireRenewalLocked(t, h, rpc, id)
+
+	// Once the receipt reads, the landed payment settles the period.
+	rpc.onSend = credit
+	down.Store(false)
+	renewed, err := h.sub.Renew(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, renewed)
+	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[1])), renewed.Receipt.Reference)
+	for _, raw := range rpc.sentRawTxs[2:] {
+		assert.Equal(t, rpc.sentRawTxs[1], raw, "the period is not billed again")
+	}
+}
+
+func TestSubscriptionRenewalRebroadcastNonceTooLowKeepsLock(t *testing.T) {
+	ctx := context.Background()
+	h, rpc, id, _, down := renewalLeftUnknown(t, "sol", true)
+	down.Store(false)
+
+	// A lagging node has no receipt yet for the landed renewal and refuses
+	// it again as nonce too low.
+	landedHash := mustTxHash(rpc.sentRawTxs[1])
+	hidden := true
+	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		if hidden && hash == landedHash {
+			return &temporpc.JSONRPCResponse{Result: nil}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: rpc.receipts[hash]}, nil
+	}
+	credit := rpc.onSend
+	rpc.onSend = func(string) (string, map[string]any, error) {
+		return "", nil, &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"}
+	}
+	_, err := h.sub.Renew(ctx, id)
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	requireRenewalLocked(t, h, rpc, id)
+
+	// Once the node shows the receipt, the period is paid by that payment.
+	hidden = false
+	rpc.onSend = credit
+	renewed, err := h.sub.Renew(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, renewed)
+	assert.Equal(t, strings.ToLower(landedHash), renewed.Receipt.Reference)
+	for _, raw := range rpc.sentRawTxs[2:] {
+		assert.Equal(t, rpc.sentRawTxs[1], raw, "the period is not billed again")
+	}
+}
+
+func TestSubscriptionRenewalRebillsExpiredPendingPayment(t *testing.T) {
+	ctx := context.Background()
+	h, rpc, id, landed, down := renewalLeftUnknown(t, "tam", false)
+	down.Store(false)
+
+	// The pending payment never landed and the node refuses it. While it
+	// could still be included, the period stays locked.
+	credit := rpc.onSend
+	rpc.onSend = func(string) (string, map[string]any, error) {
+		return "", nil, &temporpc.JSONRPCError{Code: -32000, Message: "nonce too low"}
+	}
+	_, err := h.sub.Renew(ctx, id)
+	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	requireRenewalLocked(t, h, rpc, id)
+	require.Len(t, rpc.sentRawTxs, 3)
+
+	// Past its valid_before with no receipt, it can never land: the
+	// period is billed afresh with a new transaction.
+	h.advance(subscriptionValidBeforeWindow + time.Second)
+	landed.Store(true)
+	rpc.onSend = credit
 	renewed, err := h.sub.Renew(ctx, id)
 	require.NoError(t, err)
 	require.NotNil(t, renewed)
 	require.Len(t, rpc.sentRawTxs, 4)
+	assert.NotEqual(t, rpc.sentRawTxs[1], rpc.sentRawTxs[3])
 	assert.Equal(t, strings.ToLower(mustTxHash(rpc.sentRawTxs[3])), renewed.Receipt.Reference)
+	record, err := h.store.Get(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), record.LastChargedPeriod)
+	assert.Nil(t, record.InFlightPayment)
 }
 
 func TestSubscriptionRenewalAfterBroadcastGetsNoChallenge(t *testing.T) {
