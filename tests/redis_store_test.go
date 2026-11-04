@@ -18,6 +18,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/redisstore"
 	chargeserver "github.com/tempoxyz/mpp-go/pkg/tempo/server"
 	"github.com/tempoxyz/mpp-go/tests/tempotest"
 )
@@ -37,7 +38,7 @@ func TestIntegrationRedisStoreReplayAcrossReplicas(t *testing.T) {
 
 	newReplica := func() *httptest.Server {
 		intent, err := chargeserver.NewIntent(chargeserver.IntentConfig{
-			Store:  tempo.NewRedisStore(rdb, time.Hour),
+			Store:  redisstore.New(rdb, time.Hour),
 			RPCURL: rpcURL,
 		})
 		require.NoError(t, err)

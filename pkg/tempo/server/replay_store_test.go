@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/redisstore"
 )
 
 func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
@@ -39,7 +40,7 @@ func TestVerifierRequiresExplicitReplayStore(t *testing.T) {
 }
 
 func TestTypedNilReplayStoresRejectedBeforeChallenge(t *testing.T) {
-	for _, store := range []tempo.Store{nil, (*tempo.MemoryStore)(nil), (*tempo.RedisStore)(nil)} {
+	for _, store := range []tempo.Store{nil, (*tempo.MemoryStore)(nil), (*redisstore.Store)(nil)} {
 		intent, err := NewIntent(IntentConfig{Store: store})
 		require.ErrorContains(t, err, "replay Store is required")
 		require.Nil(t, intent)

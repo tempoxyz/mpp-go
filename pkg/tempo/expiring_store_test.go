@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	miniredis "github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,69 +92,4 @@ func TestMemoryStoreSweepsExpiredClaims(t *testing.T) {
 	assert.NotContains(t, store.values, "stale")
 	assert.NotContains(t, store.expiries, "stale")
 	assert.Contains(t, store.values, "fresh")
-}
-
-func TestRedisStorePutIfAbsentUntil(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	server, err := miniredis.Run()
-	require.NoError(t, err)
-	defer server.Close()
-	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	defer client.Close()
-	store := NewRedisStore(client, 0)
-
-	ok, err := store.PutIfAbsentUntil(ctx, "k", "v", time.Now().Add(-time.Second))
-	require.NoError(t, err)
-	assert.False(t, ok, "an expiry in the past must not claim")
-	assert.False(t, server.Exists("k"))
-
-	ok, err = store.PutIfAbsentUntil(ctx, "k", "v", time.Now().Add(time.Minute))
-	require.NoError(t, err)
-	require.True(t, ok)
-	ttl := server.TTL("k")
-	assert.Greater(t, ttl, 59*time.Second)
-	assert.LessOrEqual(t, ttl, time.Minute+time.Second)
-
-	ok, err = store.PutIfAbsentUntil(ctx, "k", "other", time.Now().Add(time.Hour))
-	require.NoError(t, err)
-	assert.False(t, ok)
-	ok, err = store.PutIfAbsent(ctx, "k", "other")
-	require.NoError(t, err)
-	assert.False(t, ok)
-
-	server.FastForward(time.Minute + time.Second)
-	_, found, err := store.Get(ctx, "k")
-	require.NoError(t, err)
-	assert.False(t, found)
-	ok, err = store.PutIfAbsentUntil(ctx, "k", "again", time.Now().Add(time.Minute))
-	require.NoError(t, err)
-	assert.True(t, ok)
-}
-
-func TestRedisStorePutIfAbsentUntilUsesAbsoluteDeadline(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	server, err := miniredis.Run()
-	require.NoError(t, err)
-	defer server.Close()
-	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	defer client.Close()
-	store := NewRedisStore(client, 0)
-
-	// The Redis server's clock is an hour behind the verifier's. A TTL
-	// derived from the verifier's clock would expire the key an hour before
-	// expiresAt by the server's clock; an absolute deadline does not.
-	now := time.Now()
-	server.SetTime(now.Add(-time.Hour))
-	expiresAt := now.Add(time.Minute)
-	ok, err := store.PutIfAbsentUntil(ctx, "k", "v", expiresAt)
-	require.NoError(t, err)
-	require.True(t, ok)
-	assert.Greater(t, server.TTL("k"), time.Hour)
-
-	server.FastForward(time.Hour)
-	_, found, err := store.Get(ctx, "k")
-	require.NoError(t, err)
-	assert.True(t, found, "the key must outlive the verifier's TTL estimate")
 }
