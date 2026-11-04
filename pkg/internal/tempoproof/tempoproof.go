@@ -98,5 +98,8 @@ func RealmError(realm, origin, hint string) error {
 	if origin == "" {
 		return fmt.Errorf("mpp: refusing to sign Tempo proof for untrusted realm %q; %s", realm, hint)
 	}
+	if !isASCII(origin) {
+		return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q: internationalized hostnames must use their xn-- (punycode) form in the request URL", realm, origin)
+	}
 	return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q", realm, origin)
 }

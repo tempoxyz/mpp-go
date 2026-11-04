@@ -70,3 +70,11 @@ func TestOriginOwnsRealmNonASCII(t *testing.T) {
 		})
 	}
 }
+
+func TestRealmErrorNonASCIIOriginHint(t *testing.T) {
+	t.Parallel()
+	err := RealmError("xn--bcher-kva.example", "https://bücher.example", "")
+	assert.ErrorContains(t, err, "xn-- (punycode) form")
+	err = RealmError("other.example", "https://api.example", "")
+	assert.NotContains(t, err.Error(), "punycode")
+}
