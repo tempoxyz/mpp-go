@@ -43,15 +43,21 @@ func TestOriginOwnsRealm(t *testing.T) {
 	assert.Equal(t, "https://[::1]", Origin(&url.URL{Scheme: "https", Host: "[::1]:443"}))
 }
 
-func TestOriginOwnsRealmIDNA(t *testing.T) {
+func TestOriginOwnsRealmNonASCII(t *testing.T) {
 	for _, tc := range []struct {
 		host, realm string
 		want        bool
 	}{
 		{"σ.example", "ς.example", false},
 		{"ς.example", "σ.example", false},
-		{"bücher.example", "xn--bcher-kva.example", true},
-		{"xn--bcher-kva.example", "bücher.example", true},
+		// Non-ASCII hostnames and realms never own a realm; only the xn--
+		// form does, as with mppx's WHATWG URL hostname.
+		{"bücher.example", "xn--bcher-kva.example", false},
+		{"xn--bcher-kva.example", "bücher.example", false},
+		{"bücher.example", "bücher.example", false},
+		{"xn--bcher-kva.example", "XN--BCHER-KVA.example", true},
+		{"Key.example", "key.example", false}, // Kelvin sign
+		{"key.example", "Key.example", false},
 		{"API.example", "api.example", true},
 		{"bad_host.example", "bad_host.example", true},
 		{"r3---sn-abc.example.com", "r3---sn-abc.example.com", true},
