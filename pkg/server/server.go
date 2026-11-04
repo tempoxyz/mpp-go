@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
-	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/tempoparams"
 )
 
 // Intent is the interface for payment intents (server-side verification).
@@ -353,7 +353,7 @@ type ChargeParams struct {
 	// Description is exposed in the server-generated Challenge.
 	Description string
 	// Splits adds Tempo split-payment transfers under methodDetails.splits.
-	Splits []tempo.SplitParams
+	Splits []tempoparams.SplitParams
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
 	// A Tempo method with a fee payer sponsors every route without it.
 	FeePayer bool
@@ -368,7 +368,7 @@ type ChargeParams struct {
 	// longer carry it, as in mppx.
 	FeePayerURL string
 	// SupportedModes advertises the Tempo submission modes allowed for this challenge.
-	SupportedModes []tempo.ChargeMode
+	SupportedModes []tempoparams.ChargeMode
 	// ChainID overrides the method's default Tempo chain ID.
 	ChainID int
 	// Meta stores opaque Challenge metadata.
