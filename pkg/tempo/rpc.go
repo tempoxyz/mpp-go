@@ -23,15 +23,22 @@ type RPCClient interface {
 // duplicate this Tempo RPC glue.
 
 // NewRPCClient constructs a Tempo JSON-RPC client. Use
-// NewRPCClientWithOptions to set a timeout, an *http.Client or credentials.
+// NewRPCClientWithOptions to set a timeout, an *http.Client, headers or
+// credentials.
 func NewRPCClient(rpcURL string) RPCClient {
 	return temporpc.New(rpcURL)
 }
 
 // NewRPCClientWithOptions constructs a Tempo JSON-RPC client with tempo-go
-// client options, such as client.WithTimeout or client.WithHTTPClient from
-// github.com/tempoxyz/tempo-go/pkg/client. Build it once and reuse it: pass it
-// as the RPC field of the Tempo client or server config.
+// client options, such as client.WithTimeout, client.WithHTTPClient or
+// client.WithHeaders from github.com/tempoxyz/tempo-go/pkg/client. Build it once
+// and reuse it: pass it as the RPC field of the Tempo client or server config.
+//
+// For the hosted Tempo RPC, send a Tempo Console API key in the tempo-api-key
+// header:
+//
+//	rpc := tempo.NewRPCClientWithOptions("https://api.tempo.xyz/rpc",
+//		client.WithHeaders(map[string]string{"tempo-api-key": key}))
 func NewRPCClientWithOptions(rpcURL string, opts ...temporpc.Option) RPCClient {
 	return temporpc.New(rpcURL, opts...)
 }
