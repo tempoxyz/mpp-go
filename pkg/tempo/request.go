@@ -9,20 +9,24 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/tempoxyz/mpp-go/pkg/tempo/tempoparams"
 )
 
 // TODO(tempo-go): move the canonical Tempo charge request/credential schema and
 // normalization helpers in this file into tempo-go so Go SDKs share one wire
 // format implementation.
 
-// ChargeMode declares which Tempo credential flow a challenge accepts.
-type ChargeMode string
+// ChargeMode declares which Tempo credential flow a challenge accepts. It is
+// defined in the dependency-free tempoparams package so that pkg/server can
+// use it without importing this package.
+type ChargeMode = tempoparams.ChargeMode
 
 const (
 	// ChargeModePull allows clients to return a signed transaction credential.
-	ChargeModePull ChargeMode = "pull"
+	ChargeModePull = tempoparams.ChargeModePull
 	// ChargeModePush allows clients to broadcast first and return a hash credential.
-	ChargeModePush ChargeMode = "push"
+	ChargeModePush = tempoparams.ChargeModePush
 )
 
 // CredentialType identifies the Tempo credential payload shape.
@@ -48,14 +52,9 @@ type Split struct {
 }
 
 // SplitParams are the human-friendly inputs used to build a canonical Split.
-type SplitParams struct {
-	// Amount is the human-readable amount routed to this split recipient.
-	Amount string
-	// Memo is an optional split-specific Tempo memo.
-	Memo string
-	// Recipient is the split recipient address.
-	Recipient string
-}
+// It is defined in the dependency-free tempoparams package so that pkg/server
+// can use it without importing this package.
+type SplitParams = tempoparams.SplitParams
 
 // MethodDetails holds Tempo-specific request fields nested under methodDetails.
 type MethodDetails struct {
