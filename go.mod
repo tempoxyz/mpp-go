@@ -14,7 +14,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.12.1
-	github.com/tempoxyz/tempo-go v0.7.0
+	github.com/tempoxyz/tempo-go v0.8.0
 	golang.org/x/net v0.60.0
 )
 
