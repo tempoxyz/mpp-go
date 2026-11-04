@@ -32,7 +32,7 @@ type Store interface {
 // when configured with ExpireReplayKeys, passing a moment after which the
 // credential behind key can no longer be accepted. Otherwise, and for stores
 // that do not implement it, replay keys are kept forever with PutIfAbsent. A
-// store that embeds MemoryStore or RedisStore and overrides PutIfAbsent must
+// store that embeds MemoryStore or redisstore.Store and overrides PutIfAbsent must
 // also override PutIfAbsentUntil before enabling ExpireReplayKeys.
 type ExpiringStore interface {
 	Store

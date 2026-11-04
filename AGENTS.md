@@ -35,8 +35,9 @@ pkg/
 ├── mpp/             # Protocol primitives (Challenge, Credential, Receipt, parsing, hmac.go)
 ├── server/          # Generic challenge-or-verify flow (flow.go); echo/, fiber/, gin/ adapters
 ├── internal/        # mpptest (test Challenges and headers), tempoproof (Tempo proof origin check)
-└── tempo/           # Tempo blockchain support (RedisStore, constants, RPC helpers)
+└── tempo/           # Tempo blockchain support (MemoryStore, constants, RPC helpers)
     ├── client/      # Tempo charge client method
+    ├── redisstore/  # Redis replay Store (own package: pkg/tempo does not link go-redis)
     ├── server/      # Tempo charge server method
     └── internal/    # rpccache (RPC clients cached per method)
 internal/
@@ -200,7 +201,7 @@ TEMPO_RPC_URL=http://localhost:8545 go test -tags integration ./...  # running n
 - Without `TEMPO_RPC_URL`, `TestMain` starts the base Tempo test container, `tests/tempotest` (`Start`, or `Run(tb)` in one test): a thin wrapper over the Tempo team's published `ghcr.io/tempoxyz/tempo-localnet` image (see [tempoxyz/tempo docs/localnet.md](https://github.com/tempoxyz/tempo/blob/main/docs/localnet.md)), run with the image and command of the `tempo-node` service in `docker-compose.yml` (the single source of truth for the pinned digest; `TEMPO_LOCALNET_IMAGE` overrides it), on a loopback port, terminated at the end. It funds one shared payer once; tests using it run sequentially.
 - The image's Docker `HEALTHCHECK` reports healthy only after the localnet's setup completes, so `tempotest.Start` waits for it (`wait.ForHealthCheck`) and `docker compose up -d --wait` does too.
 - Then check a node with `internal/localnet.WaitReady` (the examples' `devnet.WaitForRPC`, `tempotest.Start` and `TestMain` for a `TEMPO_RPC_URL` node do), not `eth_chainId` alone: a fresh localnet answers RPC while its latest block is genesis, at timestamp 0, and rejects the faucet's and clients' expiring-nonce transactions (`valid_before ... too far in the future`) until it builds a block at the current time. `WaitReady` requires the latest block within 10s of the clock.
-- They cover the HTTP charge flows, each framework adapter (net/http, chi, gin, echo, fiber), a paid MCP tool call, `tempo.RedisStore` replay protection against a real Redis container, and the examples: `examples/*/smoke_test.go` (also tagged `integration`) run each example's server and client, driven by `TestIntegrationExamples` as a child `go test ./examples/...`.
+- They cover the HTTP charge flows, each framework adapter (net/http, chi, gin, echo, fiber), a paid MCP tool call, `redisstore.Store` replay protection against a real Redis container, and the examples: `examples/*/smoke_test.go` (also tagged `integration`) run each example's server and client, driven by `TestIntegrationExamples` as a child `go test ./examples/...`.
 - `.github/workflows/smoke-cross-sdk.yml` pays the Go example server with the pinned mppx CLI and a small mppx server (`.github/smoke-cross-sdk/`) with the Go client.
 
 <!-- BEGIN MPP SHARED: synced from tempoxyz/mpp-tools agents/shared.md. Edit it there; changes here are overwritten. -->

@@ -1,4 +1,7 @@
-package tempo
+// Package redisstore provides a Redis-backed replay-protection store for the
+// Tempo charge verifier (tempo.Store and tempo.ExpiringStore). It lives in its
+// own package so that importing pkg/tempo does not link go-redis.
+package redisstore
 
 import (
 	"context"
@@ -8,27 +11,27 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisStore implements Store with Redis commands.
-type RedisStore struct {
+// Store implements tempo.Store and tempo.ExpiringStore with Redis commands.
+// It replaces tempo.RedisStore, which moved here.
+type Store struct {
 	client redis.Cmdable
 	ttl    time.Duration
 }
 
-var _ ExpiringStore = (*RedisStore)(nil)
-
-// NewRedisStore constructs a Redis-backed replay-protection store.
+// New constructs a Redis-backed replay-protection store. It replaces
+// tempo.NewRedisStore.
 //
 // When ttl is zero, stored values do not expire automatically. PutIfAbsent
 // always keeps replay-protection keys persistent so used payment proofs and
 // hashes cannot become valid again after a TTL window. Only PutIfAbsentUntil,
 // which the Tempo charge verifier calls when configured with ExpireReplayKeys,
 // stores keys that expire.
-func NewRedisStore(client redis.Cmdable, ttl time.Duration) *RedisStore {
-	return &RedisStore{client: client, ttl: ttl}
+func New(client redis.Cmdable, ttl time.Duration) *Store {
+	return &Store{client: client, ttl: ttl}
 }
 
 // Get loads a replay-protection value.
-func (s *RedisStore) Get(ctx context.Context, key string) (string, bool, error) {
+func (s *Store) Get(ctx context.Context, key string) (string, bool, error) {
 	value, err := s.client.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
 		return "", false, nil
@@ -40,12 +43,12 @@ func (s *RedisStore) Get(ctx context.Context, key string) (string, bool, error) 
 }
 
 // Put stores a replay-protection value, replacing any existing entry.
-func (s *RedisStore) Put(ctx context.Context, key, value string) error {
+func (s *Store) Put(ctx context.Context, key, value string) error {
 	return s.client.Set(ctx, key, value, s.ttl).Err()
 }
 
 // PutIfAbsent stores a replay-protection value only when the key is unused.
-func (s *RedisStore) PutIfAbsent(ctx context.Context, key, value string) (bool, error) {
+func (s *Store) PutIfAbsent(ctx context.Context, key, value string) (bool, error) {
 	return s.client.SetNX(ctx, key, value, 0).Result()
 }
 
@@ -54,7 +57,7 @@ func (s *RedisStore) PutIfAbsent(ctx context.Context, key, value string) (bool, 
 // expiresAt rather than after a TTL measured with this process's clock. It
 // stores nothing and returns false when expiresAt is not in the future.
 // EXAT requires Redis 6.2 or later.
-func (s *RedisStore) PutIfAbsentUntil(ctx context.Context, key, value string, expiresAt time.Time) (bool, error) {
+func (s *Store) PutIfAbsentUntil(ctx context.Context, key, value string, expiresAt time.Time) (bool, error) {
 	if !expiresAt.After(time.Now()) {
 		return false, nil
 	}
@@ -75,6 +78,6 @@ func (s *RedisStore) PutIfAbsentUntil(ctx context.Context, key, value string, ex
 }
 
 // Delete removes a replay-protection value.
-func (s *RedisStore) Delete(ctx context.Context, key string) error {
+func (s *Store) Delete(ctx context.Context, key string) error {
 	return s.client.Del(ctx, key).Err()
 }

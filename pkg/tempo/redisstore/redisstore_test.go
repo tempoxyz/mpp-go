@@ -1,4 +1,4 @@
-package tempo
+package redisstore
 
 import (
 	"context"
@@ -8,19 +8,25 @@ import (
 	miniredis "github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-func TestRedisStoreOperations(t *testing.T) {
+// Store must satisfy the stores the Tempo charge verifier accepts.
+var _ tempo.ExpiringStore = (*Store)(nil)
+
+func TestStoreOperations(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
 		ttl  time.Duration
-		run  func(*testing.T, *RedisStore, *miniredis.Miniredis)
+		run  func(*testing.T, *Store, *miniredis.Miniredis)
 	}{
 		{
 			name: "missing key",
-			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
+			run: func(t *testing.T, store *Store, _ *miniredis.Miniredis) {
 				t.Helper()
 				{
 					value, ok, err := store.Get(context.Background(), "missing")
@@ -34,7 +40,7 @@ func TestRedisStoreOperations(t *testing.T) {
 		},
 		{
 			name: "put and get",
-			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
+			run: func(t *testing.T, store *Store, _ *miniredis.Miniredis) {
 				t.Helper()
 				{
 					err := store.Put(context.Background(), "k", "v")
@@ -58,7 +64,7 @@ func TestRedisStoreOperations(t *testing.T) {
 		},
 		{
 			name: "put if absent only inserts once",
-			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
+			run: func(t *testing.T, store *Store, _ *miniredis.Miniredis) {
 				t.Helper()
 				inserted, err := store.PutIfAbsent(context.Background(), "k", "first")
 				if !assert.NoErrorf(t, err,
@@ -94,7 +100,7 @@ func TestRedisStoreOperations(t *testing.T) {
 		},
 		{
 			name: "delete removes key",
-			run: func(t *testing.T, store *RedisStore, _ *miniredis.Miniredis) {
+			run: func(t *testing.T, store *Store, _ *miniredis.Miniredis) {
 				t.Helper()
 				{
 					err := store.Put(context.Background(), "k", "v")
@@ -125,7 +131,7 @@ func TestRedisStoreOperations(t *testing.T) {
 		{
 			name: "ttl expires key",
 			ttl:  time.Minute,
-			run: func(t *testing.T, store *RedisStore, server *miniredis.Miniredis) {
+			run: func(t *testing.T, store *Store, server *miniredis.Miniredis) {
 				t.Helper()
 				{
 					err := store.Put(context.Background(), "k", "v")
@@ -149,7 +155,7 @@ func TestRedisStoreOperations(t *testing.T) {
 		{
 			name: "put if absent stays persistent with ttl",
 			ttl:  time.Minute,
-			run: func(t *testing.T, store *RedisStore, server *miniredis.Miniredis) {
+			run: func(t *testing.T, store *Store, server *miniredis.Miniredis) {
 				t.Helper()
 				inserted, err := store.PutIfAbsent(context.Background(), "k", "v")
 				if !assert.NoErrorf(t, err,
@@ -192,7 +198,72 @@ func TestRedisStoreOperations(t *testing.T) {
 			client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 			defer client.Close()
 
-			tt.run(t, NewRedisStore(client, tt.ttl), server)
+			tt.run(t, New(client, tt.ttl), server)
 		})
 	}
+}
+
+func TestStorePutIfAbsentUntil(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+	store := New(client, 0)
+
+	ok, err := store.PutIfAbsentUntil(ctx, "k", "v", time.Now().Add(-time.Second))
+	require.NoError(t, err)
+	assert.False(t, ok, "an expiry in the past must not claim")
+	assert.False(t, server.Exists("k"))
+
+	ok, err = store.PutIfAbsentUntil(ctx, "k", "v", time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, ok)
+	ttl := server.TTL("k")
+	assert.Greater(t, ttl, 59*time.Second)
+	assert.LessOrEqual(t, ttl, time.Minute+time.Second)
+
+	ok, err = store.PutIfAbsentUntil(ctx, "k", "other", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.False(t, ok)
+	ok, err = store.PutIfAbsent(ctx, "k", "other")
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	server.FastForward(time.Minute + time.Second)
+	_, found, err := store.Get(ctx, "k")
+	require.NoError(t, err)
+	assert.False(t, found)
+	ok, err = store.PutIfAbsentUntil(ctx, "k", "again", time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestStorePutIfAbsentUntilUsesAbsoluteDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+	store := New(client, 0)
+
+	// The Redis server's clock is an hour behind the verifier's. A TTL
+	// derived from the verifier's clock would expire the key an hour before
+	// expiresAt by the server's clock; an absolute deadline does not.
+	now := time.Now()
+	server.SetTime(now.Add(-time.Hour))
+	expiresAt := now.Add(time.Minute)
+	ok, err := store.PutIfAbsentUntil(ctx, "k", "v", expiresAt)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Greater(t, server.TTL("k"), time.Hour)
+
+	server.FastForward(time.Hour)
+	_, found, err := store.Get(ctx, "k")
+	require.NoError(t, err)
+	assert.True(t, found, "the key must outlive the verifier's TTL estimate")
 }
