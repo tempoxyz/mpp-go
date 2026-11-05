@@ -3,6 +3,7 @@ package chargeserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"math/big"
 	"testing"
@@ -49,7 +50,8 @@ func recoverSimulationFeePayer(t *testing.T, simulation map[string]any, tx *temp
 }
 
 // A local fee payer signs a simulation-only copy with
-// sponsoredSimulationGasBuffer more gas after the sender's simulation passed,
+// sponsoredSimulationGasBuffer more gas (within the sponsor policy) after the
+// sender's simulation at the broadcast gas limit passed,
 // and the node bills the fee payer recovered from that signature; the
 // broadcast transaction keeps its gas.
 func TestLocalFeePayerSimulatesWithFeePayerSignature(t *testing.T) {
@@ -117,7 +119,8 @@ func TestLocalFeePayerSenderSimulationFailureSkipsSponsoredSimulation(t *testing
 }
 
 // A hosted fee payer's signature is simulated as it signed it: same gas,
-// recovering to the sponsor.
+// recovering to the sponsor (TestHostedFeePayerSponsoredSimulationToleratesOnlyOutOfGas
+// covers that gas running short).
 func TestHostedFeePayerSimulatesWithFeePayerSignature(t *testing.T) {
 	ctx := context.Background()
 	payer, err := temposigner.NewSigner(testPrivateKey)
@@ -183,31 +186,187 @@ func TestFeePayerSimulationTransaction(t *testing.T) {
 	feePayer, err := temposigner.NewSigner(feePayerKey)
 	require.NoError(t, err)
 	to := common.HexToAddress("0x20c0000000000000000000000000000000000001")
-	tx := tempotx.New()
-	tx.ChainID = big.NewInt(42431)
-	tx.Gas = 67_894
-	tx.MaxFeePerGas = big.NewInt(20_000_000_000)
-	tx.MaxPriorityFeePerGas = big.NewInt(1)
-	tx.FeeToken = common.HexToAddress("0x20c0000000000000000000000000000000000002")
-	tx.Calls = []tempotx.Call{{To: &to, Value: new(big.Int), Data: []byte{1}}}
-	tx.AwaitingFeePayer = true
-	require.NoError(t, tempotx.SignTransaction(tx, sender))
-	tx.AwaitingFeePayer = false
-	tx.From = sender.Address()
-	require.NoError(t, tempotx.AddFeePayerSignature(tx, feePayer))
-	broadcastSignature := tx.FeePayerSignature
+	newTx := func(gas uint64) *tempotx.Tx {
+		tx := tempotx.New()
+		tx.ChainID = big.NewInt(42431)
+		tx.Gas = gas
+		tx.MaxFeePerGas = big.NewInt(20_000_000_000)
+		tx.MaxPriorityFeePerGas = big.NewInt(1)
+		tx.FeeToken = common.HexToAddress("0x20c0000000000000000000000000000000000002")
+		tx.Calls = []tempotx.Call{{To: &to, Value: new(big.Int), Data: []byte{1}}}
+		tx.AwaitingFeePayer = true
+		require.NoError(t, tempotx.SignTransaction(tx, sender))
+		tx.AwaitingFeePayer = false
+		tx.From = sender.Address()
+		require.NoError(t, tempotx.AddFeePayerSignature(tx, feePayer))
+		return tx
+	}
+	policyWithBudget := func(gas uint64) FeePayerPolicy {
+		policy := defaultFeePayerPolicy()
+		policy.MaxTotalFee = new(big.Int).Mul(new(big.Int).SetUint64(gas), big.NewInt(20_000_000_000))
+		return policy
+	}
 
-	simulation, err := feePayerSimulationTransaction(tx, feePayer)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(67_894), tx.Gas, "the broadcast transaction keeps its gas")
-	assert.Same(t, broadcastSignature, tx.FeePayerSignature)
-	assert.Equal(t, uint64(67_894+sponsoredSimulationGasBuffer), simulation.Gas)
-	assert.NotEqual(t, broadcastSignature, simulation.FeePayerSignature)
-	recovered, err := tempotx.VerifyFeePayerSignature(simulation, sender.Address())
-	require.NoError(t, err)
-	assert.Equal(t, feePayer.Address(), recovered)
+	for _, tt := range []struct {
+		name    string
+		gas     uint64
+		policy  FeePayerPolicy
+		wantGas uint64
+		wantErr string
+	}{
+		{name: "full buffer", gas: 67_894, policy: defaultFeePayerPolicy(), wantGas: 67_894 + sponsoredSimulationGasBuffer},
+		{name: "clamped to the total fee budget", gas: 67_894, policy: policyWithBudget(67_894 + 3_000), wantGas: 67_894 + 3_000},
+		{name: "no headroom in the total fee budget", gas: 67_894, policy: policyWithBudget(67_894), wantGas: 67_894},
+		{name: "clamped to the gas cap", gas: feePayerMaxGas - 4_000, policy: defaultFeePayerPolicy(), wantGas: feePayerMaxGas},
+		{name: "at the gas cap", gas: feePayerMaxGas, policy: defaultFeePayerPolicy(), wantGas: feePayerMaxGas},
+		// The copy is checked against the policy before it is signed: one
+		// the policy refuses is never signed.
+		{name: "over the total fee budget", gas: 67_894, policy: policyWithBudget(67_000), wantErr: "total fee budget exceeds sponsor policy"},
+		{name: "over the gas cap", gas: math.MaxUint64, policy: defaultFeePayerPolicy(), wantErr: "gas exceeds sponsor policy"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := newTx(tt.gas)
+			broadcastSignature := tx.FeePayerSignature
 
-	tx.Gas = math.MaxUint64
-	_, err = feePayerSimulationTransaction(tx, feePayer)
-	require.Error(t, err)
+			simulation, err := feePayerSimulationTransaction(tx, feePayer, "", tt.policy)
+			assert.Equal(t, tt.gas, tx.Gas, "the broadcast transaction keeps its gas")
+			assert.Same(t, broadcastSignature, tx.FeePayerSignature)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Nil(t, simulation)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantGas, simulation.Gas)
+			require.NoError(t, validateFeePayerTransaction(simulation, "", tt.policy), "the signed copy stays within the sponsor policy")
+			if tt.wantGas != tt.gas {
+				assert.NotEqual(t, broadcastSignature, simulation.FeePayerSignature)
+			}
+			recovered, err := tempotx.VerifyFeePayerSignature(simulation, sender.Address())
+			require.NoError(t, err)
+			assert.Equal(t, feePayer.Address(), recovered)
+		})
+	}
+}
+
+// outOfGas, feeBalance and reverted are eth_call errors as Tempo v1.18 nodes
+// answer them (out of gas and the fee balance check share code -32003).
+var (
+	outOfGas   = temporpc.NewJSONRPCErrorResponse(1, -32003, "out of gas: gas exhausted during precompiled contract execution: 53602", nil)
+	feeBalance = temporpc.NewJSONRPCErrorResponse(1, -32003, "insufficient fee token balance: required 394, but only have 0", nil)
+	reverted   = temporpc.NewJSONRPCErrorResponse(1, 3, "execution reverted", nil)
+)
+
+// answerSimulations answers the sender's simulation (no feePayer) with
+// sender and the final sponsored simulation with sponsored; nil succeeds.
+func answerSimulations(sender, sponsored *temporpc.JSONRPCResponse) func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+	return func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+		response := sender
+		if _, ok := params[0].(map[string]any)["feePayer"]; ok {
+			response = sponsored
+		}
+		if response == nil {
+			return &temporpc.JSONRPCResponse{Result: "0x"}, nil
+		}
+		return response, nil
+	}
+}
+
+type sponsoredSimulationCase struct {
+	name      string
+	sender    *temporpc.JSONRPCResponse
+	sponsored *temporpc.JSONRPCResponse
+	wantErr   bool
+}
+
+func runSponsoredSimulationCase(t *testing.T, tt sponsoredSimulationCase, config func(url string) IntentConfig) {
+	t.Helper()
+	ctx := context.Background()
+	payer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	request := buildRequest(t, true, nil)
+	rpc := sponsoredBroadcastRPC(request, payer.Address())
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	client, _, err := deserializeTransactionCredential(credential.Payload["signature"].(string))
+	require.NoError(t, err)
+	rpc.callRequests = nil
+	rpc.onCall = answerSimulations(tt.sender, tt.sponsored)
+	_, sponsor := newFakeHostedFeePayer(t, 42431, common.HexToAddress("0x20c0000000000000000000000000000000000002"))
+	cfg := config(sponsor.URL)
+	cfg.RPC, cfg.Store = rpc, tempo.NewMemoryStore()
+	intent, err := NewIntent(cfg)
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+
+	// The sender's simulation is the gas-bounded check: it runs at the
+	// broadcast gas limit and charges the sender no fee.
+	require.NotEmpty(t, rpc.callRequests)
+	senderSimulation := rpc.callRequests[0]
+	assert.NotContains(t, senderSimulation, "feePayer")
+	assert.Equal(t, hexutil.EncodeUint64(client.Gas), senderSimulation["gas"])
+	assert.NotContains(t, senderSimulation, "maxFeePerGas")
+	assert.NotContains(t, senderSimulation, "maxPriorityFeePerGas")
+	assert.NotContains(t, senderSimulation, "feeToken")
+	assert.Equal(t, hexutil.EncodeUint64(client.Nonce), senderSimulation["nonce"])
+	if tt.wantErr {
+		require.ErrorContains(t, err, "transaction preflight failed")
+		assert.Empty(t, rpc.sentRawTxs)
+		return
+	}
+	require.NoError(t, err)
+	require.Len(t, rpc.sentRawTxs, 1)
+	broadcast, _, err := deserializeTransactionCredential(rpc.sentRawTxs[0])
+	require.NoError(t, err)
+	assert.Equal(t, client.Gas, broadcast.Gas)
+}
+
+// A transaction whose gas limit is too low fails the sender's simulation at
+// the broadcast gas limit and is never broadcast, though the local fee
+// payer's padded sponsored simulation alone would pass.
+func TestSponsoredSimulationRejectsLowGas(t *testing.T) {
+	for name, config := range map[string]func(string) IntentConfig{
+		"local":  func(string) IntentConfig { return IntentConfig{FeePayerPrivateKey: feePayerKey} },
+		"hosted": func(url string) IntentConfig { return IntentConfig{FeePayerURL: url} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			runSponsoredSimulationCase(t, sponsoredSimulationCase{sender: outOfGas, wantErr: true}, config)
+		})
+	}
+}
+
+// A hosted fee payer's signature binds the gas limit, so the sponsored
+// simulation runs at the broadcast gas and may run out of gas only because
+// a sponsored eth_call charges more than the mined transaction: that alone
+// passes, after the sender's gas-bounded simulation did. A fee token balance
+// error or a revert still rejects.
+func TestHostedFeePayerSponsoredSimulationToleratesOnlyOutOfGas(t *testing.T) {
+	hosted := func(url string) IntentConfig { return IntentConfig{FeePayerURL: url} }
+	for _, tt := range []sponsoredSimulationCase{
+		{name: "out of gas", sponsored: outOfGas},
+		{name: "intrinsic gas too low", sponsored: temporpc.NewJSONRPCErrorResponse(1, -32000, "intrinsic gas too low", nil)},
+		{name: "insufficient fee token balance", sponsored: feeBalance, wantErr: true},
+		{name: "reverted", sponsored: reverted, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runSponsoredSimulationCase(t, tt, hosted)
+		})
+	}
+}
+
+// A local fee payer's sponsored simulation gets the full gas buffer, so
+// running out of gas there still rejects.
+func TestLocalFeePayerPaddedSimulationOutOfGasRejects(t *testing.T) {
+	runSponsoredSimulationCase(t, sponsoredSimulationCase{sponsored: outOfGas, wantErr: true}, func(string) IntentConfig {
+		return IntentConfig{FeePayerPrivateKey: feePayerKey}
+	})
+}
+
+func TestIsOutOfGasError(t *testing.T) {
+	assert.True(t, isOutOfGasError(outOfGas.Error))
+	assert.True(t, isOutOfGasError(temporpc.NewJSONRPCErrorResponse(1, -32000, "intrinsic gas too low", nil).Error))
+	assert.False(t, isOutOfGasError(feeBalance.Error))
+	assert.False(t, isOutOfGasError(reverted.Error))
+	assert.False(t, isOutOfGasError(errors.New("out of gas")), "only a JSON-RPC error from the node counts")
 }
