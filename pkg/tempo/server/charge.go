@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/url"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1830,18 +1831,41 @@ func simulateSponsoredTransactionExecution(
 	return nil
 }
 
-// isOutOfGasError reports whether err is a JSON-RPC error saying the call
-// ran out of gas. Tempo nodes answer an eth_call that exhausts its gas limit
-// with "out of gas: ..." or, below the intrinsic gas, "intrinsic gas too
-// low", and use the same code (-32003) for other failures such as
-// "insufficient fee token balance", so only the message tells them apart.
+// isOutOfGasError reports whether err is a JSON-RPC error from the node
+// saying the call ran out of gas. Tempo nodes answer an eth_call that
+// exhausts its gas limit with "out of gas: ..." (code -32003, shared with
+// "insufficient fee token balance") or, below the intrinsic gas, "intrinsic
+// gas too low" (code -32000), with no data, so only the message tells them
+// apart. As in mppx's isOutOfGasError, only the terminal node error counts:
+// the *temporpc.JSONRPCError in err's chain (it wraps nothing, so it is the
+// innermost error), never a wrapper's message. The match is anchored to the
+// start of the node's message, and an execution revert (code 3) or an error
+// carrying revert data is never gas exhaustion, so a revert reason or wrapper
+// text that merely mentions gas cannot hide another failure and let the
+// payment broadcast.
 func isOutOfGasError(err error) bool {
 	var rpcErr *temporpc.JSONRPCError
-	if !errors.As(err, &rpcErr) {
+	if !errors.As(err, &rpcErr) || rpcErr == nil || rpcErr.Code == 3 || hasRevertData(rpcErr.Data) {
 		return false
 	}
-	message := strings.ToLower(rpcErr.Message)
-	return strings.Contains(message, "out of gas") || strings.Contains(message, "intrinsic gas too low")
+	return outOfGasMessage.MatchString(strings.TrimSpace(rpcErr.Message))
+}
+
+// outOfGasMessage matches the start of a node's out-of-gas message, as
+// mppx's isOutOfGasError does.
+var outOfGasMessage = regexp.MustCompile(`(?i)^(?:out of gas(?::|$)|intrinsic gas too low(?::|$))`)
+
+// hasRevertData reports whether a JSON-RPC error's data field carries
+// anything, such as revert data; an empty value or "0x" carries nothing.
+func hasRevertData(data any) bool {
+	switch value := data.(type) {
+	case nil:
+		return false
+	case string:
+		return value != "" && value != "0x"
+	default:
+		return true
+	}
 }
 
 // rpcSignature renders a secp256k1 signature as JSON-RPC {r, s, yParity}

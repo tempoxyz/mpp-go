@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"testing"
@@ -364,9 +365,31 @@ func TestLocalFeePayerPaddedSimulationOutOfGasRejects(t *testing.T) {
 }
 
 func TestIsOutOfGasError(t *testing.T) {
-	assert.True(t, isOutOfGasError(outOfGas.Error))
-	assert.True(t, isOutOfGasError(temporpc.NewJSONRPCErrorResponse(1, -32000, "intrinsic gas too low", nil).Error))
-	assert.False(t, isOutOfGasError(feeBalance.Error))
-	assert.False(t, isOutOfGasError(reverted.Error))
-	assert.False(t, isOutOfGasError(errors.New("out of gas")), "only a JSON-RPC error from the node counts")
+	intrinsic := temporpc.NewJSONRPCErrorResponse(1, -32000, "intrinsic gas too low", nil).Error
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "node out of gas", err: outOfGas.Error, want: true},
+		{name: "node intrinsic gas too low", err: intrinsic, want: true},
+		{name: "wrapped node out of gas", err: fmt.Errorf("simulation failed: %w", outOfGas.Error), want: true},
+		{name: "wrapped intrinsic gas too low", err: fmt.Errorf("eth_call: %w", intrinsic), want: true},
+		{name: "fee token balance", err: feeBalance.Error},
+		{name: "execution reverted", err: reverted.Error},
+		{name: "revert reason mentioning out of gas", err: temporpc.NewJSONRPCErrorResponse(1, 3, "execution reverted: out of gas", nil).Error},
+		{name: "code 3 starting with out of gas", err: temporpc.NewJSONRPCErrorResponse(1, 3, "out of gas", nil).Error},
+		{name: "out of gas with revert data", err: temporpc.NewJSONRPCErrorResponse(1, -32003, "out of gas", "0x08c379a0").Error},
+		{name: "empty revert data", err: temporpc.NewJSONRPCErrorResponse(1, -32003, "out of gas", "0x").Error, want: true},
+		{name: "wrapper mentioning out of gas around fee token balance", err: fmt.Errorf("out of gas: %w", feeBalance.Error)},
+		{name: "message mentioning out of gas later", err: temporpc.NewJSONRPCErrorResponse(1, -32003, "insufficient fee token balance (out of gas)", nil).Error},
+		{name: "out of gas prefix of another word", err: temporpc.NewJSONRPCErrorResponse(1, -32003, "out of gasoline", nil).Error},
+		{name: "not a JSON-RPC error", err: errors.New("out of gas")},
+		{name: "nil", err: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isOutOfGasError(tt.err))
+		})
+	}
 }
