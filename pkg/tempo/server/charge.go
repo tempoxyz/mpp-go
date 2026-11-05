@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"math/big"
 	"net/url"
 	"reflect"
@@ -880,7 +881,19 @@ func (i *Intent) broadcastTransaction(
 					return nil, err
 				}
 			}
-			if err := simulateSponsoredTransactionExecution(ctx, rpc, tx, sponsorAddress); err != nil {
+			// The node recovers an eth_call's fee payer only from its
+			// feePayerSignature, so the final simulation carries one: the
+			// hosted sponsor's as it signed it, or for a local fee payer a
+			// simulation-only signature made now, after the sender's
+			// simulation passed.
+			simulated := tx
+			if i.feePayerSigner != nil {
+				simulated, err = feePayerSimulationTransaction(tx, i.feePayerSigner)
+				if err != nil {
+					return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer simulation")
+				}
+			}
+			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, sponsorAddress); err != nil {
 				return nil, err
 			}
 		} else {
@@ -1697,6 +1710,50 @@ func simulateSponsoredSenderExecution(ctx context.Context, rpc tempo.RPCClient, 
 	})
 }
 
+// sponsoredSimulationGasBuffer is the gas a local fee payer's
+// simulation-only signature adds over the transaction's gas limit. A
+// sponsored eth_call charges more gas than the mined transaction uses (a
+// session top-up that used 63,645 of its 67,894 gas limit on chain needed
+// 69,645 in simulation), and the fee payer signature binds the gas limit,
+// so the final simulation signs a copy with this much more gas while the
+// broadcast transaction keeps its own. A hosted fee payer's signature is
+// simulated as it signed it.
+const sponsoredSimulationGasBuffer = 10_000
+
+// feePayerSimulationTransaction returns a copy of the co-signed transaction
+// tx for the final sponsored eth_call, its gas limit raised by
+// sponsoredSimulationGasBuffer and co-signed by signer over the same fee
+// payer payload as the broadcast co-signature (sender tx.From, fee token
+// tx.FeeToken). tx itself is unchanged. Call it only after the sender's
+// simulation passed.
+func feePayerSimulationTransaction(tx *tempotx.Tx, signer *temposigner.Signer) (*tempotx.Tx, error) {
+	if tx.Gas > math.MaxUint64-sponsoredSimulationGasBuffer {
+		return nil, fmt.Errorf("gas limit %d too large to simulate", tx.Gas)
+	}
+	simulation := tx.Clone()
+	simulation.From = tx.From
+	simulation.FeeToken = tx.FeeToken
+	simulation.AwaitingFeePayer = false
+	simulation.Gas = tx.Gas + sponsoredSimulationGasBuffer
+	hash, err := tempotx.GetFeePayerSignPayload(simulation, tx.From)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := signer.Sign(hash)
+	if err != nil {
+		return nil, err
+	}
+	simulation.FeePayerSignature = signature
+	return simulation, nil
+}
+
+// simulateSponsoredTransactionExecution simulates the final fee-sponsored
+// transaction tx from its sender with its fee payer signature, never the
+// sender's. Since Tempo v1.18 an eth_call checks the fee payer's fee token
+// balance (gas limit times maxFeePerGas), and the node recovers the fee payer
+// only from feePayerSignature: a bare feePayer address is ignored and the
+// sender is billed, which fails when the sender does not hold the sponsor's
+// fee token. feePayer is sent too, as mppx does.
 func simulateSponsoredTransactionExecution(
 	ctx context.Context,
 	rpc tempo.RPCClient,
@@ -1708,7 +1765,20 @@ func simulateSponsoredTransactionExecution(
 		return mpp.ErrVerificationFailed("transaction preflight failed")
 	}
 	callObject["feePayer"] = feePayer.Hex()
+	if tx.FeePayerSignature != nil {
+		callObject["feePayerSignature"] = rpcSignature(tx.FeePayerSignature)
+	}
 	return simulateCall(ctx, rpc, callObject)
+}
+
+// rpcSignature renders a secp256k1 signature as JSON-RPC {r, s, yParity}
+// hex quantities, a yParity of 0 as "0x0".
+func rpcSignature(signature *temposigner.Signature) map[string]any {
+	return map[string]any{
+		"r":       hexutil.EncodeBig(signature.R),
+		"s":       hexutil.EncodeBig(signature.S),
+		"yParity": hexutil.EncodeUint64(uint64(signature.YParity)),
+	}
 }
 
 func simulateTransactionExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
@@ -1731,7 +1801,7 @@ func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[strin
 }
 
 // transactionCallObject renders tx as an eth_call request without its
-// signatures, with its keyAuthorization as viem formats it (ox
+// signatures (simulateSponsoredTransactionExecution adds the fee payer's), with its keyAuthorization as viem formats it (ox
 // KeyAuthorization.toRpc), as mppx simulates a transaction.
 func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
 	callObject := map[string]any{
