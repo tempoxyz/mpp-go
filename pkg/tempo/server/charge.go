@@ -1734,14 +1734,16 @@ func simulateSponsoredSenderExecution(ctx context.Context, rpc tempo.RPCClient, 
 }
 
 // sponsoredSimulationGasBuffer is the most gas a local fee payer's
-// simulation-only signature adds over the transaction's gas limit. A
-// sponsored eth_call charges more gas than the mined transaction uses (a
-// session top-up that used 63,645 of its 67,894 gas limit on chain needed
-// 69,645 in simulation), and the fee payer signature binds the gas limit,
-// so the final simulation signs a copy with up to this much more gas while
-// the broadcast transaction keeps its own. The gas bound at the broadcast
-// limit is simulateSponsoredSenderExecution's.
-const sponsoredSimulationGasBuffer = 10_000
+// simulation-only signature adds over the transaction's gas limit; the fee
+// payer signature binds the gas limit, so the final simulation signs a copy
+// with up to this much more gas while the broadcast transaction keeps its own.
+// eth_call skips fee collection, leaving the fee token's storage slots cold,
+// so a sponsored eth_call needs exactly 6,000 more gas than the mined
+// transaction when its calls touch the fee token and none otherwise. The
+// remaining risk is a gas limit up to 6,000 short on calls that don't touch
+// the fee token; a node fix that warms those slots in eth_call would remove
+// the buffer.
+const sponsoredSimulationGasBuffer = 6_000
 
 // sponsoredSimulationGas returns the gas limit of tx's simulation-only copy:
 // tx.Gas plus sponsoredSimulationGasBuffer, lowered to stay within the
