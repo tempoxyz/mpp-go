@@ -11,8 +11,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/net/idna"
-
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -39,28 +37,31 @@ func IsZeroAmount(value any) bool {
 }
 
 // OriginOwnsRealm reports whether u is an HTTPS URL on the default port
-// whose hostname and realm have the same canonical IDNA lookup name.
+// whose hostname equals realm, ignoring ASCII case.
+//
+// Both must be ASCII, as in mppx, which compares the realm with the WHATWG
+// URL hostname (always ASCII, with internationalized labels in their xn--
+// form): a hostname or realm with a non-ASCII character never owns a realm,
+// so a client signs a proof for an internationalized domain only when both
+// the URL and the realm use its xn-- form. Rejecting non-ASCII names, rather
+// than comparing them after Unicode case folding or a partial IDNA mapping,
+// keeps distinct Unicode domains (such as σ and ς) from matching.
 func OriginOwnsRealm(u *url.URL, realm string) bool {
 	if u == nil || u.Scheme != "https" || (u.Port() != "" && u.Port() != "443") || realm == "" || u.Hostname() == "" {
 		return false
 	}
-	host, err := lookupHostname(u.Hostname())
-	if err != nil {
-		return false
-	}
-	name, err := lookupHostname(realm)
-	return err == nil && strings.EqualFold(name, host)
+	host := u.Hostname()
+	return isASCII(host) && isASCII(realm) && strings.EqualFold(host, realm)
 }
 
-// Match net/http's hostname conversion: ASCII hostnames (including IP
-// literals) are passed through; Unicode names use the IDNA lookup profile.
-func lookupHostname(host string) (string, error) {
-	for _, r := range host {
-		if r >= utf8.RuneSelf {
-			return idna.Lookup.ToASCII(host)
+// isASCII reports whether s has only ASCII characters.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
 		}
 	}
-	return host, nil
+	return true
 }
 
 // Origin returns the lowercase scheme://host[:port] origin of u, or "" for nil.
@@ -96,6 +97,9 @@ func NormalizeOrigin(origin string) string {
 func RealmError(realm, origin, hint string) error {
 	if origin == "" {
 		return fmt.Errorf("mpp: refusing to sign Tempo proof for untrusted realm %q; %s", realm, hint)
+	}
+	if !isASCII(origin) {
+		return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q: internationalized hostnames must use their xn-- (punycode) form in the request URL", realm, origin)
 	}
 	return fmt.Errorf("mpp: refusing to sign Tempo proof for realm %q from %q", realm, origin)
 }
