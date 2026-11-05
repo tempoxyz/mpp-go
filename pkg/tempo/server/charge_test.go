@@ -1772,10 +1772,13 @@ func TestChargeFlow_FeePayerTransactionFailsPreflightBeforeBroadcast(t *testing.
 		}
 
 		if _, finalEnvelope := callObject["feePayer"]; !finalEnvelope {
-			assert.Equal(t, map[string]any{
-				"calls": callObject["calls"],
-				"from":  callObject["from"],
-			}, callObject)
+			// The sender's simulation runs at the broadcast gas limit with
+			// no fee token or fee per gas, so the sender is charged no fee.
+			assert.NotEmpty(t, callObject["gas"])
+			assert.NotContains(t, callObject, "feeToken")
+			assert.NotContains(t, callObject, "maxFeePerGas")
+			assert.NotContains(t, callObject, "maxPriorityFeePerGas")
+			assert.NotContains(t, callObject, "feePayerSignature")
 			return &temporpc.JSONRPCResponse{Result: rpc.callResult}, nil
 		}
 		if !assert.NotEqual(t, "", callObject["from"],

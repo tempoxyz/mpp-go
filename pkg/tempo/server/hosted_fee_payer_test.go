@@ -188,7 +188,8 @@ func TestHostedFeePayerSponsorsAndServerBroadcasts(t *testing.T) {
 			require.Len(t, rpc.callRequests, 2)
 			senderSimulation, sponsoredSimulation := rpc.callRequests[0], rpc.callRequests[1]
 			assert.NotContains(t, senderSimulation, "feePayer")
-			assert.NotContains(t, senderSimulation, "gas")
+			assert.Equal(t, hexutil.EncodeUint64(client.Gas), senderSimulation["gas"])
+			assert.NotContains(t, senderSimulation, "maxFeePerGas")
 			assert.Equal(t, fake.signer.Address().Hex(), sponsoredSimulation["feePayer"])
 			assert.Equal(t, feeToken.Hex(), sponsoredSimulation["feeToken"])
 

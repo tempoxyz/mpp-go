@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"math/big"
 	"net/url"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -880,7 +882,29 @@ func (i *Intent) broadcastTransaction(
 					return nil, err
 				}
 			}
-			if err := simulateSponsoredTransactionExecution(ctx, rpc, tx, sponsorAddress); err != nil {
+			// The sender's simulation above is the gas-bounded check: it
+			// runs at the broadcast gas limit. The node recovers an
+			// eth_call's fee payer only from its feePayerSignature, so the
+			// final simulation carries one: the hosted sponsor's as it
+			// signed it, or for a local fee payer a simulation-only
+			// signature made now over a copy with more gas, within the
+			// sponsor policy. A sponsored eth_call charges more gas than
+			// the mined transaction uses, so when the final simulation
+			// could not get the full sponsoredSimulationGasBuffer (always
+			// for a hosted fee payer) it tolerates running out of gas.
+			simulated := tx
+			if i.feePayerSigner != nil {
+				policy, err := i.sponsorPolicyFor(tx.FeeToken)
+				if err != nil {
+					return nil, err
+				}
+				simulated, err = feePayerSimulationTransaction(tx, i.feePayerSigner, credential.Challenge.Expires, policy)
+				if err != nil {
+					return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer simulation")
+				}
+			}
+			tolerateOutOfGas := simulated.Gas-tx.Gas < sponsoredSimulationGasBuffer
+			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, sponsorAddress, tolerateOutOfGas); err != nil {
 				return nil, err
 			}
 		} else {
@@ -1690,25 +1714,170 @@ func addressToWord(address common.Address) string {
 	return strings.Repeat("0", 24) + strings.TrimPrefix(strings.ToLower(address.Hex()), "0x")
 }
 
+// simulateSponsoredSenderExecution simulates a fee-sponsored transaction's
+// calls from its sender, without any fee payer, at the transaction's own gas
+// limit: the gas-bounded check that the broadcast cannot run out of gas. It
+// carries the sender's nonce, nonce key, validity window and key
+// authorization, which set the intrinsic gas, but no fee token or fee per
+// gas, so the node charges no fee and (since Tempo v1.18, which checks the
+// payer's fee token balance in eth_call) needs no fee token balance from a
+// sender the sponsor pays for.
 func simulateSponsoredSenderExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
-	return simulateCall(ctx, rpc, map[string]any{
-		"calls": callsCallObject(tx.Calls),
-		"from":  tx.From.Hex(),
-	})
+	callObject, err := transactionCallObject(tx)
+	if err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	delete(callObject, "feeToken")
+	delete(callObject, "maxFeePerGas")
+	delete(callObject, "maxPriorityFeePerGas")
+	return simulateCall(ctx, rpc, callObject)
 }
 
+// sponsoredSimulationGasBuffer is the most gas a local fee payer's
+// simulation-only signature adds over the transaction's gas limit; the fee
+// payer signature binds the gas limit, so the final simulation signs a copy
+// with up to this much more gas while the broadcast transaction keeps its own.
+// eth_call skips fee collection, leaving the fee token's storage slots cold,
+// so a sponsored eth_call needs exactly 6,000 more gas than the mined
+// transaction when its calls touch the fee token and none otherwise. The
+// remaining risk is a gas limit up to 6,000 short on calls that don't touch
+// the fee token; a node fix that warms those slots in eth_call would remove
+// the buffer.
+const sponsoredSimulationGasBuffer = 6_000
+
+// sponsoredSimulationGas returns the gas limit of tx's simulation-only copy:
+// tx.Gas plus sponsoredSimulationGasBuffer, lowered to stay within the
+// sponsor policy's gas cap and total fee budget (gas times maxFeePerGas), and
+// never below tx.Gas.
+func sponsoredSimulationGas(tx *tempotx.Tx, policy FeePayerPolicy) uint64 {
+	gas := feePayerMaxGas
+	if tx.Gas <= math.MaxUint64-sponsoredSimulationGasBuffer && tx.Gas+sponsoredSimulationGasBuffer < gas {
+		gas = tx.Gas + sponsoredSimulationGasBuffer
+	}
+	if tx.MaxFeePerGas != nil && tx.MaxFeePerGas.Sign() > 0 && policy.MaxTotalFee != nil {
+		budget := new(big.Int).Quo(policy.MaxTotalFee, tx.MaxFeePerGas)
+		if budget.IsUint64() && budget.Uint64() < gas {
+			gas = budget.Uint64()
+		}
+	}
+	return max(gas, tx.Gas)
+}
+
+// feePayerSimulationTransaction returns a copy of the co-signed transaction
+// tx for the final sponsored eth_call, its gas limit raised by up to
+// sponsoredSimulationGasBuffer within policy (sponsoredSimulationGas), and
+// co-signed by signer over the same fee payer payload as the broadcast
+// co-signature (sender tx.From, fee token tx.FeeToken) only once the copy
+// passes the same sponsor policy check as tx. tx itself is unchanged, and
+// the copy is only ever simulated, never broadcast. Call it only after the
+// sender's simulation passed.
+func feePayerSimulationTransaction(tx *tempotx.Tx, signer *temposigner.Signer, challengeExpires string, policy FeePayerPolicy) (*tempotx.Tx, error) {
+	simulation := tx.Clone()
+	simulation.From = tx.From
+	simulation.FeeToken = tx.FeeToken
+	simulation.AwaitingFeePayer = false
+	simulation.Gas = sponsoredSimulationGas(tx, policy)
+	if err := validateFeePayerTransaction(simulation, challengeExpires, policy); err != nil {
+		return nil, err
+	}
+	hash, err := tempotx.GetFeePayerSignPayload(simulation, tx.From)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := signer.Sign(hash)
+	if err != nil {
+		return nil, err
+	}
+	simulation.FeePayerSignature = signature
+	return simulation, nil
+}
+
+// simulateSponsoredTransactionExecution simulates the final fee-sponsored
+// transaction tx from its sender with its fee payer signature, never the
+// sender's. Since Tempo v1.18 an eth_call checks the fee payer's fee token
+// balance (gas limit times maxFeePerGas), and the node recovers the fee payer
+// only from feePayerSignature: a bare feePayer address is ignored and the
+// sender is billed, which fails when the sender does not hold the sponsor's
+// fee token. feePayer is sent too, as mppx does.
+//
+// With tolerateOutOfGas, an error that only says the call ran out of gas
+// (isOutOfGasError) passes: a sponsored eth_call charges more gas than the
+// mined transaction, and the caller already checked the calls at the
+// broadcast gas limit with simulateSponsoredSenderExecution. Any other
+// error, such as an insufficient fee token balance or a revert, fails.
 func simulateSponsoredTransactionExecution(
 	ctx context.Context,
 	rpc tempo.RPCClient,
 	tx *tempotx.Tx,
 	feePayer common.Address,
+	tolerateOutOfGas bool,
 ) error {
 	callObject, err := transactionCallObject(tx)
 	if err != nil {
 		return mpp.ErrVerificationFailed("transaction preflight failed")
 	}
 	callObject["feePayer"] = feePayer.Hex()
-	return simulateCall(ctx, rpc, callObject)
+	if tx.FeePayerSignature != nil {
+		callObject["feePayerSignature"] = rpcSignature(tx.FeePayerSignature)
+	}
+	response, err := rpc.SendRequest(ctx, "eth_call", callObject, "latest")
+	if err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	if err := response.CheckError(); err != nil {
+		if tolerateOutOfGas && isOutOfGasError(err) {
+			return nil
+		}
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	return nil
+}
+
+// isOutOfGasError reports whether err is a JSON-RPC error from the node
+// saying the call ran out of gas. Tempo nodes answer an eth_call that
+// exhausts its gas limit with "out of gas: ..." (code -32003, shared with
+// "insufficient fee token balance") or, below the intrinsic gas, "intrinsic
+// gas too low" (code -32000), with no data, so only the message tells them
+// apart. As in mppx's isOutOfGasError, only the terminal node error counts:
+// the *temporpc.JSONRPCError in err's chain (it wraps nothing, so it is the
+// innermost error), never a wrapper's message. The match is anchored to the
+// start of the node's message, and an execution revert (code 3) or an error
+// carrying revert data is never gas exhaustion, so a revert reason or wrapper
+// text that merely mentions gas cannot hide another failure and let the
+// payment broadcast.
+func isOutOfGasError(err error) bool {
+	var rpcErr *temporpc.JSONRPCError
+	if !errors.As(err, &rpcErr) || rpcErr == nil || rpcErr.Code == 3 || hasRevertData(rpcErr.Data) {
+		return false
+	}
+	return outOfGasMessage.MatchString(strings.TrimSpace(rpcErr.Message))
+}
+
+// outOfGasMessage matches the start of a node's out-of-gas message, as
+// mppx's isOutOfGasError does.
+var outOfGasMessage = regexp.MustCompile(`(?i)^(?:out of gas(?::|$)|intrinsic gas too low(?::|$))`)
+
+// hasRevertData reports whether a JSON-RPC error's data field carries
+// anything, such as revert data; an empty value or "0x" carries nothing.
+func hasRevertData(data any) bool {
+	switch value := data.(type) {
+	case nil:
+		return false
+	case string:
+		return value != "" && value != "0x"
+	default:
+		return true
+	}
+}
+
+// rpcSignature renders a secp256k1 signature as JSON-RPC {r, s, yParity}
+// hex quantities, a yParity of 0 as "0x0".
+func rpcSignature(signature *temposigner.Signature) map[string]any {
+	return map[string]any{
+		"r":       hexutil.EncodeBig(signature.R),
+		"s":       hexutil.EncodeBig(signature.S),
+		"yParity": hexutil.EncodeUint64(uint64(signature.YParity)),
+	}
 }
 
 func simulateTransactionExecution(ctx context.Context, rpc tempo.RPCClient, tx *tempotx.Tx) error {
@@ -1731,7 +1900,7 @@ func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[strin
 }
 
 // transactionCallObject renders tx as an eth_call request without its
-// signatures, with its keyAuthorization as viem formats it (ox
+// signatures (simulateSponsoredTransactionExecution adds the fee payer's), with its keyAuthorization as viem formats it (ox
 // KeyAuthorization.toRpc), as mppx simulates a transaction.
 func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
 	callObject := map[string]any{
