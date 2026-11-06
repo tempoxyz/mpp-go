@@ -1,12 +1,12 @@
 ---
-github.com/tempoxyz/mpp-go: minor
+github.com/tempoxyz/mpp-go: patch
 ---
 
 Stopped automatic MCP replacement payments after a hash credential was sent, and preserved installed access-key restrictions in sponsored transaction simulations.
 
-Updated Brotli to fix excessive allocations when decompressing crafted streams.
+Exposed the submitted hash Credential and underlying server error for explicit MCP payment reconciliation.
 
-Migrated the Echo adapter to `github.com/labstack/echo/v5` v5.4.4, removing the vulnerable v4 dependency. This breaks Echo v4 handler and middleware compatibility: import Echo v5 and change handlers and context helpers to use `*echo.Context`. The adapter package path is unchanged. Updated the example and integration tests to v5.
+Updated Echo v5 to v5.4.4 and preserved receipt emission after Echo hooks choose the final response status. Rejected incompatible custom response writers before processing payments. The adapter package path is unchanged; Echo v5 handlers use `*echo.Context`.
 
 ```go
 import (
