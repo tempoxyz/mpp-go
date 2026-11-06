@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/ethereum/go-ethereum/crypto"
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 	echoadapter "github.com/tempoxyz/mpp-go/pkg/server/echo"
@@ -57,11 +57,11 @@ func main() {
 	}
 	e := echofw.New()
 
-	e.GET("/health", func(c echofw.Context) error {
+	e.GET("/health", func(c *echofw.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{"status": "ok"})
 	})
 
-	e.GET("/paid", func(c echofw.Context) error {
+	e.GET("/paid", func(c *echofw.Context) error {
 		credential := echoadapter.Credential(c)
 		receipt := echoadapter.Receipt(c)
 		return c.JSON(http.StatusOK, map[string]any{

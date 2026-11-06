@@ -10,7 +10,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,17 +41,19 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	var challengeCommitted bool
 	var challengeStatus int
 	e.Use(func(next echofw.HandlerFunc) echofw.HandlerFunc {
-		return func(c echofw.Context) error {
+		return func(c *echofw.Context) error {
 			err := next(c)
 			if c.Request().Header.Get("Authorization") == "" {
-				challengeCommitted = c.Response().Committed
-				challengeStatus = c.Response().Status
+				response, unwrapErr := echofw.UnwrapResponse(c.Response())
+				require.NoError(t, unwrapErr)
+				challengeCommitted = response.Committed
+				challengeStatus = response.Status
 			}
 			return err
 		}
 	})
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.GET("/paid", func(c echofw.Context) error {
+	e.GET("/paid", func(c *echofw.Context) error {
 		if c.Request().Header.Get("X-Downstream-Error") != "" {
 			return c.String(http.StatusInternalServerError, "failed")
 		}
@@ -150,7 +152,7 @@ func TestChargeMiddlewareAutoScopesRoute(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.GET("/paid/:id", func(c echofw.Context) error {
+	e.GET("/paid/:id", func(c *echofw.Context) error {
 		return c.String(http.StatusOK, "paid")
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
 
@@ -184,7 +186,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.POST("/paid", func(c echofw.Context) error {
+	e.POST("/paid", func(c *echofw.Context) error {
 		_, _ = io.ReadAll(c.Request().Body)
 		return c.String(http.StatusOK, "paid")
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
@@ -217,7 +219,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.POST("/paid", func(c echofw.Context) error {
+	e.POST("/paid", func(c *echofw.Context) error {
 		body, _ := io.ReadAll(c.Request().Body)
 		return c.String(http.StatusOK, string(body))
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
@@ -253,7 +255,7 @@ func newTestServer(t *testing.T, method server.Method, realm, secretKey string, 
 
 func TestOversizedBodyRejectedBeforePayment(t *testing.T) {
 	router := echofw.New()
-	router.POST("/", func(c echofw.Context) error { t.Fatal("handler called"); return nil }, ChargeMiddleware(nil, server.ChargeParams{}))
+	router.POST("/", func(c *echofw.Context) error { t.Fatal("handler called"); return nil }, ChargeMiddleware(nil, server.ChargeParams{}))
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", server.MaxRequestBodyBytes+1)))
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
@@ -266,7 +268,7 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.GET("/paid/:id", func(c echofw.Context) error { return nil }, ChargeMiddleware(payment, server.ChargeParams{
+	e.GET("/paid/:id", func(c *echofw.Context) error { return nil }, ChargeMiddleware(payment, server.ChargeParams{
 		Amount:    "0.50",
 		MppxScope: "custom",
 	}))
@@ -277,4 +279,93 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 	challenge, err := mpp.ParseChallenge(resp.Header().Get("WWW-Authenticate"))
 	require.NoError(t, err)
 	assert.Equal(t, "custom", challenge.Opaque["_mppx_scope"])
+}
+
+func TestChargeMiddlewareV5ResponseLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		handler echofw.HandlerFunc
+		status  int
+		receipt bool
+	}{
+		{"JSON success", func(c *echofw.Context) error { return c.JSON(http.StatusCreated, map[string]string{"result": "paid"}) }, http.StatusCreated, true},
+		{"returned error", func(c *echofw.Context) error {
+			return echofw.NewHTTPError(http.StatusServiceUnavailable, "unavailable")
+		}, http.StatusServiceUnavailable, false},
+		{"stream flush", func(c *echofw.Context) error {
+			if _, err := io.WriteString(c.Response(), "paid stream"); err != nil {
+				return err
+			}
+			return http.NewResponseController(c.Response()).Flush()
+		}, http.StatusOK, true},
+		{"before hook changes status", func(c *echofw.Context) error {
+			response, err := echofw.UnwrapResponse(c.Response())
+			if err != nil {
+				return err
+			}
+			response.Before(func() { response.Status = http.StatusServiceUnavailable })
+			return c.String(http.StatusOK, "unavailable")
+		}, http.StatusServiceUnavailable, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			e := echofw.New()
+			payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+			var response *echofw.Response
+			e.GET("/paid", func(c *echofw.Context) error {
+				var err error
+				response, err = echofw.UnwrapResponse(c.Response())
+				require.NoError(t, err)
+				return test.handler(c)
+			}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
+			challenge := httptest.NewRecorder()
+			e.ServeHTTP(challenge, httptest.NewRequest(http.MethodGet, "/paid", nil))
+			require.Equal(t, http.StatusPaymentRequired, challenge.Code)
+			request := httptest.NewRequest(http.MethodGet, "/paid", nil)
+			request.Header.Set(mpp.HeaderAuthorization, settledAuthorization(t, challenge.Header().Get(mpp.HeaderWWWAuthenticate)))
+			result := httptest.NewRecorder()
+			e.ServeHTTP(result, request)
+			require.Equal(t, test.status, result.Code)
+			require.NotNil(t, response)
+			assert.True(t, response.Committed)
+			assert.Equal(t, test.status, response.Status)
+			assert.Equal(t, test.receipt, result.Header().Get(mpp.HeaderPaymentReceipt) != "")
+			if test.name == "stream flush" {
+				assert.True(t, result.Flushed)
+			}
+		})
+	}
+}
+
+func TestUnsupportedResponseWriterRejectedBeforePayment(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		middleware func(*server.Mpp) echofw.MiddlewareFunc
+	}{
+		{"charge", func(payment *server.Mpp) echofw.MiddlewareFunc {
+			return ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"})
+		}},
+		{"compose", func(payment *server.Mpp) echofw.MiddlewareFunc {
+			return ComposeMiddleware(server.Offer{Mpp: payment, Params: server.ChargeParams{Amount: "0.50"}})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			settled := 0
+			payment := newTestServer(t, unformattableReceiptMethod{&settled}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+			middleware := test.middleware(payment)
+			e := echofw.New()
+			e.GET("/paid", func(c *echofw.Context) error { return c.NoContent(http.StatusOK) }, middleware)
+			challenge := httptest.NewRecorder()
+			e.ServeHTTP(challenge, httptest.NewRequest(http.MethodGet, "/paid", nil))
+			require.Equal(t, http.StatusPaymentRequired, challenge.Code)
+			request := httptest.NewRequest(http.MethodGet, "/paid", nil)
+			request.Header.Set(mpp.HeaderAuthorization, settledAuthorization(t, challenge.Header().Get(mpp.HeaderWWWAuthenticate)))
+			ctx := e.NewContext(request, httptest.NewRecorder())
+			ctx.SetResponse(httptest.NewRecorder()) // No Unwrap method or Echo response tracking.
+			called := false
+			err := middleware(func(*echofw.Context) error { called = true; return nil })(ctx)
+			require.Error(t, err)
+			assert.Zero(t, settled)
+			assert.False(t, called)
+		})
+	}
 }

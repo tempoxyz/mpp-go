@@ -13,7 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -97,7 +97,7 @@ func TestMiddlewarePaymentErrors(t *testing.T) {
 							handler = router
 						case "echo":
 							router := echo.New()
-							router.GET("/paid", func(c echo.Context) error { handlerCalls++; return c.NoContent(http.StatusOK) }, echoadapter.ChargeMiddleware(payment, params))
+							router.GET("/paid", func(c *echo.Context) error { handlerCalls++; return c.NoContent(http.StatusOK) }, echoadapter.ChargeMiddleware(payment, params))
 							handler = router
 						case "fiber":
 							app = fiber.New()
