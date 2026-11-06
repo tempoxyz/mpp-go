@@ -14,7 +14,7 @@ import (
 	ginfw "github.com/gin-gonic/gin"
 	"github.com/go-chi/chi/v5"
 	fiberfw "github.com/gofiber/fiber/v2"
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tempoxyz/mpp-go/pkg/client"
@@ -64,7 +64,7 @@ func TestIntegrationAdapters(t *testing.T) {
 		},
 		"echo": func(t *testing.T, payment *server.Mpp) string {
 			e := echofw.New()
-			e.GET("/paid", func(c echofw.Context) error {
+			e.GET("/paid", func(c *echofw.Context) error {
 				writePaidBody(c.Response(), echoadapter.Credential(c), echoadapter.Receipt(c))
 				return nil
 			}, echoadapter.ChargeMiddleware(payment, adapterChargeParams))

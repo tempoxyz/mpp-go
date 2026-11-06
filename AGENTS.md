@@ -21,7 +21,7 @@ go run ./examples/charge-basic  # run one example against it
 
 Run one test with `go test -run '^TestName$' ./pkg/server`, and one fuzz target with `go test -run='^$' -fuzz='^FuzzParseChallenge$' -fuzztime=30s ./pkg/mpp`. Unit tests need nothing external. The live tests in `tests/` (build tag `integration`) need Docker or a running node; see Testing.
 
-CI (`.github/workflows/ci.yml`) runs unit tests on the minimum Go version in go.mod (`go` line, with `GOTOOLCHAIN=local`) and on the latest stable release, checks gofmt, `go vet`, `go mod tidy -diff` and `go mod verify`, and cross-compiles for darwin and windows. Install golangci-lint v2 to run `make lint`; CI reports only issues on lines a change touches, so don't reformat untouched code to fix existing findings. Other workflows: `api-compat.yml` (see Conventions), `conformance.yml` (mpp-tools conformance vectors through the Go adapter), `smoke-cross-sdk.yml`, `govulncheck.yml` and `changelogs.yml`.
+CI (`.github/workflows/ci.yml`) runs unit tests on the minimum Go version in go.mod (`go` line, with `GOTOOLCHAIN=local`) and on the latest stable release, checks gofmt, `go vet`, `go mod tidy -diff` and `go mod verify`, and cross-compiles for darwin and windows. Install golangci-lint v2 to run `make lint`; CI reports only issues on lines a change touches, so don't reformat untouched code to fix existing findings. Other workflows: `api-compat.yml` (see Conventions), `smoke-cross-sdk.yml`, `govulncheck.yml` and `changelogs.yml`. mpp-tools' daily SDK Conformance Monitor runs the cross-SDK conformance suite against `main` with the `go` adapter and opens a `conformance-failure` issue in tempoxyz/mpp-tools when it fails; this repository's CI does not run it. Protocol changes add or update vectors there.
 
 ## Layout
 
@@ -91,7 +91,7 @@ git worktree remove /tmp/mpp-go-base
 
 ### Deprecated APIs
 
-No deprecated APIs remain: the ones the SDK improvement plan replaced were removed in one minor release (`.changelog/remove-deprecated-apis.md`) and the last ones, kept for the mpp-tools conformance adapter and the READMEs, in the next (`.changelog/remove-remaining-deprecated-apis.md`). Before removing an API marked `// Deprecated:`, check that the mpp-tools Go conformance adapter (`tempoxyz/mpp-tools/conformance/adapters/go`), which CI builds against this SDK, and the READMEs no longer use it. `staticcheck -checks SA1019 ./...` reports nothing; tests build Challenges and headers with `pkg/internal/mpptest`.
+No deprecated APIs remain: the ones the SDK improvement plan replaced were removed in one minor release (`.changelog/remove-deprecated-apis.md`) and the last ones, kept for the mpp-tools conformance adapter and the READMEs, in the next (`.changelog/remove-remaining-deprecated-apis.md`). Before removing an API marked `// Deprecated:`, check that the mpp-tools Go conformance adapter (`tempoxyz/mpp-tools/conformance/adapters/go`), which mpp-tools' daily conformance run builds against this SDK's `main`, and the READMEs no longer use it. `staticcheck -checks SA1019 ./...` reports nothing; tests build Challenges and headers with `pkg/internal/mpptest`.
 
 ### READMEs
 

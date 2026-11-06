@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -45,7 +45,7 @@ func TestChargeMiddlewareServesSettledPaymentWhenReceiptCannotBeFormatted(t *tes
 	var settled, served int
 	payment := newTestServer(t, unformattableReceiptMethod{&settled}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e := echofw.New()
-	e.GET("/paid", func(c echofw.Context) error {
+	e.GET("/paid", func(c *echofw.Context) error {
 		served++
 		return c.String(http.StatusOK, "paid content")
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
