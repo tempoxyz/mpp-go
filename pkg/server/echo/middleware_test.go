@@ -10,7 +10,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,17 +41,19 @@ func TestChargeMiddleware_EndToEnd(t *testing.T) {
 	var challengeCommitted bool
 	var challengeStatus int
 	e.Use(func(next echofw.HandlerFunc) echofw.HandlerFunc {
-		return func(c echofw.Context) error {
+		return func(c *echofw.Context) error {
 			err := next(c)
 			if c.Request().Header.Get("Authorization") == "" {
-				challengeCommitted = c.Response().Committed
-				challengeStatus = c.Response().Status
+				if resp, err := echofw.UnwrapResponse(c.Response()); err == nil {
+					challengeCommitted = resp.Committed
+					challengeStatus = resp.Status
+				}
 			}
 			return err
 		}
 	})
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.GET("/paid", func(c echofw.Context) error {
+	e.GET("/paid", func(c *echofw.Context) error {
 		if c.Request().Header.Get("X-Downstream-Error") != "" {
 			return c.String(http.StatusInternalServerError, "failed")
 		}
@@ -150,7 +152,7 @@ func TestChargeMiddlewareAutoScopesRoute(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.GET("/paid/:id", func(c echofw.Context) error {
+	e.GET("/paid/:id", func(c *echofw.Context) error {
 		return c.String(http.StatusOK, "paid")
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
 
@@ -184,7 +186,7 @@ func TestChargeMiddlewareRejectsTamperedRequestBodyDigest(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.POST("/paid", func(c echofw.Context) error {
+	e.POST("/paid", func(c *echofw.Context) error {
 		_, _ = io.ReadAll(c.Request().Body)
 		return c.String(http.StatusOK, "paid")
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
@@ -217,7 +219,7 @@ func TestChargeMiddlewarePreservesVerifiedRequestBody(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.POST("/paid", func(c echofw.Context) error {
+	e.POST("/paid", func(c *echofw.Context) error {
 		body, _ := io.ReadAll(c.Request().Body)
 		return c.String(http.StatusOK, string(body))
 	}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
@@ -253,7 +255,7 @@ func newTestServer(t *testing.T, method server.Method, realm, secretKey string, 
 
 func TestOversizedBodyRejectedBeforePayment(t *testing.T) {
 	router := echofw.New()
-	router.POST("/", func(c echofw.Context) error { t.Fatal("handler called"); return nil }, ChargeMiddleware(nil, server.ChargeParams{}))
+	router.POST("/", func(c *echofw.Context) error { t.Fatal("handler called"); return nil }, ChargeMiddleware(nil, server.ChargeParams{}))
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", server.MaxRequestBodyBytes+1)))
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
@@ -266,7 +268,7 @@ func TestChargeMiddlewareRespectsCallerMppxScope(t *testing.T) {
 
 	e := echofw.New()
 	payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-	e.GET("/paid/:id", func(c echofw.Context) error { return nil }, ChargeMiddleware(payment, server.ChargeParams{
+	e.GET("/paid/:id", func(c *echofw.Context) error { return nil }, ChargeMiddleware(payment, server.ChargeParams{
 		Amount:    "0.50",
 		MppxScope: "custom",
 	}))

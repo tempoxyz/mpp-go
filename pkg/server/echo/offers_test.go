@@ -8,7 +8,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -73,7 +73,7 @@ func TestChargeMiddleware_AdvertisesEveryOffer(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		payment := newTestServer(t, offersTestMethod{fail: fail}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 		e := echofw.New()
-		e.GET("/paid", func(c echofw.Context) error {
+		e.GET("/paid", func(c *echofw.Context) error {
 			return c.String(http.StatusOK, Receipt(c).Reference)
 		}, ChargeMiddleware(payment, server.ChargeParams{Amount: "1"}))
 

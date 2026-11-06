@@ -3,7 +3,7 @@ package echoadapter
 import (
 	"slices"
 
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
@@ -15,14 +15,14 @@ const (
 )
 
 // Credential returns the verified credential stored on the Echo context.
-func Credential(c echofw.Context) *mpp.Credential {
+func Credential(c *echofw.Context) *mpp.Credential {
 	v := c.Get(credentialKey)
 	credential, _ := v.(*mpp.Credential)
 	return credential
 }
 
 // Receipt returns the verified receipt stored on the Echo context.
-func Receipt(c echofw.Context) *mpp.Receipt {
+func Receipt(c *echofw.Context) *mpp.Receipt {
 	v := c.Get(receiptKey)
 	receipt, _ := v.(*mpp.Receipt)
 	return receipt
@@ -35,7 +35,7 @@ func Receipt(c echofw.Context) *mpp.Receipt {
 // Receipt on the Echo context and the request context.
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.MiddlewareFunc {
 	return func(next echofw.HandlerFunc) echofw.HandlerFunc {
-		return func(c echofw.Context) error {
+		return func(c *echofw.Context) error {
 			params := params.WithDefaultScope(server.ScopeFromHTTPRequest(c.Request(), c.Path()))
 			result, err := m.ChargeRequest(c.Request(), params)
 			return serve(c, next, result, err)
@@ -53,7 +53,7 @@ func ComposeMiddleware(offers ...server.Offer) echofw.MiddlewareFunc {
 	_ = server.ComposeMiddleware(offers...) // validate offers up front
 	offers = slices.Clone(offers)
 	return func(next echofw.HandlerFunc) echofw.HandlerFunc {
-		return func(c echofw.Context) error {
+		return func(c *echofw.Context) error {
 			scope := server.ScopeFromHTTPRequest(c.Request(), c.Path())
 			result, err := server.ComposeRequest(c.Request(), scopedOffers(offers, scope)...)
 			return serve(c, next, result, err)
@@ -76,7 +76,7 @@ func scopedOffers(offers []server.Offer, scope string) []server.Offer {
 
 // serve writes the payment response for an unpaid or rejected request, or
 // calls next for a verified payment, adding its receipt to a 2xx response.
-func serve(c echofw.Context, next echofw.HandlerFunc, result *server.ChargeResult, err error) error {
+func serve(c *echofw.Context, next echofw.HandlerFunc, result *server.ChargeResult, err error) error {
 	if err != nil || result.IsChallenge() {
 		result.ServeHTTP(c.Response(), c.Request())
 		return nil
@@ -88,8 +88,8 @@ func serve(c echofw.Context, next echofw.HandlerFunc, result *server.ChargeResul
 	c.SetRequest(c.Request().WithContext(ctx))
 	c.Set(credentialKey, result.Credential)
 	c.Set(receiptKey, result.Receipt)
-	writer, complete := server.DeferPaymentReceipt(c.Response().Writer, result.Receipt)
-	c.Response().Writer = writer
+	writer, complete := server.DeferPaymentReceipt(c.Response(), result.Receipt)
+	c.SetResponse(writer)
 	if err := next(c); err != nil {
 		return err
 	}
