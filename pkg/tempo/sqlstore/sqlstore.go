@@ -18,7 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,8 +63,10 @@ type Store struct {
 	table   string
 	create  bool
 
-	mu    sync.Mutex
-	ready bool
+	// sem guards table creation: a one-slot semaphore rather than a mutex, so a
+	// caller whose context ends stops waiting for another caller's CREATE TABLE.
+	sem   chan struct{}
+	ready atomic.Bool
 }
 
 // New constructs a SQL-backed replay-protection store. It returns an error for
@@ -89,7 +91,7 @@ func New(db DB, dialect Dialect, options Options) (*Store, error) {
 	if !tableName.MatchString(table) {
 		return nil, fmt.Errorf("sqlstore: invalid table name %q", table)
 	}
-	return &Store{db: db, dialect: dialect, table: table, create: !options.SkipCreateTable}, nil
+	return &Store{db: db, dialect: dialect, table: table, create: !options.SkipCreateTable, sem: make(chan struct{}, 1)}, nil
 }
 
 // Get loads a replay-protection value. An entry whose expiry has passed is
@@ -205,9 +207,16 @@ func (s *Store) ensureTable(ctx context.Context) error {
 	if !s.create {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ready {
+	if s.ready.Load() {
+		return nil
+	}
+	select {
+	case s.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-s.sem }()
+	if s.ready.Load() {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS "+s.table+
@@ -217,7 +226,7 @@ func (s *Store) ensureTable(ctx context.Context) error {
 			return fmt.Errorf("sqlstore: create table %s: %w", s.table, err)
 		}
 	}
-	s.ready = true
+	s.ready.Store(true)
 	return nil
 }
 

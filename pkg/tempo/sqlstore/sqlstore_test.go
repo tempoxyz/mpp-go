@@ -372,3 +372,40 @@ func TestStoreSkipCreateTable(t *testing.T) {
 		})
 	}
 }
+
+// blockingDB holds every statement until release is closed.
+type blockingDB struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (d *blockingDB) ExecContext(ctx context.Context, _ string, _ ...any) (sql.Result, error) {
+	d.once.Do(func() { close(d.started) })
+	<-d.release
+	return nil, nil
+}
+
+func (d *blockingDB) QueryRowContext(ctx context.Context, _ string, _ ...any) *sql.Row {
+	panic("unexpected query")
+}
+
+func TestStoreTableCreationWaitHonorsContext(t *testing.T) {
+	t.Parallel()
+	db := &blockingDB{started: make(chan struct{}), release: make(chan struct{})}
+	store, err := New(db, SQLite, Options{})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- store.ensureTable(context.Background()) }()
+	<-db.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, store.ensureTable(ctx), context.DeadlineExceeded,
+		"a waiter must stop when its own context ends")
+
+	close(db.release)
+	require.NoError(t, <-done)
+	require.NoError(t, store.ensureTable(ctx), "a created table needs no lock")
+}
