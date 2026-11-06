@@ -576,6 +576,47 @@ func TestHashPaymentRetriesNeverCreateReplacementTransfers(t *testing.T) {
 			assert.Len(t, payer.credentials(), 1)
 			assert.Equal(t, 1, approvals)
 			assert.Equal(t, test.wantCalls, calls)
+			require.ErrorIs(t, err, mcpclient.ErrPaymentReconciliationRequired)
+			var reconciliation *mcpclient.ReconciliationError
+			require.ErrorAs(t, err, &reconciliation)
+			assert.Equal(t, "0xsettled", reconciliation.Credential.Payload["hash"])
+			var serverErr *jsonrpc.Error
+			require.ErrorAs(t, err, &serverErr)
+		})
+	}
+}
+
+func TestCallerSuppliedHashNeverCreatesReplacementTransfer(t *testing.T) {
+	for _, wireObject := range []bool{false, true} {
+		t.Run(fmt.Sprint(wireObject), func(t *testing.T) {
+			payer := &hashClientMethod{testClientMethod: testClientMethod{token: "valid"}}
+			approvals := 0
+			challenge := &mpp.Challenge{ID: "original", Realm: realm, Method: "test", Intent: "charge", Request: map[string]any{"currency": "A", "amount": "1"}}
+			credential := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": "0xalreadybroadcast"}}
+			var value any = credential
+			if wireObject {
+				raw, err := json.Marshal(credential)
+				require.NoError(t, err)
+				require.NoError(t, json.Unmarshal(raw, &value))
+			}
+			srv := newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				fresh := *challenge
+				fresh.ID = "replacement"
+				data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{&fresh}})
+				require.NoError(t, err)
+				return nil, &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "payment required", Data: data}
+			})
+			session := connect(t, srv, mcpclient.Wrap(newClient(), mcpclient.Config{
+				Methods:           []client.Method{payer},
+				OnPaymentRequired: func(context.Context, *mpp.Challenge) (bool, error) { approvals++; return true, nil },
+			}))
+			_, err := callPremium(context.Background(), session, mcp.Meta{mpp.MCPCredentialMetaKey: value})
+			require.ErrorIs(t, err, mcpclient.ErrPaymentReconciliationRequired)
+			var reconciliation *mcpclient.ReconciliationError
+			require.ErrorAs(t, err, &reconciliation)
+			assert.Equal(t, "0xalreadybroadcast", reconciliation.Credential.Payload["hash"])
+			assert.Empty(t, payer.credentials())
+			assert.Zero(t, approvals)
 		})
 	}
 }

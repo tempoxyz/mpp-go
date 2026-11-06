@@ -21,6 +21,7 @@ import (
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
+	"github.com/tempoxyz/mpp-go/pkg/mcp/internal/payment"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -34,7 +35,21 @@ const methodCallTool = "tools/call"
 // when an OnChallenge hook declines, so errors.Is matches either.
 var ErrPaymentDeclined = mppclient.ErrPaymentDeclined
 
-var errReconcilePayment = errors.New("mpp: reconcile the sent payment before paying another challenge")
+// ErrPaymentReconciliationRequired indicates a submitted transfer must be reconciled
+// before retrying a tool call. Use errors.As to obtain its ReconciliationError.
+var ErrPaymentReconciliationRequired = errors.New("mpp: reconcile the sent payment before paying another challenge")
+
+// ReconciliationError preserves the submitted hash Credential and server failure.
+// A caller must reconcile Credential before attempting a new payment.
+type ReconciliationError struct {
+	Credential *mpp.Credential
+	Cause      error
+}
+
+func (e *ReconciliationError) Error() string { return ErrPaymentReconciliationRequired.Error() }
+func (e *ReconciliationError) Unwrap() error {
+	return errors.Join(ErrPaymentReconciliationRequired, e.Cause)
+}
 
 // OnPaymentRequired approves a payment before a Credential is created for
 // challenge. Returning false declines it.
@@ -145,11 +160,30 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		// twice. Only an invalid-payload rejection discards the Credential.
 		credentials := make(map[credentialKey]*mpp.Credential)
 		var sent credentialKey
-		hashSent := false
+		var sentHash *mpp.Credential
+		authorization, parseErr := payment.Authorization(params.Meta)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if authorization != "" {
+			credential, parseErr := mpp.ParseCredential(authorization)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if credential.Payload["type"] == "hash" {
+				sentHash = credential
+			}
+		}
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
 			data, invalidPayload, ok := paymentRequired(result, err)
-			if !ok || attempt == maxPaymentAttempts {
+			if !ok {
+				return result, err
+			}
+			if attempt == maxPaymentAttempts {
+				if sentHash != nil {
+					return result, &ReconciliationError{Credential: sentHash, Cause: err}
+				}
 				return result, err
 			}
 			if invalidPayload {
@@ -159,16 +193,16 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause, hashSent)
-			if errors.Is(payErr, errReconcilePayment) {
-				return result, err
+			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause, sentHash != nil)
+			if payErr != nil && sentHash != nil {
+				return result, &ReconciliationError{Credential: sentHash, Cause: errors.Join(err, payErr)}
 			}
 			if payErr != nil {
 				return nil, payErr
 			}
 			sent = key
 			if credential := credentials[key]; credential != nil && credential.Payload["type"] == "hash" {
-				hashSent = true
+				sentHash = credential
 			}
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}
@@ -260,7 +294,7 @@ func (config *Config) pay(
 	// A hash proves an already-broadcast transfer. A fresh challenge (or a
 	// rejected payload) must not create another transfer for the same tool call.
 	if hashSent {
-		return nil, credentialKey{}, errReconcilePayment
+		return nil, credentialKey{}, ErrPaymentReconciliationRequired
 	}
 
 	approve := config.OnPaymentRequired
