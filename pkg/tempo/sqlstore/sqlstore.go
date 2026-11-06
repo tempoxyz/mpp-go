@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -78,7 +79,7 @@ type Store struct {
 // PutIfAbsentUntil, which the Tempo charge verifier calls when configured with
 // ExpireReplayKeys, stores keys that expire.
 func New(db DB, dialect Dialect, options Options) (*Store, error) {
-	if db == nil {
+	if isNil(db) {
 		return nil, errors.New("sqlstore: nil DB")
 	}
 	if dialect != Postgres && dialect != SQLite {
@@ -254,4 +255,19 @@ func (s *Store) prepare(query string) string {
 // expires column (as in mppx), keeping sub-millisecond precision.
 func millis(t time.Time) float64 {
 	return float64(t.UnixMicro()) / 1000
+}
+
+// isNil reports a nil DB, including a typed nil such as (*sql.DB)(nil), which
+// would otherwise pass New and fail or panic on the first statement.
+func isNil(db DB) bool {
+	if db == nil {
+		return true
+	}
+	value := reflect.ValueOf(db)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }

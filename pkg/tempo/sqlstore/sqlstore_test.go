@@ -114,6 +114,10 @@ func TestNew(t *testing.T) {
 	assert.ErrorContains(t, err, "unknown dialect")
 	_, err = New(nil, SQLite, Options{})
 	assert.Error(t, err)
+	for _, typedNil := range []DB{(*sql.DB)(nil), (*sql.Conn)(nil), (*sql.Tx)(nil)} {
+		_, err = New(typedNil, SQLite, Options{})
+		assert.ErrorContainsf(t, err, "nil DB", "%T", typedNil)
+	}
 }
 
 func TestPreparePostgresPlaceholders(t *testing.T) {
