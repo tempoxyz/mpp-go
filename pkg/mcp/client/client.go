@@ -34,6 +34,8 @@ const methodCallTool = "tools/call"
 // when an OnChallenge hook declines, so errors.Is matches either.
 var ErrPaymentDeclined = mppclient.ErrPaymentDeclined
 
+var errReconcilePayment = errors.New("mpp: reconcile the sent payment before paying another challenge")
+
 // OnPaymentRequired approves a payment before a Credential is created for
 // challenge. Returning false declines it.
 type OnPaymentRequired func(ctx context.Context, challenge *mpp.Challenge) (bool, error)
@@ -143,6 +145,7 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		// twice. Only an invalid-payload rejection discards the Credential.
 		credentials := make(map[credentialKey]*mpp.Credential)
 		var sent credentialKey
+		hashSent := false
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
 			data, invalidPayload, ok := paymentRequired(result, err)
@@ -156,11 +159,17 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause)
+			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause, hashSent)
+			if errors.Is(payErr, errReconcilePayment) {
+				return result, err
+			}
 			if payErr != nil {
 				return nil, payErr
 			}
 			sent = key
+			if credential := credentials[key]; credential != nil && credential.Payload["type"] == "hash" {
+				hashSent = true
+			}
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}
 	}
@@ -193,6 +202,7 @@ func (config *Config) pay(
 	data *mpp.MCPPaymentRequiredData,
 	credentials map[credentialKey]*mpp.Credential,
 	cause error,
+	hashSent bool,
 ) (*mcp.CallToolParams, credentialKey, error) {
 	offered := make([]mpp.Challenge, 0, len(data.Challenges))
 	for _, challenge := range data.Challenges {
@@ -245,6 +255,12 @@ func (config *Config) pay(
 	}
 	if credential, ok := credentials[key]; ok {
 		return withCredential(original, credential), key, nil
+	}
+
+	// A hash proves an already-broadcast transfer. A fresh challenge (or a
+	// rejected payload) must not create another transfer for the same tool call.
+	if hashSent {
+		return nil, credentialKey{}, errReconcilePayment
 	}
 
 	approve := config.OnPaymentRequired

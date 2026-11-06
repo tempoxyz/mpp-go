@@ -527,3 +527,55 @@ func TestUnknownSettlementStopsAutomaticMCPPayment(t *testing.T) {
 		})
 	}
 }
+
+// A hash credential represents a transfer already submitted while creating it.
+type hashClientMethod struct{ testClientMethod }
+
+func (m *hashClientMethod) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
+	credential, err := m.testClientMethod.CreateCredential(ctx, challenge)
+	if err == nil {
+		credential.Payload["type"] = "hash"
+		credential.Payload["hash"] = "0xsettled"
+	}
+	return credential, err
+}
+
+func TestHashPaymentRetriesNeverCreateReplacementTransfers(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		change    bool
+		code      int64
+		problem   string
+		wantCalls int
+	}{
+		{"expired fresh challenge", true, mpp.MCPPaymentVerificationFailedCode, string(mpp.ErrorTypePaymentExpired), 2},
+		{"fresh challenge", true, mpp.MCPPaymentRequiredCode, string(mpp.ErrorTypePaymentRequired), 2},
+		{"invalid hash payload", false, mpp.MCPInvalidParamsCode, string(mpp.ErrorTypeInvalidPayload), 2},
+		{"same challenge reuses proof", false, mpp.MCPPaymentRequiredCode, string(mpp.ErrorTypePaymentRequired), 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payer := &hashClientMethod{testClientMethod: testClientMethod{token: "valid"}}
+			calls, approvals := 0, 0
+			handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				calls++
+				id := "original"
+				if test.change && calls > 1 {
+					id = "replacement"
+				}
+				challenge := &mpp.Challenge{ID: id, Realm: realm, Method: "test", Intent: "charge", Request: map[string]any{"currency": "A", "amount": "1"}}
+				data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}, Problem: map[string]any{"type": test.problem}})
+				require.NoError(t, err)
+				return nil, &jsonrpc.Error{Code: test.code, Message: "payment required", Data: data}
+			}
+			session := connect(t, newServer(handler), mcpclient.Wrap(newClient(), mcpclient.Config{
+				Methods:           []client.Method{payer},
+				OnPaymentRequired: func(context.Context, *mpp.Challenge) (bool, error) { approvals++; return true, nil },
+			}))
+			_, err := callPremium(context.Background(), session, nil)
+			require.Error(t, err)
+			assert.Len(t, payer.credentials(), 1)
+			assert.Equal(t, 1, approvals)
+			assert.Equal(t, test.wantCalls, calls)
+		})
+	}
+}
