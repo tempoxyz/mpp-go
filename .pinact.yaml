@@ -9,13 +9,9 @@ rules:
           ActionName matches "^tempoxyz/changelogs(/check)?$" && ActionVersion == "35288d5b399317c9412f9dd4bfaf8cccf2d22215"
   # mpp-tools has no tags for these existing workflow commits, so pinact
   # cannot verify a version comment. Keep this exception limited to the
-  # exact workflows and SHAs currently used here.
+  # exact workflow and SHA currently used here.
   - ignore: true
     conditions:
-      - expr: |
-          ActionName == "tempoxyz/mpp-tools/.github/workflows/sdk-conformance-policy.yml" && ActionVersion == "c5dde8faa684b79e2df665143cf7cd731608c079"
-      - expr: |
-          ActionName == "tempoxyz/mpp-tools/.github/workflows/sdk-conformance.yml" && ActionVersion == "c5dde8faa684b79e2df665143cf7cd731608c079"
       - expr: |
           ActionName == "tempoxyz/mpp-tools/.github/workflows/dependabot.yml" && ActionVersion == "77de41d7ae6e215290f31ac1f0782f545ee07e5d"
   # tempoxyz/mpp-tools publishes its reusable workflows without tags, and the
