@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	echofw "github.com/labstack/echo/v4"
+	echofw "github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,7 +18,7 @@ func TestComposeMiddleware(t *testing.T) {
 
 	payment := newTestServer(t, offersTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
 	e := echofw.New()
-	e.GET("/paid/:id", func(c echofw.Context) error {
+	e.GET("/paid/:id", func(c *echofw.Context) error {
 		return c.String(http.StatusOK, Receipt(c).Reference)
 	}, ComposeMiddleware(
 		server.Offer{Mpp: payment, Params: server.ChargeParams{Amount: "1"}},
