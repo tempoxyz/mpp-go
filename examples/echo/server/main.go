@@ -8,12 +8,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 	echofw "github.com/labstack/echo/v5"
+	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+
 	"github.com/tempoxyz/mpp-go/examples/internal/devnet"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 	echoadapter "github.com/tempoxyz/mpp-go/pkg/server/echo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	charge "github.com/tempoxyz/mpp-go/pkg/tempo/server"
-	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 )
 
 func main() {
