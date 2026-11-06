@@ -11,6 +11,7 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
 	echofw "github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -288,6 +289,8 @@ func TestChargeMiddlewareV5ResponseLifecycle(t *testing.T) {
 		status  int
 		receipt bool
 	}{
+		{"no content", func(c *echofw.Context) error { return c.NoContent(http.StatusNoContent) }, http.StatusNoContent, true},
+		{"no content failure", func(c *echofw.Context) error { return c.NoContent(http.StatusServiceUnavailable) }, http.StatusServiceUnavailable, false},
 		{"JSON success", func(c *echofw.Context) error { return c.JSON(http.StatusCreated, map[string]string{"result": "paid"}) }, http.StatusCreated, true},
 		{"returned error", func(c *echofw.Context) error {
 			return echofw.NewHTTPError(http.StatusServiceUnavailable, "unavailable")
@@ -307,32 +310,42 @@ func TestChargeMiddlewareV5ResponseLifecycle(t *testing.T) {
 			return c.String(http.StatusOK, "unavailable")
 		}, http.StatusServiceUnavailable, false},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			e := echofw.New()
-			payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
-			var response *echofw.Response
-			e.GET("/paid", func(c *echofw.Context) error {
-				var err error
-				response, err = echofw.UnwrapResponse(c.Response())
-				require.NoError(t, err)
-				return test.handler(c)
-			}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
-			challenge := httptest.NewRecorder()
-			e.ServeHTTP(challenge, httptest.NewRequest(http.MethodGet, "/paid", nil))
-			require.Equal(t, http.StatusPaymentRequired, challenge.Code)
-			request := httptest.NewRequest(http.MethodGet, "/paid", nil)
-			request.Header.Set(mpp.HeaderAuthorization, settledAuthorization(t, challenge.Header().Get(mpp.HeaderWWWAuthenticate)))
-			result := httptest.NewRecorder()
-			e.ServeHTTP(result, request)
-			require.Equal(t, test.status, result.Code)
-			require.NotNil(t, response)
-			assert.True(t, response.Committed)
-			assert.Equal(t, test.status, response.Status)
-			assert.Equal(t, test.receipt, result.Header().Get(mpp.HeaderPaymentReceipt) != "")
-			if test.name == "stream flush" {
-				assert.True(t, result.Flushed)
+		for _, gzip := range []bool{false, true} {
+			name := test.name
+			if gzip {
+				name += "/gzip"
 			}
-		})
+			t.Run(name, func(t *testing.T) {
+				e := echofw.New()
+				if gzip {
+					e.Use(middleware.GzipWithConfig(middleware.GzipConfig{MinLength: 128}))
+				}
+				payment := newTestServer(t, middlewareTestMethod{}, "api.example.com", "test-secret-key-minimum-32-byte-secret")
+				var response *echofw.Response
+				e.GET("/paid", func(c *echofw.Context) error {
+					var err error
+					response, err = echofw.UnwrapResponse(c.Response())
+					require.NoError(t, err)
+					return test.handler(c)
+				}, ChargeMiddleware(payment, server.ChargeParams{Amount: "0.50"}))
+				challenge := httptest.NewRecorder()
+				e.ServeHTTP(challenge, httptest.NewRequest(http.MethodGet, "/paid", nil))
+				require.Equal(t, http.StatusPaymentRequired, challenge.Code)
+				request := httptest.NewRequest(http.MethodGet, "/paid", nil)
+				request.Header.Set("Accept-Encoding", "gzip")
+				request.Header.Set(mpp.HeaderAuthorization, settledAuthorization(t, challenge.Header().Get(mpp.HeaderWWWAuthenticate)))
+				result := httptest.NewRecorder()
+				e.ServeHTTP(result, request)
+				require.Equal(t, test.status, result.Code)
+				require.NotNil(t, response)
+				assert.True(t, response.Committed)
+				assert.Equal(t, test.status, response.Status)
+				assert.Equal(t, test.receipt, result.Header().Get(mpp.HeaderPaymentReceipt) != "")
+				if test.name == "stream flush" {
+					assert.True(t, result.Flushed)
+				}
+			})
+		}
 	}
 }
 

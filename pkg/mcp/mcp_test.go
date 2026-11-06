@@ -620,3 +620,55 @@ func TestCallerSuppliedHashNeverCreatesReplacementTransfer(t *testing.T) {
 		})
 	}
 }
+
+func TestHashPaymentPreservesReconciliationAfterFailure(t *testing.T) {
+	for _, supplied := range []bool{false, true} {
+		for _, failure := range []struct {
+			name string
+			err  error
+		}{
+			{"internal", &jsonrpc.Error{Code: -32603, Message: "internal error"}},
+			{"payment without challenge", &jsonrpc.Error{Code: mpp.MCPPaymentVerificationFailedCode, Message: "unknown outcome", Data: json.RawMessage(`{"httpStatus":500,"challenges":[]}`)}},
+			{"transport", errors.New("connection closed")},
+			{"success", nil},
+		} {
+			t.Run(fmt.Sprintf("%s/supplied=%t", failure.name, supplied), func(t *testing.T) {
+				payer := &hashClientMethod{testClientMethod: testClientMethod{token: "valid"}}
+				challenge := &mpp.Challenge{ID: "original", Realm: realm, Method: "test", Intent: "charge", Request: map[string]any{"currency": "A", "amount": "1"}}
+				params := &mcp.CallToolParams{Name: "premium"}
+				if supplied {
+					params.Meta = mcp.Meta{mpp.MCPCredentialMetaKey: &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": "0xsettled"}}}
+				}
+				calls := 0
+				result := &mcp.CallToolResult{}
+				handler := mcpclient.Middleware(mcpclient.Config{Methods: []client.Method{payer}})(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+					calls++
+					if !supplied && calls == 1 {
+						data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}})
+						require.NoError(t, err)
+						return nil, &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "payment required", Data: data}
+					}
+					return result, failure.err
+				})
+				got, err := handler(context.Background(), "tools/call", &mcp.ClientRequest[mcp.Params]{Session: new(mcp.ClientSession), Params: params})
+				assert.Same(t, result, got)
+				if failure.err == nil {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, mcpclient.ErrPaymentReconciliationRequired)
+					require.ErrorIs(t, err, failure.err)
+					var reconciliation *mcpclient.ReconciliationError
+					require.ErrorAs(t, err, &reconciliation)
+					assert.Equal(t, "0xsettled", reconciliation.Credential.Payload["hash"])
+				}
+				if supplied {
+					assert.Equal(t, 1, calls)
+					assert.Empty(t, payer.credentials())
+				} else {
+					assert.Equal(t, 2, calls)
+					assert.Len(t, payer.credentials(), 1)
+				}
+			})
+		}
+	}
+}

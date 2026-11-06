@@ -178,6 +178,9 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		for attempt := 0; ; attempt++ {
 			data, invalidPayload, ok := paymentRequired(result, err)
 			if !ok {
+				if sentHash != nil && err != nil {
+					return result, &ReconciliationError{Credential: sentHash, Cause: err}
+				}
 				return result, err
 			}
 			if attempt == maxPaymentAttempts {

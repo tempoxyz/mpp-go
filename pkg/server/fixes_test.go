@@ -47,7 +47,7 @@ func TestDeferPaymentReceiptSkipsWriteHeaderAfterHijack(t *testing.T) {
 	assert.Empty(t, recorder.Header().Get(mpp.HeaderPaymentReceipt))
 }
 
-func TestDeferPaymentReceiptCommitsAfterFailedHijack(t *testing.T) {
+func TestDeferPaymentReceiptStagesAfterFailedHijack(t *testing.T) {
 	recorder := httptest.NewRecorder() // does not implement http.Hijacker
 	wrapped, complete := DeferPaymentReceipt(recorder, mpp.Success("tempo", "0xreceipt"))
 
@@ -57,6 +57,20 @@ func TestDeferPaymentReceiptCommitsAfterFailedHijack(t *testing.T) {
 	complete()
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.NotEmpty(t, recorder.Header().Get(mpp.HeaderPaymentReceipt))
+}
+
+func TestDeferPaymentReceiptCompletionPreservesDelayedStatus(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusNoContent, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			recorder := &hijackRecorder{ResponseRecorder: httptest.NewRecorder()}
+			wrapped, complete := DeferPaymentReceipt(recorder, mpp.Success("tempo", "0xreceipt"))
+			complete()
+			assert.Zero(t, recorder.writeHeaderCalls)
+			wrapped.WriteHeader(status)
+			assert.Equal(t, status, recorder.Code)
+			assert.Equal(t, status < 300, recorder.Result().Header.Get(mpp.HeaderPaymentReceipt) != "")
+		})
+	}
 }
 
 func challengeScope(t *testing.T, header http.Header) any {

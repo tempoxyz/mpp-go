@@ -6,7 +6,7 @@ Stopped automatic MCP replacement payments after a hash credential was sent, and
 
 Exposed the submitted hash Credential and underlying server error for explicit MCP payment reconciliation.
 
-Updated Echo v5 to v5.4.4 and preserved receipt emission after Echo hooks choose the final response status. Rejected incompatible custom response writers before processing payments. The adapter package path is unchanged; Echo v5 handlers use `*echo.Context`.
+Updated Echo v5 to v5.4.4 and preserved receipt emission after Echo hooks choose the final response status, including buffered gzip responses. Rejected incompatible custom response writers before processing payments. The adapter package path is unchanged; Echo v5 handlers use `*echo.Context`.
 
 ```go
 import (
