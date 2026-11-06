@@ -300,3 +300,37 @@ func verifyTransactionSender(tx *tempotx.Tx) (common.Address, error) {
 	}
 	return sender, nil
 }
+
+// transactionAccessKey identifies the installed key whose execution restrictions
+// eth_call must enforce. Root-account simulation would omit those restrictions.
+func transactionAccessKey(tx *tempotx.Tx) (*common.Address, error) {
+	if tx.Signature == nil || tx.Signature.Type != signatureTypeKeychain {
+		return nil, nil
+	}
+	raw := tx.Signature.Raw
+	root, err := envelopeSigner(raw)
+	if err != nil {
+		return nil, err
+	}
+	inner := raw[1+common.AddressLength:]
+	var key common.Address
+	if len(inner) == 65 {
+		hash, err := tempotx.GetSignPayload(tx)
+		if err != nil {
+			return nil, err
+		}
+		if raw[0] == envelopeTypeKeychainV2 {
+			hash = crypto.Keccak256Hash([]byte{envelopeTypeKeychainV2}, hash.Bytes(), root.Bytes())
+		}
+		key, err = recoverSecp256k1(hash, inner)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		key, err = envelopeSigner(inner)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &key, nil
+}

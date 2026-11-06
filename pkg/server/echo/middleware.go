@@ -36,9 +36,13 @@ func Receipt(c *echofw.Context) *mpp.Receipt {
 func ChargeMiddleware(m *server.Mpp, params server.ChargeParams) echofw.MiddlewareFunc {
 	return func(next echofw.HandlerFunc) echofw.HandlerFunc {
 		return func(c *echofw.Context) error {
+			response, err := echofw.UnwrapResponse(c.Response())
+			if err != nil {
+				return err
+			}
 			params := params.WithDefaultScope(server.ScopeFromHTTPRequest(c.Request(), c.Path()))
 			result, err := m.ChargeRequest(c.Request(), params)
-			return serve(c, next, result, err)
+			return serve(c, response, next, result, err)
 		}
 	}
 }
@@ -54,9 +58,13 @@ func ComposeMiddleware(offers ...server.Offer) echofw.MiddlewareFunc {
 	offers = slices.Clone(offers)
 	return func(next echofw.HandlerFunc) echofw.HandlerFunc {
 		return func(c *echofw.Context) error {
+			response, err := echofw.UnwrapResponse(c.Response())
+			if err != nil {
+				return err
+			}
 			scope := server.ScopeFromHTTPRequest(c.Request(), c.Path())
 			result, err := server.ComposeRequest(c.Request(), scopedOffers(offers, scope)...)
-			return serve(c, next, result, err)
+			return serve(c, response, next, result, err)
 		}
 	}
 }
@@ -76,7 +84,7 @@ func scopedOffers(offers []server.Offer, scope string) []server.Offer {
 
 // serve writes the payment response for an unpaid or rejected request, or
 // calls next for a verified payment, adding its receipt to a 2xx response.
-func serve(c *echofw.Context, next echofw.HandlerFunc, result *server.ChargeResult, err error) error {
+func serve(c *echofw.Context, response *echofw.Response, next echofw.HandlerFunc, result *server.ChargeResult, err error) error {
 	if err != nil || result.IsChallenge() {
 		result.ServeHTTP(c.Response(), c.Request())
 		return nil
@@ -88,8 +96,10 @@ func serve(c *echofw.Context, next echofw.HandlerFunc, result *server.ChargeResu
 	c.SetRequest(c.Request().WithContext(ctx))
 	c.Set(credentialKey, result.Credential)
 	c.Set(receiptKey, result.Receipt)
-	writer, complete := server.DeferPaymentReceipt(c.Response(), result.Receipt)
-	c.SetResponse(writer)
+	writer, complete := server.DeferPaymentReceipt(response.ResponseWriter, result.Receipt)
+	// Wrap beneath Echo's response so Before hooks choose the final status
+	// before the receipt writer decides whether to include a receipt.
+	response.ResponseWriter = writer
 	if err := next(c); err != nil {
 		return err
 	}

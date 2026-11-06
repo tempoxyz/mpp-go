@@ -16,6 +16,16 @@
 //	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "premium_tool"})
 //	receipt, err := mcpclient.Receipt(result)
 //
+// A rejected hash payment has already been submitted. Reconcile it before
+// retrying the tool call; the error retains both its Credential and server cause:
+//
+// var reconciliation *mcpclient.ReconciliationError
+//
+//	if errors.As(err, &reconciliation) {
+//	    // Persist reconciliation.Credential and check its transaction outcome.
+//	    return err
+//	}
+//
 // Middleware returns the same handling as sending middleware to install
 // yourself, without Wrap's per-client registry:
 //

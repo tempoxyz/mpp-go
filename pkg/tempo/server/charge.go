@@ -904,7 +904,7 @@ func (i *Intent) broadcastTransaction(
 				}
 			}
 			tolerateOutOfGas := simulated.Gas-tx.Gas < sponsoredSimulationGasBuffer
-			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, sponsorAddress, tolerateOutOfGas); err != nil {
+			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, tx, sponsorAddress, tolerateOutOfGas); err != nil {
 				return nil, err
 			}
 		} else {
@@ -1809,10 +1809,11 @@ func simulateSponsoredTransactionExecution(
 	ctx context.Context,
 	rpc tempo.RPCClient,
 	tx *tempotx.Tx,
+	senderTx *tempotx.Tx,
 	feePayer common.Address,
 	tolerateOutOfGas bool,
 ) error {
-	callObject, err := transactionCallObject(tx)
+	callObject, err := transactionCallObject(tx, senderTx)
 	if err != nil {
 		return mpp.ErrVerificationFailed("transaction preflight failed")
 	}
@@ -1902,7 +1903,7 @@ func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[strin
 // transactionCallObject renders tx as an eth_call request without its
 // signatures (simulateSponsoredTransactionExecution adds the fee payer's), with its keyAuthorization as viem formats it (ox
 // KeyAuthorization.toRpc), as mppx simulates a transaction.
-func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
+func transactionCallObject(tx *tempotx.Tx, senderTransactions ...*tempotx.Tx) (map[string]any, error) {
 	callObject := map[string]any{
 		"accessList":           accessListCallObject(tx.AccessList),
 		"calls":                callsCallObject(tx.Calls),
@@ -1912,6 +1913,19 @@ func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
 		"maxFeePerGas":         hexBig(tx.MaxFeePerGas),
 		"maxPriorityFeePerGas": hexBig(tx.MaxPriorityFeePerGas),
 		"nonce":                hexutil.EncodeUint64(tx.Nonce),
+	}
+	// A simulation-only gas adjustment invalidates the original signature.
+	// Recover the key from the actual sender-signed transaction, never that copy.
+	senderTx := tx
+	if len(senderTransactions) > 0 {
+		senderTx = senderTransactions[0]
+	}
+	keyID, err := transactionAccessKey(senderTx)
+	if err != nil {
+		return nil, err
+	}
+	if keyID != nil {
+		callObject["keyId"] = keyID.Hex()
 	}
 	if tx.NonceKey != nil {
 		callObject["nonceKey"] = hexBig(tx.NonceKey)

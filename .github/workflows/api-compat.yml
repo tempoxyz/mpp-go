@@ -35,7 +35,12 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Install apidiff
-        run: go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261014143641-f0251eb4aa3e
+        # Build the pinned module directly: go install package@version also
+        # fetches the latest module's deprecation metadata, outside this pin.
+        run: |
+          apidiff_source=$(go mod download -json golang.org/x/exp@v0.0.0-20261014143641-f0251eb4aa3e | jq -er .Dir)
+          cd "$apidiff_source"
+          go install -mod=readonly ./cmd/apidiff
       - name: Compare exported API with the base branch
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
