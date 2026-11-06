@@ -240,6 +240,31 @@ func TestStorePutClearsExpiry(t *testing.T) {
 	})
 }
 
+func TestStorePurgeExpired(t *testing.T) {
+	t.Parallel()
+	forEachBackend(t, func(t *testing.T, store *Store, _ *sql.DB, _ string) {
+		ctx := context.Background()
+		require.NoError(t, store.Put(ctx, "permanent", "1"))
+		ok, err := store.PutIfAbsentUntil(ctx, "live", "2", time.Now().Add(time.Hour))
+		require.NoError(t, err)
+		require.True(t, ok)
+		insertExpired(t, store, "stale", "3")
+
+		n, err := store.PurgeExpired(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), n)
+		for key, want := range map[string]string{"permanent": "1", "live": "2"} {
+			value, found, err := store.Get(ctx, key)
+			require.NoError(t, err)
+			assert.True(t, found, key)
+			assert.Equal(t, want, value)
+		}
+		n, err = store.PurgeExpired(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), n)
+	})
+}
+
 func TestStoreConcurrentClaims(t *testing.T) {
 	t.Parallel()
 	for _, b := range backends(t) {

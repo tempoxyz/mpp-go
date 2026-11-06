@@ -147,6 +147,25 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return err
 }
 
+// PurgeExpired deletes entries whose expiry has passed and reports how many it
+// removed. Get already reports them missing and the next claim of the same key
+// replaces them, but replay keys are rarely claimed twice, so call it
+// periodically (for example from a ticker) to keep the table from growing.
+// Entries that never expire and live claims are never removed. mppx's Store.sql
+// has no equivalent.
+func (s *Store) PurgeExpired(ctx context.Context) (int64, error) {
+	if err := s.ensureTable(ctx); err != nil {
+		return 0, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		s.prepare("DELETE FROM "+s.table+" WHERE expires IS NOT NULL AND expires <= ?"),
+		millis(time.Now()))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // claim inserts key, or replaces an entry whose expiry has passed, in one
 // statement, and reports whether it wrote. A nil expires never expires.
 func (s *Store) claim(ctx context.Context, key, value string, expires *float64) (bool, error) {
