@@ -77,9 +77,12 @@ func (e *ZoneSettlementPendingError) Unwrap() error {
 
 // ZoneWithdrawalUnknownError reports a Zone withdrawal for a challenge that
 // may have been sent but whose receipt the method could not find. Passing
-// Challenge to the same Method's CreateCredential returns this error again
-// instead of withdrawing twice; find the transaction by TransactionHash on the
-// Zone before paying the challenge another way.
+// Challenge to the same Method's CreateCredential looks for the transaction's
+// receipt again without withdrawing twice: once it shows the withdrawal, the
+// call resumes it and waits for settlement; once it shows a revert, the
+// challenge may be paid again; while it is missing, the call returns this
+// error again. Find the transaction by TransactionHash on the Zone before
+// paying the challenge another way.
 type ZoneWithdrawalUnknownError struct {
 	// Challenge is the challenge the withdrawal would pay.
 	Challenge *mpp.Challenge
@@ -109,12 +112,21 @@ func (e *ZoneWithdrawalUnknownError) Unwrap() error {
 // sent, done is open and calls for the same withdrawal key wait on it. Once
 // done is closed, sent reports whether the transaction may have reached the
 // Zone; if so, senderTag holds its sender tag once its receipt showed it, or
-// err the error that left its outcome unknown.
+// err the error that left its outcome unknown. hash is the signed
+// transaction's hash, kept so a retry can look for a receipt that was missing.
 type zoneWithdrawal struct {
 	done      chan struct{}
 	sent      bool
+	hash      string
 	senderTag common.Hash
 	err       error
+}
+
+// unknown reports whether a finished withdrawal's receipt was missing, so a
+// retry may look for it again.
+func (w *zoneWithdrawal) unknown() bool {
+	var unknown *ZoneWithdrawalUnknownError
+	return w.sent && w.hash != "" && errors.As(w.err, &unknown)
 }
 
 // resolveZone validates Config.Zone, rejecting options that would fail only
@@ -251,12 +263,22 @@ func (m *Method) pendingZoneWithdrawal(key string) *zoneWithdrawal {
 // concurrent calls for challenges with one withdrawal key, such as ones that
 // differ only in their description, never both send. A call that finds a
 // withdrawal being sent waits for its send; if that sent nothing, the call
-// claims the withdrawal itself. claimed reports that the caller must send the
-// withdrawal and then call finishZoneWithdrawal.
+// claims the withdrawal itself. A call that finds a sent withdrawal whose
+// receipt was missing claims it to look for the receipt again: the claimed
+// withdrawal then carries the earlier one's hash, and concurrent calls wait
+// on that one lookup. claimed reports that the caller must send the
+// withdrawal, or look up its receipt when it has a hash, and then call
+// finishZoneWithdrawal.
 func (m *Method) claimZoneWithdrawal(ctx context.Context, key string) (withdrawal *zoneWithdrawal, claimed bool, err error) {
 	for {
 		m.zoneMu.Lock()
 		withdrawal = m.zoneWithdrawals[key]
+		if withdrawal != nil && finished(withdrawal) && withdrawal.unknown() {
+			withdrawal = &zoneWithdrawal{done: make(chan struct{}), hash: withdrawal.hash, err: withdrawal.err}
+			m.zoneWithdrawals[key] = withdrawal
+			m.zoneMu.Unlock()
+			return withdrawal, true, nil
+		}
 		if withdrawal == nil {
 			withdrawal = &zoneWithdrawal{done: make(chan struct{})}
 			if m.zoneWithdrawals == nil {
@@ -275,6 +297,16 @@ func (m *Method) claimZoneWithdrawal(ctx context.Context, key string) (withdrawa
 		if withdrawal.sent {
 			return withdrawal, false, nil
 		}
+	}
+}
+
+// finished reports whether withdrawal's send or lookup has finished.
+func finished(withdrawal *zoneWithdrawal) bool {
+	select {
+	case <-withdrawal.done:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -326,11 +358,23 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 				m.finishZoneWithdrawal(key, pending)
 			}
 		}()
-		senderTag, sent, sendErr := m.requestZoneWithdrawal(ctx, challenge, request)
+		var (
+			senderTag common.Hash
+			hash      string
+			sent      bool
+			sendErr   error
+		)
+		if pending.hash != "" {
+			// An earlier call sent this withdrawal but found no receipt:
+			// look for it again instead of sending another.
+			senderTag, hash, sent, sendErr = m.resumeZoneWithdrawal(ctx, challenge, pending.hash, pending.err)
+		} else {
+			senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, challenge, request)
+		}
 		// Only a failure before the transaction was sent, or a revert, is
 		// safe to retry. After that, the withdrawal may have gone through,
-		// so retries of this challenge keep failing.
-		pending.sent, pending.senderTag, pending.err = sent || sendErr == nil, senderTag, sendErr
+		// so retries of this challenge do not send it again.
+		pending.sent, pending.hash, pending.senderTag, pending.err = sent || sendErr == nil, hash, senderTag, sendErr
 		finished = true
 		m.finishZoneWithdrawal(key, pending)
 		if sendErr != nil {
@@ -380,12 +424,12 @@ func zoneCredential(challenge *mpp.Challenge, hash, senderTag string, zoneID uin
 // withdrawal's sender tag. sent reports whether the transaction may have
 // reached the Zone: a failure after that leaves the withdrawal's outcome
 // unknown, except a revert, which moved nothing.
-func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, request tempo.ChargeRequest) (common.Hash, bool, error) {
+func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, request tempo.ChargeRequest) (common.Hash, string, bool, error) {
 	rpc := m.zone.rpc
 	signer := m.zone.signer
 	amount, ok := new(big.Int).SetString(request.Amount, 10)
 	if !ok {
-		return common.Hash{}, false, fmt.Errorf("tempo client: invalid amount %q", request.Amount)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: invalid amount %q", request.Amount)
 	}
 	currency := common.HexToAddress(request.Currency)
 	recipient := common.HexToAddress(request.Recipient)
@@ -394,23 +438,23 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	// The outbox pulls the amount plus its withdrawal fee.
 	fee, err := zoneWithdrawalFee(ctx, rpc)
 	if err != nil {
-		return common.Hash{}, false, err
+		return common.Hash{}, "", false, err
 	}
 	approve := fmt.Sprintf("0x%s%064x%064x", approveSelector, zone.OutboxAddress.Big(), new(big.Int).Add(amount, fee))
 	// A bounced payout refunds the payer, not the payee's Zone address.
 	withdrawal, err := zone.OutboxABI.Pack("requestWithdrawal", currency, recipient, amount, [32]byte(memo), uint64(0), signer.Address(), []byte{}, []byte{})
 	if err != nil {
-		return common.Hash{}, false, fmt.Errorf("tempo client: encode Zone withdrawal: %w", err)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: encode Zone withdrawal: %w", err)
 	}
 	// Prepare and sign first: a failure there sent nothing, so the challenge
 	// may be retried.
 	gasPrice, err := m.gasPrice(ctx, rpc)
 	if err != nil {
-		return common.Hash{}, false, err
+		return common.Hash{}, "", false, err
 	}
 	nonce, err := rpc.GetTransactionCount(ctx, signer.Address().Hex())
 	if err != nil {
-		return common.Hash{}, false, fmt.Errorf("tempo client: get Zone nonce: %w", err)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: get Zone nonce: %w", err)
 	}
 	// Gas is paid in the configured fee token; the withdrawal itself always
 	// approves and moves the charge currency.
@@ -429,18 +473,18 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 		AddCall(zone.OutboxAddress, big.NewInt(0), withdrawal).
 		BuildAndValidate()
 	if err != nil {
-		return common.Hash{}, false, fmt.Errorf("tempo client: build Zone withdrawal: %w", err)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: build Zone withdrawal: %w", err)
 	}
 	if err := tempotx.SignTransaction(tx, signer); err != nil {
-		return common.Hash{}, false, fmt.Errorf("tempo client: sign Zone withdrawal: %w", err)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: sign Zone withdrawal: %w", err)
 	}
 	serialized, err := tempotx.Serialize(tx, nil)
 	if err != nil {
-		return common.Hash{}, false, fmt.Errorf("tempo client: serialize Zone withdrawal: %w", err)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: serialize Zone withdrawal: %w", err)
 	}
 	serialized, err = canonicalSignedTransaction(serialized)
 	if err != nil {
-		return common.Hash{}, false, fmt.Errorf("tempo client: serialize Zone withdrawal: %w", err)
+		return common.Hash{}, "", false, fmt.Errorf("tempo client: serialize Zone withdrawal: %w", err)
 	}
 	// The signed transaction fixes its hash, so a lost send response can
 	// still be recovered from the Zone.
@@ -451,19 +495,21 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 		hash = sentHash
 	} else if sendErr != nil {
 		if zoneSendRejected(sendErr) {
-			// The Zone answered with a JSON-RPC error, but a node can answer
-			// a send it already took with one too, such as "nonce too low"
-			// once it included the transaction: look for its receipt, and
-			// then for the transaction itself, which a node holds while it
-			// is pending. Only when the Zone knows neither, and says so, was
-			// nothing withdrawn; otherwise wait for the receipt below.
+			// The Zone refused the transaction for a reason it checks before
+			// admitting one, but another node behind the same RPC may have
+			// taken it: look for its receipt, and then for the transaction
+			// itself, which a node holds while it is pending. Only when the
+			// Zone knows neither, and says so, was nothing withdrawn;
+			// otherwise wait for the receipt below. Any other send error
+			// leaves the outcome unknown, since a load-balanced or
+			// still-indexing Zone may not show a transaction it took yet.
 			var lookupErr error
 			receipt, lookupErr = lookupZoneTransaction(ctx, rpc, "eth_getTransactionReceipt", hash)
 			if receipt == nil {
 				var transaction map[string]any
 				transaction, err = lookupZoneTransaction(ctx, rpc, "eth_getTransactionByHash", hash)
 				if lookupErr == nil && err == nil && transaction == nil {
-					return common.Hash{}, false, fmt.Errorf("tempo client: send Zone withdrawal: %w", sendErr)
+					return common.Hash{}, "", false, fmt.Errorf("tempo client: send Zone withdrawal: %w", sendErr)
 				}
 			}
 		}
@@ -473,15 +519,45 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 		receipt = m.waitForZoneReceipt(ctx, rpc, hash)
 	}
 	if receipt == nil {
-		return common.Hash{}, true, &ZoneWithdrawalUnknownError{
+		return common.Hash{}, hash, true, &ZoneWithdrawalUnknownError{
 			Challenge:       challenge,
 			TransactionHash: hash,
 			ZoneID:          m.zone.id,
 			Err:             err,
 		}
 	}
+	senderTag, sent, err := zoneWithdrawalSenderTag(receipt, hash)
+	return senderTag, hash, sent, err
+}
+
+// resumeZoneWithdrawal looks up the receipt of a withdrawal an earlier call
+// sent but found no receipt for, once, and returns its sender tag as
+// requestZoneWithdrawal does. A receipt still missing returns
+// *ZoneWithdrawalUnknownError again, with the lookup's error or else the
+// earlier one's.
+func (m *Method) resumeZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, hash string, previous error) (common.Hash, string, bool, error) {
+	receipt, err := lookupZoneTransaction(ctx, m.zone.rpc, "eth_getTransactionReceipt", hash)
+	if receipt == nil {
+		var unknown *ZoneWithdrawalUnknownError
+		if err == nil && errors.As(previous, &unknown) {
+			err = unknown.Err
+		}
+		return common.Hash{}, hash, true, &ZoneWithdrawalUnknownError{
+			Challenge:       challenge,
+			TransactionHash: hash,
+			ZoneID:          m.zone.id,
+			Err:             err,
+		}
+	}
+	senderTag, sent, err := zoneWithdrawalSenderTag(receipt, hash)
+	return senderTag, hash, sent, err
+}
+
+// zoneWithdrawalSenderTag returns the sender tag of the withdrawal whose
+// receipt is receipt. sent is false for a reverted withdrawal, which moved
+// nothing, so the challenge may be retried.
+func zoneWithdrawalSenderTag(receipt map[string]any, hash string) (common.Hash, bool, error) {
 	if !strings.EqualFold(stringValue(receipt["status"]), "0x1") {
-		// A reverted withdrawal moved nothing, so the challenge may be retried.
 		return common.Hash{}, false, fmt.Errorf("tempo client: Zone withdrawal transaction %s reverted", hash)
 	}
 	sender, fallbackNonce, ok := zone.RequestedEvent(receipt)
@@ -496,12 +572,59 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 }
 
 // zoneSendRejected reports whether a send error is the node's JSON-RPC
-// rejection of the transaction, rather than a transport failure or timeout
-// that leaves it unknown whether the node accepted it. A rejection as a
-// duplicate means the node already holds the transaction.
+// refusal to admit the transaction, as opposed to a transport failure, a
+// timeout or any other JSON-RPC error, which leave it unknown whether the
+// node took it. Only errors that name a reason the node checks before
+// admitting a transaction count, such as insufficient funds or an invalid
+// signature; errors a node also gives for a transaction it already holds or
+// included, such as "nonce too low", "already known" or an underpriced
+// replacement, never do.
 func zoneSendRejected(err error) bool {
 	var rpcErr *temporpc.JSONRPCError
-	return errors.As(err, &rpcErr) && !txsend.IsDuplicateSubmission(err)
+	if !errors.As(err, &rpcErr) || txsend.IsDuplicateSubmission(err) {
+		return false
+	}
+	message := strings.ToLower(rpcErr.Message)
+	for _, marker := range zoneAdmittedMarkers {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	if rpcErr.Code == -32602 {
+		return true
+	}
+	for _, marker := range zoneRefusedMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// zoneAdmittedMarkers are send error messages a node can give for a
+// transaction it already holds or included.
+var zoneAdmittedMarkers = []string{
+	"nonce too low",
+	"replacement",
+	"underpriced",
+	"already known",
+	"already imported",
+	"known transaction",
+}
+
+// zoneRefusedMarkers are send error messages for checks a node makes before
+// it admits a transaction.
+var zoneRefusedMarkers = []string{
+	"insufficient funds",
+	"insufficient balance",
+	"intrinsic gas too low",
+	"exceeds block gas limit",
+	"invalid signature",
+	"invalid sender",
+	"fee cap less than block base fee",
+	"fee cap less than base fee",
+	"fee per gas less than block base fee",
+	"invalid params",
 }
 
 // lookupZoneTransaction calls method (eth_getTransactionReceipt or

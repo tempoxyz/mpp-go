@@ -34,16 +34,19 @@ const (
 // "zone used", to show whether the method used the Zone; "ok" withdraws;
 // "prepare" fails before sending; "send" loses the send response and never
 // shows a receipt; "reject" has the Zone reject the send with a JSON-RPC
-// error; "nonce" and "imported" have it answer a send it took with a
-// JSON-RPC error; "pending" has it answer a send it took with a JSON-RPC
-// error while the transaction is pending, showing its receipt only on a later
-// poll, and "stuck" likewise but never shows a receipt; "revert" reverts the
-// withdrawal. When sending is set, a send signals it and then waits for
-// release.
+// error; "internal" has it answer the send with an unrecognized JSON-RPC
+// error and never show the transaction; "nonce" and "imported" have it
+// answer a send it took with a JSON-RPC error; "pending" has it refuse a
+// send for insufficient funds while the transaction is pending, showing its
+// receipt only on a later poll, and "stuck" likewise but never shows a
+// receipt; "revert" reverts the withdrawal. When sending is set, a send
+// signals it and then waits for release; when looking is set, a receipt
+// lookup does the same.
 type zoneTestRPC struct {
 	mode     string
 	sending  chan struct{}
 	release  chan struct{}
+	looking  chan struct{}
 	mu       sync.Mutex
 	calls    []string
 	sent     []string
@@ -89,12 +92,14 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 		return "", errors.New("connection lost")
 	case "reject":
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "insufficient funds for gas"})
+	case "internal":
+		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "internal error"})
 	case "nonce":
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32003, Message: "nonce too low"})
 	case "imported":
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "transaction already imported"})
 	case "pending", "stuck":
-		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "replacement transaction underpriced"})
+		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "insufficient funds for gas"})
 	}
 	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
 }
@@ -117,8 +122,13 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 		r.mu.Lock()
 		r.receipts++
 		receipts := r.receipts
+		looking := r.looking
 		r.mu.Unlock()
-		if r.mode == "send" || r.mode == "reject" || r.mode == "stuck" || (r.mode == "pending" && receipts == 1) {
+		if looking != nil {
+			looking <- struct{}{}
+			<-r.release
+		}
+		if r.mode == "send" || r.mode == "reject" || r.mode == "internal" || r.mode == "stuck" || (r.mode == "pending" && receipts == 1) {
 			return &temporpc.JSONRPCResponse{Result: nil}, nil
 		}
 		return &temporpc.JSONRPCResponse{Result: r.receipt(params[0].(string))}, nil
@@ -410,10 +420,101 @@ func TestZoneDoesNotWithdrawAgainAfterUnknownOutcome(t *testing.T) {
 	assert.Contains(t, zoneRPC.calls, "eth_sendRawTransaction")
 	// The method looked for the receipt of the signed transaction before it gave up.
 	assert.Contains(t, zoneRPC.calls, "eth_getTransactionReceipt")
+	// A retry looks for the receipt once more, without sending again.
 	calls := zoneRPC.callCount()
 	_, err = method.CreateCredential(context.Background(), challenge)
 	assert.ErrorContains(t, err, "Zone withdrawal outcome is unknown")
-	assert.Equal(t, calls, zoneRPC.callCount())
+	assert.ErrorContains(t, err, "connection lost")
+	assert.Equal(t, calls+1, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A withdrawal mined after the method stopped waiting for its receipt is
+// resumed by a retry of the challenge: the retry finds the receipt and
+// returns a credential without withdrawing again.
+func TestZoneResumesWithdrawalWhoseReceiptAppearsLater(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "send"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.mode = "ok"
+	zoneRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, "zone", credential.Payload["type"])
+	assert.NotEmpty(t, credential.Payload["senderTag"])
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+}
+
+// A withdrawal whose late receipt shows a revert moved nothing, so a retry
+// after that may withdraw again.
+func TestZoneRetriesUnknownWithdrawalThatReverted(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "send"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.mode = "revert"
+	zoneRPC.mu.Unlock()
+	_, err = method.CreateCredential(context.Background(), challenge)
+	assert.ErrorContains(t, err, "reverted")
+	assert.Len(t, zoneRPC.sent, 1)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.mode = "ok"
+	zoneRPC.mu.Unlock()
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Len(t, zoneRPC.sent, 2)
+}
+
+// Concurrent retries of an unknown withdrawal share one receipt lookup: the
+// others wait for it and resume the same withdrawal.
+func TestZoneConcurrentRetriesOfUnknownWithdrawalLookUpOnce(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "send"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.mode = "ok"
+	zoneRPC.looking = make(chan struct{}, 4)
+	zoneRPC.release = make(chan struct{})
+	receipts := zoneRPC.receipts
+	zoneRPC.mu.Unlock()
+	var wg sync.WaitGroup
+	credentials := make([]*mpp.Credential, 3)
+	errs := make([]error, 3)
+	wg.Go(func() { credentials[0], errs[0] = method.CreateCredential(context.Background(), challenge) })
+	<-zoneRPC.looking
+	for i := 1; i < len(errs); i++ {
+		wg.Go(func() { credentials[i], errs[i] = method.CreateCredential(context.Background(), challenge) })
+	}
+	// Give the other calls time to look up the receipt if they were going to.
+	time.Sleep(100 * time.Millisecond)
+	close(zoneRPC.release)
+	wg.Wait()
+	for i, err := range errs {
+		require.NoError(t, err)
+		assert.Equal(t, credentials[0].Payload["senderTag"], credentials[i].Payload["senderTag"])
+	}
+	zoneRPC.mu.Lock()
+	defer zoneRPC.mu.Unlock()
+	assert.Equal(t, 1, zoneRPC.receipts-receipts)
+	assert.Len(t, zoneRPC.sent, 1)
 }
 
 // The pending withdrawal is keyed on the challenge's HMAC-bound fields, so
@@ -431,7 +532,8 @@ func TestZoneDoesNotWithdrawAgainForChallengeWithOtherDescription(t *testing.T) 
 	described.Description = "another description"
 	_, err = method.CreateCredential(context.Background(), &described)
 	assert.ErrorContains(t, err, "Zone withdrawal outcome is unknown")
-	assert.Equal(t, calls, zoneRPC.callCount())
+	// Only one receipt lookup, no new send.
+	assert.Equal(t, calls+1, zoneRPC.callCount())
 	assert.Len(t, zoneRPC.sent, 1)
 }
 
@@ -507,8 +609,8 @@ func TestZoneSharesOneWithdrawalBetweenConcurrentDescriptionVariants(t *testing.
 	assert.Equal(t, credentials[0].Payload["senderTag"], credentials[1].Payload["senderTag"])
 }
 
-// A Zone can answer a send with a JSON-RPC error while it holds the
-// transaction pending: the method waits for its receipt rather than
+// A Zone can refuse a send, such as for insufficient funds, while it (or
+// another node behind its RPC) holds the transaction pending: the method waits for its receipt rather than
 // deciding nothing was withdrawn, which would let a retry withdraw again.
 func TestZoneWaitsForPendingWithdrawalDespiteSendError(t *testing.T) {
 	t.Parallel()
@@ -533,7 +635,7 @@ func TestZoneDoesNotWithdrawAgainWhilePendingDespiteSendError(t *testing.T) {
 		_, err := method.CreateCredential(context.Background(), challenge)
 		var unknown *ZoneWithdrawalUnknownError
 		require.ErrorAs(t, err, &unknown)
-		assert.ErrorContains(t, err, "replacement transaction underpriced")
+		assert.ErrorContains(t, err, "insufficient funds")
 	}
 	assert.Len(t, zoneRPC.sent, 1)
 }
@@ -564,6 +666,61 @@ func TestZoneRetriesWithdrawalTheZoneRejected(t *testing.T) {
 	}
 	assert.Equal(t, 2, receiptLookups)
 	assert.Equal(t, 2, transactionLookups)
+}
+
+// A JSON-RPC send error that names no reason the Zone refused the
+// transaction leaves its outcome unknown even when the Zone shows neither
+// its receipt nor the transaction: a load-balanced or still-indexing Zone
+// may not show a transaction it took yet. A retry looks for the receipt once
+// without withdrawing again.
+func TestZoneDoesNotWithdrawAgainAfterUnrecognizedSendError(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "internal"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	assert.ErrorContains(t, err, "internal error")
+	calls := zoneRPC.callCount()
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.ErrorAs(t, err, &unknown)
+	assert.ErrorContains(t, err, "internal error")
+	assert.Equal(t, calls+1, zoneRPC.callCount())
+	assert.Equal(t, "eth_getTransactionReceipt", zoneRPC.calls[len(zoneRPC.calls)-1])
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+func TestZoneSendRejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		code     int
+		message  string
+		rejected bool
+	}{
+		{-32000, "insufficient funds for gas * price + value", true},
+		{-32003, "Insufficient funds for transfer", true},
+		{-32000, "insufficient balance for transfer", true},
+		{-32000, "intrinsic gas too low", true},
+		{-32000, "exceeds block gas limit", true},
+		{-32000, "invalid signature", true},
+		{-32000, "invalid sender", true},
+		{-32000, "max fee per gas less than block base fee", true},
+		{-32000, "transaction fee cap less than base fee", true},
+		{-32602, "invalid params", true},
+		{-32602, "nonce too low", false},
+		{-32000, "nonce too low", false},
+		{-32000, "replacement transaction underpriced", false},
+		{-32000, "transaction underpriced", false},
+		{-32000, "already known", false},
+		{-32000, "transaction already imported", false},
+		{-32000, "internal error", false},
+		{-32603, "request timed out", false},
+	} {
+		err := fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: tc.code, Message: tc.message})
+		assert.Equal(t, tc.rejected, zoneSendRejected(err), "%d %q", tc.code, tc.message)
+	}
+	assert.False(t, zoneSendRejected(errors.New("insufficient funds")))
 }
 
 // A Zone can answer a send it took with a JSON-RPC error, such as "nonce too
