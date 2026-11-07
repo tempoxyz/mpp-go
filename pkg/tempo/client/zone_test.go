@@ -1234,3 +1234,62 @@ func TestZonePolicyRefusalSendsNothingAndIsAskedAgain(t *testing.T) {
 	assert.Equal(t, 2, authorized)
 	assert.Len(t, zoneRPC.sent, 1)
 }
+
+// A withdrawal whose receipt appeared only long after the send is searched
+// for on Tempo from the head when it was sent, so a settlement since then is
+// still found.
+func TestZoneLateReceiptSearchesFromTheSendStartBlock(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "send"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	tempoRPC.head = 10_000
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.mode = "ok"
+	zoneRPC.mu.Unlock()
+	tempoRPC.mu.Lock()
+	tempoRPC.settledAt = 10_001
+	tempoRPC.head = 10_001 + 7_200 + 7_200
+	tempoRPC.ranges = nil
+	tempoRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, zoneTestSettlement, credential.Payload["hash"])
+	assert.Len(t, zoneRPC.sent, 1)
+	tempoRPC.mu.Lock()
+	defer tempoRPC.mu.Unlock()
+	require.NotEmpty(t, tempoRPC.ranges)
+	assert.Equal(t, uint64(10_000-7_200), tempoRPC.ranges[0][0])
+}
+
+// A panicking payment policy sends nothing and leaves the challenge payable.
+func TestZonePolicyPanicLeavesChallengePayable(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	var mu sync.Mutex
+	calls := 0
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) {
+		c.PaymentPolicy = func(context.Context, tempo.ChargeRequest) error {
+			mu.Lock()
+			calls++
+			first := calls == 1
+			mu.Unlock()
+			if first {
+				panic("policy bug")
+			}
+			return nil
+		}
+	})
+	challenge := zoneChallenge(t, nil)
+	assert.Panics(t, func() { _, _ = method.CreateCredential(context.Background(), challenge) })
+	assert.Empty(t, zoneRPC.sent)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Len(t, zoneRPC.sent, 1)
+}

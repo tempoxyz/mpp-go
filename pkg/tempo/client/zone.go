@@ -318,7 +318,7 @@ func (m *Method) claimZoneWithdrawal(ctx context.Context, key string) (withdrawa
 		m.zoneMu.Lock()
 		withdrawal = m.zoneWithdrawals[key]
 		if withdrawal != nil && finished(withdrawal) && withdrawal.unknown() {
-			withdrawal = &zoneWithdrawal{done: make(chan struct{}), hash: withdrawal.hash, err: withdrawal.err}
+			withdrawal = &zoneWithdrawal{done: make(chan struct{}), hash: withdrawal.hash, err: withdrawal.err, settlementStart: withdrawal.settlementStart}
 			m.zoneWithdrawals[key] = withdrawal
 			m.zoneMu.Unlock()
 			return withdrawal, true, nil
@@ -402,10 +402,13 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	}
 	if claimed {
 		finished := false
+		// Whether a withdrawal may have been sent by the time a panic
+		// unwinds: one resumed already was, while one the policy or the
+		// start-block lookup refused was not, and its challenge stays payable.
+		sending := pending.hash != ""
 		defer func() {
 			if !finished {
-				// requestZoneWithdrawal panicked: whether it sent is unknown.
-				pending.sent, pending.err = true, errZoneWithdrawalPanicked
+				pending.sent, pending.err = sending, errZoneWithdrawalPanicked
 				m.finishZoneWithdrawal(key, pending)
 			}
 		}()
@@ -420,7 +423,16 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			// look for it again instead of sending another.
 			senderTag, hash, sent, sendErr = m.resumeZoneWithdrawal(ctx, challenge, expected, pending.hash, pending.err)
 		} else if sendErr = authorize(ctx); sendErr == nil {
-			senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, challenge, expected)
+			// Settlement is searched for from the Tempo head before the
+			// send, so a retry long after it still finds the settlement.
+			var start uint64
+			if start, sendErr = zone.SettlementStartBlock(ctx, rpc); sendErr == nil {
+				m.zoneMu.Lock()
+				pending.settlementStart = &start
+				m.zoneMu.Unlock()
+				sending = true
+				senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, challenge, expected)
+			}
 		}
 		// Only a failure before the transaction was sent, or a revert, is
 		// safe to retry. After that, the withdrawal may have gone through,
