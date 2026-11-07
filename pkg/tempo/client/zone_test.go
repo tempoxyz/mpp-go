@@ -65,6 +65,11 @@ type zoneTestRPC struct {
 	answerHash string
 	// onNonce, when set, runs at the nonce lookup.
 	onNonce func()
+	// trackNonce has the Zone answer the nonce lookup with the number of
+	// transactions sent, as a pending nonce, and refuse a send whose nonce
+	// was already sent with "nonce too low".
+	trackNonce bool
+	nonces     map[uint64]bool
 }
 
 func (r *zoneTestRPC) record(method string) {
@@ -92,11 +97,34 @@ func (r *zoneTestRPC) GetTransactionCount(context.Context, string) (uint64, erro
 	if r.mode == "fail" {
 		return 0, errors.New("zone used")
 	}
+	if r.trackNonce {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return uint64(len(r.nonces)), nil
+	}
 	return 0, nil
 }
 
 func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (string, error) {
 	r.record("eth_sendRawTransaction")
+	if r.trackNonce {
+		tx, err := tempotx.Deserialize(serialized)
+		if err != nil {
+			return "", err
+		}
+		r.mu.Lock()
+		used := r.nonces[tx.Nonce]
+		if !used {
+			if r.nonces == nil {
+				r.nonces = map[uint64]bool{}
+			}
+			r.nonces[tx.Nonce] = true
+		}
+		r.mu.Unlock()
+		if used {
+			return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32003, Message: "nonce too low"})
+		}
+	}
 	r.mu.Lock()
 	r.sent = append(r.sent, serialized)
 	r.mu.Unlock()
@@ -161,13 +189,19 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 	return nil, fmt.Errorf("zone: unexpected %s", method)
 }
 
-// receipt returns the receipt of the last withdrawal sent.
+// receipt returns the receipt of the withdrawal sent as hash, or else of the
+// last withdrawal sent.
 func (r *zoneTestRPC) receipt(hash string) map[string]any {
 	if r.mode == "revert" {
 		return map[string]any{"transactionHash": hash, "status": "0x0", "logs": []any{}}
 	}
 	r.mu.Lock()
 	serialized := r.sent[len(r.sent)-1]
+	for _, sent := range r.sent {
+		if crypto.Keccak256Hash(common.FromHex(sent)).Hex() == hash {
+			serialized = sent
+		}
+	}
 	r.mu.Unlock()
 	tx, err := tempotx.Deserialize(serialized)
 	if err != nil {
@@ -233,8 +267,11 @@ func (r *zoneTestRPC) receipt(hash string) map[string]any {
 // any block range, or when settledAt is set only in ranges that include it.
 // Its head is block 0x10 unless head is set.
 type zoneTestTempoRPC struct {
-	mu        sync.Mutex
-	settled   bool
+	mu      sync.Mutex
+	settled bool
+	// bounced has the settlement's WithdrawalProcessed event report
+	// callbackSuccess false.
+	bounced   bool
 	settledAt uint64
 	head      uint64
 	topics    []any
@@ -271,7 +308,15 @@ func (r *zoneTestTempoRPC) SendRequest(_ context.Context, method string, params 
 		if !r.settled || (r.settledAt != 0 && (r.settledAt < from || r.settledAt > to)) {
 			return &temporpc.JSONRPCResponse{Result: []any{}}, nil
 		}
-		return &temporpc.JSONRPCResponse{Result: []any{map[string]any{"transactionHash": zoneTestSettlement}}}, nil
+		entry := map[string]any{"transactionHash": zoneTestSettlement}
+		if r.bounced {
+			data, err := zone.PortalABI.Events["WithdrawalProcessed"].Inputs.NonIndexed().Pack(common.HexToAddress(testCurrency), big.NewInt(1_000_000), false)
+			if err != nil {
+				return nil, err
+			}
+			entry["data"] = hexutil.Encode(data)
+		}
+		return &temporpc.JSONRPCResponse{Result: []any{entry}}, nil
 	}
 	return nil, fmt.Errorf("tempo: %s", method)
 }
@@ -997,4 +1042,88 @@ func TestZoneRechecksExpiryBeforeSending(t *testing.T) {
 	assert.NotContains(t, zoneRPC.calls, "eth_sendRawTransaction")
 	assert.Empty(t, zoneRPC.sent)
 	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+}
+
+// Concurrent payments of different challenges from one Zone signer read the
+// Zone nonce one after the other, so each withdrawal signs its own nonce and
+// both are included.
+func TestZoneConcurrentPaymentsOfDifferentChallengesUseDistinctNonces(t *testing.T) {
+	t.Parallel()
+	// The pause widens the window between the nonce lookup and the send in
+	// which another payment could read the same nonce.
+	zoneRPC := &zoneTestRPC{mode: "ok", trackNonce: true, onNonce: func() { time.Sleep(20 * time.Millisecond) }}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenges := []*mpp.Challenge{zoneChallenge(t, nil), zoneChallenge(t, func(p *tempo.ChargeRequestParams) { p.Amount = "2" })}
+	require.NotEqual(t, challenges[0].ID, challenges[1].ID)
+	var wg sync.WaitGroup
+	credentials := make([]*mpp.Credential, len(challenges))
+	errs := make([]error, len(challenges))
+	for i := range challenges {
+		wg.Go(func() {
+			credentials[i], errs[i] = method.CreateCredential(context.Background(), challenges[i])
+		})
+	}
+	wg.Wait()
+	for i := range challenges {
+		require.NoError(t, errs[i])
+		require.NotNil(t, credentials[i])
+	}
+	require.Len(t, zoneRPC.sent, 2)
+	nonces := map[uint64]bool{}
+	for _, raw := range zoneRPC.sent {
+		tx, err := tempotx.Deserialize(raw)
+		require.NoError(t, err)
+		nonces[tx.Nonce] = true
+	}
+	assert.Equal(t, map[uint64]bool{0: true, 1: true}, nonces)
+}
+
+// A payment waiting for the nonce lock that is canceled sends nothing, so
+// the challenge may be paid again.
+func TestZoneCancelledWaitForNonceLockSendsNothing(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	method.zone.nonceLock <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(ctx, challenge)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, zoneRPC.sent)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+	<-method.zone.nonceLock
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A withdrawal whose payout bounced on Tempo returns
+// *ZoneWithdrawalBouncedError without a credential, and paying the challenge
+// again withdraws again.
+func TestZoneBouncedWithdrawalFailsAndMayBePaidAgain(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	tempoRPC.bounced = true
+	challenge := zoneChallenge(t, nil)
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.Nil(t, credential)
+	var bounced *ZoneWithdrawalBouncedError
+	require.ErrorAs(t, err, &bounced)
+	assert.ErrorContains(t, err, "bounced")
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	require.Len(t, zoneRPC.sent, 1)
+	senderTag := zone.SenderTag(signer.Address(), crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0])), 1).Hex()
+	assert.Equal(t, &ZoneWithdrawalBouncedError{ChallengeID: challenge.ID, SenderTag: senderTag, ZoneID: 3}, bounced)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+
+	tempoRPC.mu.Lock()
+	tempoRPC.bounced = false
+	tempoRPC.mu.Unlock()
+	credential, err = method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	require.NotNil(t, credential)
+	assert.Len(t, zoneRPC.sent, 2)
 }

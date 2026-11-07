@@ -165,9 +165,9 @@ func TestWaitForSettlement(t *testing.T) {
 	start, err := SettlementStartBlock(context.Background(), rpc)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0x2710-lookbackBlocks), start)
-	hash, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, start, 5*time.Second)
+	settlement, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, start, 5*time.Second)
 	require.NoError(t, err)
-	assert.Equal(t, "0x"+repeat("ab", 32), hash)
+	assert.Equal(t, Settlement{Hash: "0x" + repeat("ab", 32)}, settlement)
 	// The first poll looks back lookbackBlocks; the next only at new blocks.
 	assert.Equal(t, "0xaf0", filters[0]["fromBlock"])
 	assert.Equal(t, "0x2710", filters[0]["toBlock"])
@@ -199,9 +199,9 @@ func TestWaitForSettlementResumesFromStartBlockInChunks(t *testing.T) {
 		}
 		return []any{}
 	}}
-	hash, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, 2_800, 0)
+	settlement, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, 2_800, 0)
 	require.NoError(t, err)
-	assert.Equal(t, "0x"+repeat("ab", 32), hash)
+	assert.Equal(t, "0x"+repeat("ab", 32), settlement.Hash)
 	assert.Equal(t, [][2]uint64{{2_800, 10_000}, {10_001, 17_201}}, ranges)
 
 	// With no settlement, it searches every block up to the head once.
@@ -215,6 +215,40 @@ func TestWaitForSettlementResumesFromStartBlockInChunks(t *testing.T) {
 	_, err = WaitForSettlement(context.Background(), rpc, portal, tag, nil, 2_800, 0)
 	assert.ErrorContains(t, err, "did not settle on Tempo")
 	assert.Equal(t, [][2]uint64{{2_800, 10_000}, {10_001, 17_201}, {17_202, 24_402}, {24_403, 30_000}}, ranges)
+}
+
+// WaitForSettlement reports a payout as bounced only when the event's
+// callbackSuccess decodes to false.
+func TestWaitForSettlementReportsBouncedPayout(t *testing.T) {
+	t.Parallel()
+	portal := PortalAddress(3)
+	to := common.HexToAddress("0x00000000000000000000000000000000000000c1")
+	tag := common.HexToHash("0x" + repeat("a1", 32))
+	token := common.HexToAddress("0x20c0000000000000000000000000000000000000")
+	hash := "0x" + repeat("ab", 32)
+	for name, test := range map[string]struct {
+		data    func() string
+		bounced bool
+	}{
+		"success": {data: func() string { return asString(processedLog(t, portal, to, tag, token, true)["data"]) }},
+		"bounced": {data: func() string { return asString(processedLog(t, portal, to, tag, token, false)["data"]) }, bounced: true},
+		"garbled": {data: func() string { return "0x01" }},
+		"missing": {data: func() string { return "" }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rpc := &logsRPC{blocks: []string{"0x10"}, logs: func(map[string]any) []any {
+				entry := map[string]any{"transactionHash": hash}
+				if data := test.data(); data != "" {
+					entry["data"] = data
+				}
+				return []any{entry}
+			}}
+			settlement, err := WaitForSettlement(context.Background(), rpc, portal, tag, &to, 0, 0)
+			require.NoError(t, err)
+			assert.Equal(t, Settlement{Hash: hash, Bounced: test.bounced}, settlement)
+		})
+	}
 }
 
 func processedLog(t *testing.T, portal, to common.Address, tag common.Hash, token common.Address, success bool) map[string]any {

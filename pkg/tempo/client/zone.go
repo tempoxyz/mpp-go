@@ -110,6 +110,30 @@ func (e *ZoneWithdrawalUnknownError) Unwrap() error {
 	return e.Err
 }
 
+// ZoneWithdrawalBouncedError reports a Zone withdrawal for a challenge that
+// settled on Tempo but whose payout bounced: the portal's WithdrawalProcessed
+// event reports callbackSuccess false, so the amount went back to the payer's
+// Zone balance and the challenge is unpaid, while the withdrawal's fees are
+// spent. The server would reject a credential naming it, so none is created.
+// Paying the challenge again with the same Method withdraws again; callers
+// choosing among several offers should not fall back to another one on this
+// error, since each attempt spends another withdrawal's fees.
+type ZoneWithdrawalBouncedError struct {
+	// ChallengeID is the ID of the challenge the withdrawal paid.
+	ChallengeID string
+	// SenderTag identifies the withdrawal in the portal's
+	// WithdrawalProcessed event.
+	SenderTag string
+	// ZoneID is the Zone the withdrawal left.
+	ZoneID uint32
+}
+
+// Error implements error.
+func (e *ZoneWithdrawalBouncedError) Error() string {
+	return fmt.Sprintf("tempo client: Zone %d withdrawal %s for challenge %q bounced on Tempo: its amount was returned to the payer's Zone balance",
+		e.ZoneID, e.SenderTag, e.ChallengeID)
+}
+
 // ErrZoneChallengeExpiresTooSoon reports a challenge that, once its Zone
 // withdrawal is signed and ready to send, expires too soon for the withdrawal
 // to settle on Tempo before it: the authorization, fee, gas price and nonce
@@ -163,6 +187,7 @@ func resolveZone(config *Zone, signer *temposigner.Signer, accessKey bool) (*zon
 		parentChainID:     config.ParentChainID,
 		signer:            config.Signer,
 		settlementTimeout: config.SettlementTimeout,
+		nonceLock:         make(chan struct{}, 1),
 	}
 	if resolved.settlementTimeout == 0 {
 		resolved.settlementTimeout = zone.DefaultSettlementTimeout
@@ -407,10 +432,22 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	recipient := common.HexToAddress(request.Recipient)
 	start, err := m.zoneSettlementStart(ctx, rpc, pending)
 	if err == nil {
-		var hash string
-		hash, err = zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(challenge.Expires))
+		var settlement zone.Settlement
+		settlement, err = zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(challenge.Expires))
+		if err == nil && settlement.Bounced {
+			// The payout bounced back to the payer's Zone balance and paid
+			// nothing, so the server would reject its credential: fail
+			// without one, and forget the withdrawal so paying the challenge
+			// again withdraws again.
+			m.forgetZoneWithdrawal(key, pending)
+			return nil, &ZoneWithdrawalBouncedError{
+				ChallengeID: challenge.ID,
+				SenderTag:   pending.senderTag.Hex(),
+				ZoneID:      m.zone.id,
+			}
+		}
 		if err == nil {
-			credential := zoneCredential(challenge, common.HexToHash(hash).Hex(), pending.senderTag.Hex(), m.zone.id)
+			credential := zoneCredential(challenge, common.HexToHash(settlement.Hash).Hex(), pending.senderTag.Hex(), m.zone.id)
 			if _, err := mpp.FormatCredential(credential); err != nil {
 				return nil, err
 			}
@@ -528,6 +565,16 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if err != nil {
 		return common.Hash{}, "", false, err
 	}
+	// Hold the signer's Zone nonce lock from the nonce lookup until the
+	// send's outcome is known, so a concurrent payment of another challenge
+	// reads the nonce after this transaction took it. Waiting for the lock
+	// sent nothing, so a canceled wait may be retried.
+	select {
+	case m.zone.nonceLock <- struct{}{}:
+	case <-ctx.Done():
+		return common.Hash{}, "", false, ctx.Err()
+	}
+	defer func() { <-m.zone.nonceLock }()
 	nonce, err := rpc.GetTransactionCount(ctx, signer.Address().Hex())
 	if err != nil {
 		return common.Hash{}, "", false, fmt.Errorf("tempo client: get Zone nonce: %w", err)
@@ -566,9 +613,9 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	// still be recovered from the Zone.
 	hash := crypto.Keccak256Hash(common.FromHex(serialized)).Hex()
 
-	// Preparation made RPCs after paysFromZone checked the expiry: check it
-	// again, so a withdrawal that can no longer settle before the challenge
-	// expires is never sent.
+	// Preparation made RPCs, and may have waited for the nonce lock, after
+	// paysFromZone checked the expiry: check it again, so a withdrawal that
+	// can no longer settle before the challenge expires is never sent.
 	if !m.settlesBeforeExpiry(challenge.Expires) {
 		return common.Hash{}, "", false, fmt.Errorf("%w: challenge %q expires at %s, and a withdrawal needs more than %s",
 			ErrZoneChallengeExpiresTooSoon, challenge.ID, challenge.Expires, m.zone.settlementTimeout+zoneSubmissionMargin)

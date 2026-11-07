@@ -486,12 +486,37 @@ func (i *Intent) validateHash(
 	if err != nil {
 		return err
 	}
+	// A Zone portal's settlement transaction settles many withdrawals, each
+	// paid for by its own zone credential, whose replay key is the sender
+	// tag. Redeeming it as a hash credential too would pay twice for one
+	// withdrawal, so a receipt with a WithdrawalProcessed event, from any
+	// address, is refused, as in mpp-rs.
+	if hasZoneSettlementLog(receiptMap) {
+		return mpp.ErrVerificationFailed("zone settlement transactions can't be redeemed as hash credentials; use a zone credential")
+	}
 	// The primary transfer must carry a challenge-bound attribution memo.
 	if !receiptMatches(receiptMap, credential, request, source.address) {
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	validated.sender = common.HexToAddress(source.address)
 	return nil
+}
+
+// hasZoneSettlementLog reports whether a receipt has a log whose first topic
+// is the Zone portal WithdrawalProcessed event signature.
+func hasZoneSettlementLog(receipt map[string]any) bool {
+	logs, _ := receipt["logs"].([]any)
+	for _, rawLog := range logs {
+		entry, ok := rawLog.(map[string]any)
+		if !ok {
+			continue
+		}
+		topics, ok := entry["topics"].([]any)
+		if ok && len(topics) > 0 && strings.EqualFold(asString(topics[0]), zone.ProcessedTopic.Hex()) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateZone verifies a payment that a Zone withdrawal settled on Tempo,

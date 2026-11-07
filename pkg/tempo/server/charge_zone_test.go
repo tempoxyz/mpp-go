@@ -404,3 +404,31 @@ func TestZoneRejectsSplitPayments(t *testing.T) {
 	_, err := s.verify(challenge, zoneTagA, zoneTestID)
 	assert.ErrorContains(t, err, "zone credentials do not support split payments")
 }
+
+// A Zone settlement transaction can't also be redeemed as a hash credential,
+// which would pay twice for a withdrawal its zone credential pays; zone
+// credentials for the batch it settles still verify.
+func TestZoneSettlementRejectedAsHashCredential(t *testing.T) {
+	t.Parallel()
+	s := newZoneSetup(t, nil)
+	a, memoA := s.challenge(t, server.ChargeParams{})
+	b, memoB := s.challenge(t, server.ChargeParams{ExternalID: "b"})
+	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memoA}, {senderTag: zoneTagB, memo: memoB}}
+
+	hashCredential := &mpp.Credential{
+		Challenge: a.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": zoneSettlementHash},
+		Source:    fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zoneTestOther),
+	}
+	_, err := s.method.intent.Verify(context.Background(), hashCredential, a.Request)
+	var paymentErr *mpp.PaymentError
+	require.ErrorAs(t, err, &paymentErr)
+	assert.Equal(t, mpp.ErrorTypeVerificationFailed, paymentErr.Type)
+	assert.ErrorContains(t, err, "zone settlement transactions can't be redeemed as hash credentials; use a zone credential")
+	assert.Contains(t, s.rpc.methods, "eth_getTransactionReceipt")
+
+	_, err = s.verify(a, zoneTagA, zoneTestID)
+	require.NoError(t, err)
+	_, err = s.verify(b, zoneTagB, zoneTestID)
+	require.NoError(t, err)
+}

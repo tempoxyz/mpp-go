@@ -143,10 +143,18 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		// twice. Only an invalid-payload rejection discards the Credential.
 		credentials := make(map[credentialKey]*mpp.Credential)
 		var sent credentialKey
+		// pushSent records that a push credential (a Tempo hash or zone
+		// credential, whose payment is already on chain) was submitted: as
+		// in the HTTP Transport, the call may then only resend it, never pay
+		// a new Challenge, which would pay twice.
+		pushSent := false
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
 			data, invalidPayload, ok := paymentRequired(result, err)
 			if !ok || attempt == maxPaymentAttempts {
+				return result, err
+			}
+			if pushSent && invalidPayload {
 				return result, err
 			}
 			if invalidPayload {
@@ -156,11 +164,15 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause)
+			paid, key, payErr := config.pay(ctx, session, params, data, credentials, pushSent, cause)
+			if errors.Is(payErr, errPushCredentialSpent) {
+				return result, err
+			}
 			if payErr != nil {
 				return nil, payErr
 			}
 			sent = key
+			pushSent = pushSent || isPushCredential(credentials[key])
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}
 	}
@@ -183,15 +195,35 @@ func newCredentialKey(challenge *mpp.Challenge) (credentialKey, error) {
 	return credentialKey{id: challenge.ID, method: challenge.Method, intent: challenge.Intent, challenge: string(encoded)}, nil
 }
 
+// errPushCredentialSpent is pay's answer when reuseOnly is set and the
+// selected Challenge has no Credential to resend.
+var errPushCredentialSpent = errors.New("mpp: a push credential was already submitted for this call")
+
+// isPushCredential reports whether a credential names a payment the client
+// already made on chain: a Tempo hash or zone credential.
+func isPushCredential(credential *mpp.Credential) bool {
+	if credential == nil {
+		return false
+	}
+	switch credential.Payload["type"] {
+	case "hash", "zone":
+		return true
+	}
+	return false
+}
+
 // pay selects a Challenge, approves and pays it (or reuses the Credential
 // already created for it), and returns a copy of the original call's params
-// with the Credential in their metadata.
+// with the Credential in their metadata. With reuseOnly, it only resends a
+// Credential already created and returns errPushCredentialSpent instead of
+// creating one.
 func (config *Config) pay(
 	ctx context.Context,
 	session *mcp.ClientSession,
 	original *mcp.CallToolParams,
 	data *mpp.MCPPaymentRequiredData,
 	credentials map[credentialKey]*mpp.Credential,
+	reuseOnly bool,
 	cause error,
 ) (*mcp.CallToolParams, credentialKey, error) {
 	offered := make([]mpp.Challenge, 0, len(data.Challenges))
@@ -245,6 +277,9 @@ func (config *Config) pay(
 	}
 	if credential, ok := credentials[key]; ok {
 		return withCredential(original, credential), key, nil
+	}
+	if reuseOnly {
+		return nil, credentialKey{}, errPushCredentialSpent
 	}
 
 	approve := config.OnPaymentRequired

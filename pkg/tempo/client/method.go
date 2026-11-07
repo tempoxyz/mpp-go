@@ -125,6 +125,11 @@ type zoneConfig struct {
 	parentChainID     int64
 	signer            *temposigner.Signer
 	settlementTimeout time.Duration
+	// nonceLock, a one-slot semaphore, serializes withdrawals from the
+	// signer on the Zone chain (one per zoneConfig, and so per Method): it is
+	// held from the nonce lookup until the send's outcome is known, so
+	// concurrent payments of different challenges never sign with one nonce.
+	nonceLock chan struct{}
 }
 
 // AccessKey is a Tempo access key that pays on behalf of Account. Payments

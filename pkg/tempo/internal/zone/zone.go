@@ -361,21 +361,32 @@ func SettlementStartBlock(ctx context.Context, rpc Requester) (uint64, error) {
 	return 0, nil
 }
 
+// Settlement is a WithdrawalProcessed event WaitForSettlement found on Tempo.
+type Settlement struct {
+	// Hash is the hash of the Tempo transaction that emitted it.
+	Hash string
+	// Bounced reports that the event's callbackSuccess is false: the payout
+	// failed and its amount went back to the sender's Zone balance. An event
+	// whose data does not decode is not reported as a bounce; the server
+	// verifies the settlement either way.
+	Bounced bool
+}
+
 // WaitForSettlement waits until portal emits WithdrawalProcessed for
 // senderTag (and, when to is set, that recipient) on Tempo, and returns the
-// hash of the Tempo transaction that settled it. It searches from fromBlock
+// Tempo transaction that settled it and whether its payout bounced. It searches from fromBlock
 // to the head once, logsRangeBlocks at a time, then only blocks added since
 // the previous poll, and gives up after timeout. A wait that resumes an
 // earlier one passes the earlier one's fromBlock, so it still finds a
 // settlement however far back the head has moved since.
-func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (string, error) {
+func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (Settlement, error) {
 	if timeout < 0 {
-		return "", fmt.Errorf("zone settlement timeout must be non-negative")
+		return Settlement{}, fmt.Errorf("zone settlement timeout must be non-negative")
 	}
 	deadline := time.Now().Add(timeout)
 	latest, err := blockNumber(ctx, rpc)
 	if err != nil {
-		return "", err
+		return Settlement{}, err
 	}
 	var toTopic any
 	if to != nil {
@@ -387,32 +398,32 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 			if latest-fromBlock >= logsRangeBlocks {
 				toBlock = fromBlock + logsRangeBlocks - 1
 			}
-			hash, err := settlementLog(ctx, rpc, portal, toTopic, senderTag, fromBlock, toBlock)
-			if err != nil || hash != "" {
-				return hash, err
+			settlement, err := settlementLog(ctx, rpc, portal, toTopic, senderTag, fromBlock, toBlock)
+			if err != nil || settlement.Hash != "" {
+				return settlement, err
 			}
 			fromBlock = toBlock + 1
 		}
 		if time.Now().Add(pollingInterval).After(deadline) {
-			return "", fmt.Errorf("zone withdrawal %s did not settle on Tempo within %s", senderTag.Hex(), timeout)
+			return Settlement{}, fmt.Errorf("zone withdrawal %s did not settle on Tempo within %s", senderTag.Hex(), timeout)
 		}
 		timer := time.NewTimer(pollingInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return "", ctx.Err()
+			return Settlement{}, ctx.Err()
 		case <-timer.C:
 		}
 		if latest, err = blockNumber(ctx, rpc); err != nil {
-			return "", err
+			return Settlement{}, err
 		}
 	}
 }
 
-// settlementLog returns the hash of the transaction in blocks fromBlock to
-// toBlock in which portal emitted WithdrawalProcessed for senderTag, or ""
-// when there is none.
-func settlementLog(ctx context.Context, rpc Requester, portal common.Address, toTopic any, senderTag common.Hash, fromBlock, toBlock uint64) (string, error) {
+// settlementLog returns the settlement in blocks fromBlock to toBlock in
+// which portal emitted WithdrawalProcessed for senderTag, or one with an
+// empty Hash when there is none.
+func settlementLog(ctx context.Context, rpc Requester, portal common.Address, toTopic any, senderTag common.Hash, fromBlock, toBlock uint64) (Settlement, error) {
 	response, err := rpc.SendRequest(ctx, "eth_getLogs", map[string]any{
 		"address":   portal.Hex(),
 		"topics":    []any{ProcessedTopic.Hex(), toTopic, senderTag.Hex()},
@@ -420,21 +431,36 @@ func settlementLog(ctx context.Context, rpc Requester, portal common.Address, to
 		"toBlock":   hexutil.EncodeUint64(toBlock),
 	})
 	if err != nil {
-		return "", fmt.Errorf("get Zone settlement logs: %w", err)
+		return Settlement{}, fmt.Errorf("get Zone settlement logs: %w", err)
 	}
 	if err := response.CheckError(); err != nil {
-		return "", fmt.Errorf("get Zone settlement logs: %w", err)
+		return Settlement{}, fmt.Errorf("get Zone settlement logs: %w", err)
 	}
 	if logs, ok := response.Result.([]any); ok {
 		for _, rawLog := range logs {
 			if entry, ok := rawLog.(map[string]any); ok {
 				if hash := asString(entry["transactionHash"]); hash != "" {
-					return hash, nil
+					return Settlement{Hash: hash, Bounced: processedBounced(entry)}, nil
 				}
 			}
 		}
 	}
-	return "", nil
+	return Settlement{}, nil
+}
+
+// processedBounced reports whether a WithdrawalProcessed log's data decodes
+// to callbackSuccess false, as FindProcessedEvent decodes it.
+func processedBounced(entry map[string]any) bool {
+	data, err := hexutil.Decode(asString(entry["data"]))
+	if err != nil {
+		return false
+	}
+	values, err := PortalABI.Events["WithdrawalProcessed"].Inputs.NonIndexed().Unpack(data)
+	if err != nil || len(values) != 3 {
+		return false
+	}
+	callbackSuccess, ok := values[2].(bool)
+	return ok && !callbackSuccess
 }
 
 func blockNumber(ctx context.Context, rpc Requester) (uint64, error) {
