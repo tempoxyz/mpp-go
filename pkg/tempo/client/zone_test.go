@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +33,8 @@ const (
 // zoneTestRPC is a Zone RPC. In "fail" mode every call fails with
 // "zone used", to show whether the method used the Zone; "ok" withdraws;
 // "prepare" fails before sending; "send" loses the send response and never
-// shows a receipt; "revert" reverts the withdrawal.
+// shows a receipt; "reject" has the Zone reject the send with a JSON-RPC
+// error; "revert" reverts the withdrawal.
 type zoneTestRPC struct {
 	mode  string
 	mu    sync.Mutex
@@ -73,6 +75,8 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 	switch r.mode {
 	case "fail", "send":
 		return "", errors.New("connection lost")
+	case "reject":
+		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "insufficient funds for gas"})
 	}
 	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
 }
@@ -350,6 +354,7 @@ func TestZoneResumesSettlementWaitWithoutWithdrawingAgain(t *testing.T) {
 	var pending *ZoneSettlementPendingError
 	require.ErrorAs(t, err, &pending)
 	assert.Equal(t, challenge.ID, pending.ChallengeID)
+	assert.Same(t, challenge, pending.Challenge)
 	assert.Equal(t, uint32(3), pending.ZoneID)
 	assert.NotEmpty(t, pending.SenderTag)
 
@@ -369,6 +374,9 @@ func TestZoneDoesNotWithdrawAgainAfterUnknownOutcome(t *testing.T) {
 	challenge := zoneChallenge(t, nil)
 	_, err := method.CreateCredential(context.Background(), challenge)
 	assert.ErrorContains(t, err, "Zone withdrawal outcome is unknown: transaction 0x")
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	assert.Same(t, challenge, unknown.Challenge)
 	assert.Contains(t, zoneRPC.calls, "eth_sendRawTransaction")
 	// The method looked for the receipt of the signed transaction before it gave up.
 	assert.Contains(t, zoneRPC.calls, "eth_getTransactionReceipt")
@@ -422,4 +430,47 @@ func TestZoneSharesOneWithdrawalBetweenConcurrentCalls(t *testing.T) {
 		assert.ErrorContains(t, err, "zone used")
 	}
 	assert.Equal(t, 1, zoneRPC.callCount())
+}
+
+// A Zone that rejects the withdrawal moved nothing, so the challenge may be
+// paid again.
+func TestZoneRetriesWithdrawalTheZoneRejected(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "reject"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	for range 2 {
+		_, err := method.CreateCredential(context.Background(), challenge)
+		assert.ErrorContains(t, err, "insufficient funds")
+		assert.NotContains(t, err.Error(), "outcome is unknown")
+	}
+	assert.Len(t, zoneRPC.sent, 2)
+	assert.NotContains(t, zoneRPC.calls, "eth_getTransactionReceipt")
+}
+
+// A credential too large to send is refused before anything is withdrawn.
+func TestZoneRefusesOversizedCredentialBeforeWithdrawing(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	challenge.Opaque = map[string]string{"pad": strings.Repeat("a", 70_000)}
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.Error(t, err)
+	assert.Zero(t, zoneRPC.callCount())
+}
+
+// The withdrawal pays gas in Config.FeeToken but still moves the currency.
+func TestZonePaysGasInConfiguredFeeToken(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.FeeToken = tempo.OUSDAddress })
+	_, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.NoError(t, err)
+	require.Len(t, zoneRPC.sent, 1)
+	tx, err := tempotx.Deserialize(zoneRPC.sent[0])
+	require.NoError(t, err)
+	assert.Equal(t, common.HexToAddress(tempo.OUSDAddress), tx.FeeToken)
+	require.Len(t, tx.Calls, 2)
+	assert.Equal(t, common.HexToAddress(testCurrency), *tx.Calls[0].To)
 }

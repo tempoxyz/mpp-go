@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
@@ -40,10 +41,13 @@ const approveSelector = "095ea7b3"
 
 // ZoneSettlementPendingError reports a Zone withdrawal that paid a challenge
 // but did not settle on Tempo before the method stopped waiting. The
-// withdrawal cannot be undone and may still settle: retry the same challenge
-// with the same Method to resume waiting without withdrawing again, or find
-// the settlement by SenderTag on the Zone's portal.
+// withdrawal cannot be undone and may still settle: pass Challenge to the same
+// Method's CreateCredential to resume waiting without withdrawing again, or
+// find the settlement by SenderTag on the Zone's portal. A new request gets a
+// new challenge, which the method would pay with a new withdrawal.
 type ZoneSettlementPendingError struct {
+	// Challenge is the challenge the withdrawal pays.
+	Challenge *mpp.Challenge
 	// ChallengeID is the ID of the challenge the withdrawal pays.
 	ChallengeID string
 	// SenderTag identifies the withdrawal in the portal's
@@ -63,6 +67,36 @@ func (e *ZoneSettlementPendingError) Error() string {
 
 // Unwrap returns the error that ended the wait.
 func (e *ZoneSettlementPendingError) Unwrap() error {
+	return e.Err
+}
+
+// ZoneWithdrawalUnknownError reports a Zone withdrawal for a challenge that
+// may have been sent but whose receipt the method could not find. Passing
+// Challenge to the same Method's CreateCredential returns this error again
+// instead of withdrawing twice; find the transaction by TransactionHash on the
+// Zone before paying the challenge another way.
+type ZoneWithdrawalUnknownError struct {
+	// Challenge is the challenge the withdrawal would pay.
+	Challenge *mpp.Challenge
+	// TransactionHash is the hash of the signed withdrawal transaction.
+	TransactionHash string
+	// ZoneID is the Zone the withdrawal would leave.
+	ZoneID uint32
+	// Err is the send error, if any.
+	Err error
+}
+
+// Error implements error.
+func (e *ZoneWithdrawalUnknownError) Error() string {
+	message := fmt.Sprintf("tempo client: Zone withdrawal outcome is unknown: transaction %s may have been sent; retrying this challenge does not withdraw again", e.TransactionHash)
+	if e.Err != nil {
+		message += ": " + e.Err.Error()
+	}
+	return message
+}
+
+// Unwrap returns the send error.
+func (e *ZoneWithdrawalUnknownError) Unwrap() error {
 	return e.Err
 }
 
@@ -220,6 +254,12 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	key := zoneWithdrawalKey(challenge)
 	pending := m.pendingZoneWithdrawal(key)
 	if pending == nil {
+		// Refuse a credential too large to send before withdrawing: the
+		// settlement hash and sender tag are 32 bytes each.
+		placeholder := "0x" + strings.Repeat("0", 64)
+		if _, err := mpp.FormatCredential(zoneCredential(challenge, placeholder, placeholder, m.zone.id)); err != nil {
+			return nil, err
+		}
 		senderTag, sent, err := m.requestZoneWithdrawal(ctx, challenge, request)
 		if err != nil {
 			// Only a failure before the transaction was sent, or a revert,
@@ -241,27 +281,32 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	hash, err := zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, m.settlementTimeout(challenge.Expires))
 	if err != nil {
 		return nil, &ZoneSettlementPendingError{
+			Challenge:   challenge,
 			ChallengeID: challenge.ID,
 			SenderTag:   pending.senderTag.Hex(),
 			ZoneID:      m.zone.id,
 			Err:         err,
 		}
 	}
-	m.setZoneWithdrawal(key, nil)
-
-	credential := &mpp.Credential{
-		Challenge: challenge.ToEcho(),
-		Payload: tempo.ChargeCredentialPayload{
-			Type:      tempo.CredentialTypeZone,
-			Hash:      common.HexToHash(hash).Hex(),
-			SenderTag: pending.senderTag.Hex(),
-			ZoneID:    m.zone.id,
-		}.Map(),
-	}
+	credential := zoneCredential(challenge, common.HexToHash(hash).Hex(), pending.senderTag.Hex(), m.zone.id)
 	if _, err := mpp.FormatCredential(credential); err != nil {
 		return nil, err
 	}
+	m.setZoneWithdrawal(key, nil)
 	return credential, nil
+}
+
+// zoneCredential returns the zone credential paying challenge.
+func zoneCredential(challenge *mpp.Challenge, hash, senderTag string, zoneID uint32) *mpp.Credential {
+	return &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload: tempo.ChargeCredentialPayload{
+			Type:      tempo.CredentialTypeZone,
+			Hash:      hash,
+			SenderTag: senderTag,
+			ZoneID:    zoneID,
+		}.Map(),
+	}
 }
 
 // requestZoneWithdrawal withdraws the challenge amount from the Zone to its
@@ -301,13 +346,19 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if err != nil {
 		return common.Hash{}, false, fmt.Errorf("tempo client: get Zone nonce: %w", err)
 	}
+	// Gas is paid in the configured fee token; the withdrawal itself always
+	// approves and moves the charge currency.
+	feeToken := currency
+	if m.feeToken != nil {
+		feeToken = *m.feeToken
+	}
 	tx, err := tempotx.NewBuilder(big.NewInt(m.zone.chainID)).
 		SetMaxFeePerGas(gasPrice).
 		SetMaxPriorityFeePerGas(new(big.Int).Set(gasPrice)).
 		SetGas(zoneWithdrawalGas).
 		SetNonceKey(big.NewInt(0)).
 		SetNonce(nonce).
-		SetFeeToken(currency).
+		SetFeeToken(feeToken).
 		AddCall(currency, big.NewInt(0), common.FromHex(approve)).
 		AddCall(zone.OutboxAddress, big.NewInt(0), withdrawal).
 		BuildAndValidate()
@@ -332,15 +383,21 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if sentHash, sendErr := rpc.SendRawTransaction(ctx, serialized); sendErr == nil && sentHash != "" {
 		hash = sentHash
 	} else if sendErr != nil {
+		if zoneSendRejected(sendErr) {
+			// The Zone answered with a JSON-RPC error: it did not accept the
+			// transaction, so nothing was withdrawn.
+			return common.Hash{}, false, fmt.Errorf("tempo client: send Zone withdrawal: %w", sendErr)
+		}
 		err = sendErr
 	}
 	receipt := m.waitForZoneReceipt(ctx, rpc, hash)
 	if receipt == nil {
-		unknown := fmt.Errorf("tempo client: Zone withdrawal outcome is unknown: transaction %s may have been sent; retrying this challenge does not withdraw again", hash)
-		if err != nil {
-			unknown = fmt.Errorf("%w: %w", unknown, err)
+		return common.Hash{}, true, &ZoneWithdrawalUnknownError{
+			Challenge:       challenge,
+			TransactionHash: hash,
+			ZoneID:          m.zone.id,
+			Err:             err,
 		}
-		return common.Hash{}, true, unknown
 	}
 	if !strings.EqualFold(stringValue(receipt["status"]), "0x1") {
 		// A reverted withdrawal moved nothing, so the challenge may be retried.
@@ -355,6 +412,19 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 		transactionHash = receiptHash
 	}
 	return zone.SenderTag(sender, common.HexToHash(transactionHash), fallbackNonce), true, nil
+}
+
+// zoneSendRejected reports whether a send error is the node's JSON-RPC
+// rejection of the transaction, rather than a transport failure or timeout
+// that leaves it unknown whether the node accepted it. A rejection as a
+// duplicate means the node already holds the transaction.
+func zoneSendRejected(err error) bool {
+	var rpcErr *temporpc.JSONRPCError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	message := strings.ToLower(rpcErr.Message)
+	return !strings.Contains(message, "already known") && !strings.Contains(message, "known transaction")
 }
 
 // waitForZoneReceipt polls the Zone for a transaction's receipt until
