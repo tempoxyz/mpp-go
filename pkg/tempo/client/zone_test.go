@@ -1174,3 +1174,63 @@ func TestZoneRefusesToSendCloseToTheRequestDeadline(t *testing.T) {
 	assert.Empty(t, zoneRPC.sent)
 	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
 }
+
+// Concurrent payments of one challenge share one withdrawal, and the policy
+// authorizes it once: only the call that sends it runs the policy.
+func TestZoneConcurrentPaymentsOfOneChallengeRunPolicyOnce(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	var mu sync.Mutex
+	authorized := 0
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) {
+		c.PaymentPolicy = func(context.Context, tempo.ChargeRequest) error {
+			mu.Lock()
+			defer mu.Unlock()
+			authorized++
+			return nil
+		}
+	})
+	challenge := zoneChallenge(t, nil)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := method.CreateCredential(context.Background(), challenge)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, 1, authorized)
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A withdrawal the policy refused leaves nothing pending, so the next
+// payment of the challenge runs the policy again before sending.
+func TestZonePolicyRefusalSendsNothingAndIsAskedAgain(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	var mu sync.Mutex
+	authorized := 0
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) {
+		c.PaymentPolicy = func(context.Context, tempo.ChargeRequest) error {
+			mu.Lock()
+			defer mu.Unlock()
+			authorized++
+			if authorized == 1 {
+				return errors.New("over budget")
+			}
+			return nil
+		}
+	})
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.ErrorContains(t, err, "payment rejected by policy")
+	assert.Empty(t, zoneRPC.sent)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, 2, authorized)
+	assert.Len(t, zoneRPC.sent, 1)
+}

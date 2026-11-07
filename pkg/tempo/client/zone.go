@@ -381,7 +381,10 @@ func (m *Method) forgetZoneWithdrawal(key string, withdrawal *zoneWithdrawal) {
 // returns a zone credential naming it by sender tag and the Tempo
 // transaction that settled it. Calls for challenges with one withdrawal key
 // share one withdrawal, so they never send two for one challenge.
-func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, challenge *mpp.Challenge, request tempo.ChargeRequest) (*mpp.Credential, error) {
+//
+// authorize runs only before a new withdrawal is sent, while this call holds
+// the challenge's claim; its error refuses the payment and sends nothing.
+func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, challenge *mpp.Challenge, request tempo.ChargeRequest, authorize func(context.Context) error) (*mpp.Credential, error) {
 	// Refuse a credential too large to send before withdrawing: the
 	// settlement hash and sender tag are 32 bytes each.
 	placeholder := "0x" + strings.Repeat("0", 64)
@@ -416,7 +419,7 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			// An earlier call sent this withdrawal but found no receipt:
 			// look for it again instead of sending another.
 			senderTag, hash, sent, sendErr = m.resumeZoneWithdrawal(ctx, challenge, expected, pending.hash, pending.err)
-		} else {
+		} else if sendErr = authorize(ctx); sendErr == nil {
 			senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, challenge, expected)
 		}
 		// Only a failure before the transaction was sent, or a revert, is

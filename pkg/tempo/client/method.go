@@ -458,14 +458,11 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		}, nil
 	}
 	if m.paysFromZone(challenge, request, chainID) {
-		// A pending withdrawal was authorized when it was first sent: a
-		// resumed payment must not reserve the same charge in the policy again.
-		if m.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)) == nil {
-			if err := m.authorizePayment(ctx, request, chainID); err != nil {
-				return nil, err
-			}
-		}
-		return m.createZoneCredential(ctx, rpc, challenge, request)
+		// The policy authorizes only a withdrawal about to be sent, under the
+		// claim on the challenge: a resumed payment does not reserve the same
+		// charge again, and no new withdrawal is sent without it.
+		authorize := func(ctx context.Context) error { return m.authorizePayment(ctx, request, chainID) }
+		return m.createZoneCredential(ctx, rpc, challenge, request, authorize)
 	}
 	if !request.Allows(credentialType) {
 		return nil, fmt.Errorf("tempo client: credential type %q is not allowed for this challenge", credentialType)
