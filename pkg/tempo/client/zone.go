@@ -141,6 +141,10 @@ func (e *ZoneWithdrawalBouncedError) Error() string {
 // nothing, so the challenge may be paid another way.
 var ErrZoneChallengeExpiresTooSoon = errors.New("tempo client: challenge expires too soon for a Zone withdrawal to settle")
 
+// ErrZoneDeadlineTooSoon reports a request context whose deadline is too
+// close for a Zone withdrawal to be sent and its receipt found: none is sent.
+var ErrZoneDeadlineTooSoon = errors.New("tempo client: request deadline too soon to send a Zone withdrawal")
+
 // zoneWithdrawal is a Zone withdrawal for a challenge. While it is being
 // sent, done is open and calls for the same withdrawal key wait on it. Once
 // done is closed, sent reports whether the transaction may have reached the
@@ -619,6 +623,12 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if !m.settlesBeforeExpiry(challenge.Expires) {
 		return common.Hash{}, "", false, fmt.Errorf("%w: challenge %q expires at %s, and a withdrawal needs more than %s",
 			ErrZoneChallengeExpiresTooSoon, challenge.ID, challenge.Expires, m.zone.settlementTimeout+zoneSubmissionMargin)
+	}
+	// Nor is one sent when the caller's deadline leaves no time to find its
+	// receipt.
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= zoneSubmissionMargin {
+		return common.Hash{}, "", false, fmt.Errorf("%w: the request deadline leaves less than %s to send the withdrawal",
+			ErrZoneDeadlineTooSoon, zoneSubmissionMargin)
 	}
 
 	// The receipt is looked up, and must match, by the hash of the signed

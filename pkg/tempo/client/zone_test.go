@@ -1127,3 +1127,50 @@ func TestZoneBouncedWithdrawalFailsAndMayBePaidAgain(t *testing.T) {
 	require.NotNil(t, credential)
 	assert.Len(t, zoneRPC.sent, 2)
 }
+
+// A retry of a challenge whose withdrawal is pending does not run the
+// payment policy again: the withdrawal was authorized when it was sent.
+func TestZoneResumedPaymentDoesNotRerunPolicy(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	var mu sync.Mutex
+	authorized := 0
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) {
+		c.Zone.SettlementTimeout = time.Nanosecond
+		c.PaymentPolicy = func(context.Context, tempo.ChargeRequest) error {
+			mu.Lock()
+			defer mu.Unlock()
+			authorized++
+			return nil
+		}
+	})
+	tempoRPC.settled = false
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+
+	tempoRPC.mu.Lock()
+	tempoRPC.settled = true
+	tempoRPC.mu.Unlock()
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, 1, authorized)
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A request whose deadline leaves too little time to find the receipt sends
+// no withdrawal.
+func TestZoneRefusesToSendCloseToTheRequestDeadline(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := method.CreateCredential(ctx, challenge)
+	require.ErrorIs(t, err, ErrZoneDeadlineTooSoon)
+	assert.NotContains(t, zoneRPC.calls, "eth_sendRawTransaction")
+	assert.Empty(t, zoneRPC.sent)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+}

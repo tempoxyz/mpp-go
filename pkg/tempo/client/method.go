@@ -458,8 +458,12 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		}, nil
 	}
 	if m.paysFromZone(challenge, request, chainID) {
-		if err := m.authorizePayment(ctx, request, chainID); err != nil {
-			return nil, err
+		// A pending withdrawal was authorized when it was first sent: a
+		// resumed payment must not reserve the same charge in the policy again.
+		if m.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)) == nil {
+			if err := m.authorizePayment(ctx, request, chainID); err != nil {
+				return nil, err
+			}
 		}
 		return m.createZoneCredential(ctx, rpc, challenge, request)
 	}
