@@ -29,6 +29,7 @@ import (
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/rpccache"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/txsend"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
 )
 
@@ -298,9 +299,10 @@ func (i *Intent) Validate(
 		return nil, err
 	}
 	mode := string(tempo.ChargeModePull)
-	if validated.payload.Type == tempo.CredentialTypeHash || validated.payload.Type == tempo.CredentialTypeZone {
+	switch validated.payload.Type {
+	case tempo.CredentialTypeHash, tempo.CredentialTypeZone:
 		mode = string(tempo.ChargeModePush)
-	} else if validated.payload.Type == tempo.CredentialTypeProof {
+	case tempo.CredentialTypeProof:
 		mode = string(tempo.CredentialTypeProof)
 	}
 	details := map[string]any{"mode": mode}
@@ -313,6 +315,13 @@ func (i *Intent) Validate(
 	if validated.payload.Type == tempo.CredentialTypeTransaction {
 		details["serializedTransaction"] = validated.payload.Signature
 	}
+	// Nothing binds a zone credential's source to the withdrawal, which pays
+	// from a Zone sender the server cannot see, so it names no payer, as
+	// mppx reports payer: undefined for zone credentials.
+	source := credential.Source
+	if validated.payload.Type == tempo.CredentialTypeZone {
+		source = ""
+	}
 	return &mppserver.Validation{
 		Challenge:  credential.Challenge,
 		Credential: credential,
@@ -320,7 +329,7 @@ func (i *Intent) Validate(
 		Intent:     tempo.IntentCharge,
 		Method:     tempo.MethodName,
 		Request:    requestMap,
-		Source:     credential.Source,
+		Source:     source,
 	}, nil
 }
 
@@ -1044,7 +1053,7 @@ func (i *Intent) broadcastTransaction(
 			// earlier attempt broadcast that is still pending, may include
 			// it later.
 			var rpcErr *temporpc.JSONRPCError
-			if isDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
+			if txsend.IsDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
 				return nil, broadcastOutcomeUnknown(credential.Challenge.ID)
 			}
 			return nil, mpp.ErrVerificationFailed("transaction submission failed")
@@ -1356,7 +1365,7 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 	// unless it rejected a duplicate of a transaction it already holds.
 	attempts := receiptRetryAttempts
 	var rpcErr *temporpc.JSONRPCError
-	if errors.As(sendErr, &rpcErr) && !isDuplicateSubmission(sendErr) {
+	if errors.As(sendErr, &rpcErr) && !txsend.IsDuplicateSubmission(sendErr) {
 		attempts = 1
 	}
 	// The send may have failed because ctx ended; the lookup still needs to run.
@@ -1381,25 +1390,6 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 		}
 	}
 	return "", nil, false
-}
-
-// isDuplicateSubmission reports whether eth_sendRawTransaction failed because
-// the node already holds the transaction, as geth- and reth-based nodes answer
-// a re-broadcast of a pending transaction, and as Tempo answers with
-// ExpiringNonceReplay when an expiring-nonce transaction with this hash was
-// already accepted, such as when a transport retries a send the node took.
-func isDuplicateSubmission(err error) bool {
-	var rpcErr *temporpc.JSONRPCError
-	if !errors.As(err, &rpcErr) {
-		return false
-	}
-	message := strings.ToLower(rpcErr.Message)
-	for _, marker := range []string{"already known", "known transaction", "already imported", "alreadyknown", "expiringnoncereplay"} {
-		if strings.Contains(message, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // lookupIncludedReceipt checks once, without polling, whether the transaction

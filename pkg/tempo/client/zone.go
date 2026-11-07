@@ -18,6 +18,7 @@ import (
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/txsend"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
 )
 
@@ -31,6 +32,10 @@ const zoneReceiptTimeout = 15 * time.Second
 
 // zoneReceiptPollInterval is the time between polls for a Zone receipt.
 const zoneReceiptPollInterval = 500 * time.Millisecond
+
+// zoneReceiptLookupTimeout bounds the one receipt lookup after the Zone
+// answers a send with an error.
+const zoneReceiptLookupTimeout = 5 * time.Second
 
 // zoneWithdrawalGas is the gas limit of a Zone withdrawal transaction, as
 // viem's Actions.zone.requestWithdrawal.
@@ -215,10 +220,13 @@ func (m *Method) settlementTimeout(expires string) time.Duration {
 	return max(0, min(timeout, expiry.Sub(m.clock())))
 }
 
-// zoneWithdrawalKey keys a Zone withdrawal by its whole challenge, so a
-// challenge from another realm or request with the same ID never matches.
+// zoneWithdrawalKey keys a Zone withdrawal by its challenge's echo: the ID
+// and every field its HMAC binds, so a challenge from another realm or
+// request with the same ID never matches, while fields outside the binding,
+// such as the description, cannot make the same challenge miss its pending
+// withdrawal and pay again.
 func zoneWithdrawalKey(challenge *mpp.Challenge) string {
-	encoded, err := json.Marshal(challenge)
+	encoded, err := json.Marshal(challenge.ToEcho())
 	if err != nil {
 		return ""
 	}
@@ -380,17 +388,25 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	// still be recovered from the Zone.
 	hash := crypto.Keccak256Hash(common.FromHex(serialized)).Hex()
 
+	var receipt map[string]any
 	if sentHash, sendErr := rpc.SendRawTransaction(ctx, serialized); sendErr == nil && sentHash != "" {
 		hash = sentHash
 	} else if sendErr != nil {
 		if zoneSendRejected(sendErr) {
-			// The Zone answered with a JSON-RPC error: it did not accept the
-			// transaction, so nothing was withdrawn.
-			return common.Hash{}, false, fmt.Errorf("tempo client: send Zone withdrawal: %w", sendErr)
+			// The Zone answered with a JSON-RPC error, but a node can answer
+			// a send it already took with one too, such as "nonce too low"
+			// once it included the transaction: look for its receipt once
+			// before deciding nothing was withdrawn.
+			receipt = lookupZoneReceipt(ctx, rpc, hash)
+			if receipt == nil {
+				return common.Hash{}, false, fmt.Errorf("tempo client: send Zone withdrawal: %w", sendErr)
+			}
 		}
 		err = sendErr
 	}
-	receipt := m.waitForZoneReceipt(ctx, rpc, hash)
+	if receipt == nil {
+		receipt = m.waitForZoneReceipt(ctx, rpc, hash)
+	}
 	if receipt == nil {
 		return common.Hash{}, true, &ZoneWithdrawalUnknownError{
 			Challenge:       challenge,
@@ -420,11 +436,22 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 // duplicate means the node already holds the transaction.
 func zoneSendRejected(err error) bool {
 	var rpcErr *temporpc.JSONRPCError
-	if !errors.As(err, &rpcErr) {
-		return false
+	return errors.As(err, &rpcErr) && !txsend.IsDuplicateSubmission(err)
+}
+
+// lookupZoneReceipt checks once, without polling, for a transaction's
+// receipt, even when ctx has ended, and returns nil when there is none.
+func lookupZoneReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) map[string]any {
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), zoneReceiptLookupTimeout)
+	defer cancel()
+	response, err := rpc.SendRequest(lookupCtx, "eth_getTransactionReceipt", hash)
+	if err != nil || response.CheckError() != nil {
+		return nil
 	}
-	message := strings.ToLower(rpcErr.Message)
-	return !strings.Contains(message, "already known") && !strings.Contains(message, "known transaction")
+	if receipt, ok := response.Result.(map[string]any); ok && len(receipt) > 0 {
+		return receipt
+	}
+	return nil
 }
 
 // waitForZoneReceipt polls the Zone for a transaction's receipt until

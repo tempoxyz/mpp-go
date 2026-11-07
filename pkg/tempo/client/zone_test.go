@@ -34,7 +34,8 @@ const (
 // "zone used", to show whether the method used the Zone; "ok" withdraws;
 // "prepare" fails before sending; "send" loses the send response and never
 // shows a receipt; "reject" has the Zone reject the send with a JSON-RPC
-// error; "revert" reverts the withdrawal.
+// error; "nonce" and "imported" have it answer a send it took with a
+// JSON-RPC error; "revert" reverts the withdrawal.
 type zoneTestRPC struct {
 	mode  string
 	mu    sync.Mutex
@@ -77,6 +78,10 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 		return "", errors.New("connection lost")
 	case "reject":
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "insufficient funds for gas"})
+	case "nonce":
+		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32003, Message: "nonce too low"})
+	case "imported":
+		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "transaction already imported"})
 	}
 	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
 }
@@ -96,7 +101,7 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 	case "eth_gasPrice":
 		return &temporpc.JSONRPCResponse{Result: "0x1"}, nil
 	case "eth_getTransactionReceipt":
-		if r.mode == "send" {
+		if r.mode == "send" || r.mode == "reject" {
 			return &temporpc.JSONRPCResponse{Result: nil}, nil
 		}
 		return &temporpc.JSONRPCResponse{Result: r.receipt(params[0].(string))}, nil
@@ -386,6 +391,25 @@ func TestZoneDoesNotWithdrawAgainAfterUnknownOutcome(t *testing.T) {
 	assert.Equal(t, calls, zoneRPC.callCount())
 }
 
+// The pending withdrawal is keyed on the challenge's HMAC-bound fields, so
+// the same challenge with another description, which nothing binds, does not
+// withdraw again.
+func TestZoneDoesNotWithdrawAgainForChallengeWithOtherDescription(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "send"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.ErrorContains(t, err, "Zone withdrawal outcome is unknown")
+	calls := zoneRPC.callCount()
+	described := *challenge
+	described.Description = "another description"
+	_, err = method.CreateCredential(context.Background(), &described)
+	assert.ErrorContains(t, err, "Zone withdrawal outcome is unknown")
+	assert.Equal(t, calls, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
 func TestZoneRetriesRevertedWithdrawal(t *testing.T) {
 	t.Parallel()
 	zoneRPC := &zoneTestRPC{mode: "revert"}
@@ -445,7 +469,34 @@ func TestZoneRetriesWithdrawalTheZoneRejected(t *testing.T) {
 		assert.NotContains(t, err.Error(), "outcome is unknown")
 	}
 	assert.Len(t, zoneRPC.sent, 2)
-	assert.NotContains(t, zoneRPC.calls, "eth_getTransactionReceipt")
+	// Each rejection was checked once for a receipt, without polling.
+	receiptLookups := 0
+	for _, call := range zoneRPC.calls {
+		if call == "eth_getTransactionReceipt" {
+			receiptLookups++
+		}
+	}
+	assert.Equal(t, 2, receiptLookups)
+}
+
+// A Zone can answer a send it took with a JSON-RPC error, such as "nonce too
+// low" once the transaction is included, or reth's "already imported": the
+// withdrawal's receipt shows it was taken, so it pays the challenge rather
+// than failing as if nothing were withdrawn, which would let a retry pay again.
+func TestZoneUsesWithdrawalTheZoneTookDespiteSendError(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"nonce", "imported"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			zoneRPC := &zoneTestRPC{mode: mode}
+			method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+			challenge := zoneChallenge(t, nil)
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			require.NoError(t, err)
+			assert.Equal(t, "zone", credential.Payload["type"])
+			assert.Len(t, zoneRPC.sent, 1)
+		})
+	}
 }
 
 // A credential too large to send is refused before anything is withdrawn.

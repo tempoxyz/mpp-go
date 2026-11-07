@@ -233,6 +233,23 @@ func TestZoneAcceptsSettledWithdrawal(t *testing.T) {
 	assert.Equal(t, "push", validation.Details["mode"])
 }
 
+// Nothing binds a zone credential's source to the withdrawal, so the server
+// reports no payer for it, as mppx does.
+func TestZoneDoesNotReportCredentialSourceAsPayer(t *testing.T) {
+	t.Parallel()
+	s := newZoneSetup(t, nil)
+	challenge, memo := s.challenge(t, server.ChargeParams{})
+	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+	validation, err := s.method.intent.(*Intent).Validate(context.Background(), &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   tempo.ChargeCredentialPayload{Type: tempo.CredentialTypeZone, Hash: zoneSettlementHash, SenderTag: zoneTagA, ZoneID: zoneTestID}.Map(),
+		Source:    fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zoneTestOther),
+	}, challenge.Request)
+	require.NoError(t, err)
+	assert.Empty(t, validation.Source)
+	assert.NotContains(t, validation.Details, "sender")
+}
+
 func TestZoneRejectsCredentialWithoutSettlementHash(t *testing.T) {
 	t.Parallel()
 	s := newZoneSetup(t, nil)
