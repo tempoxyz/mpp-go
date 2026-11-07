@@ -144,23 +144,66 @@ func TestWaitForSettlement(t *testing.T) {
 	portal := PortalAddress(3)
 	tag := common.HexToHash("0x" + repeat("a1", 32))
 	var filters []map[string]any
-	rpc := &logsRPC{blocks: []string{"0x2710", "0x2712"}, logs: func(filter map[string]any) []any {
+	rpc := &logsRPC{blocks: []string{"0x2710", "0x2710", "0x2712"}, logs: func(filter map[string]any) []any {
 		filters = append(filters, filter)
 		if len(filters) < 2 {
 			return []any{}
 		}
 		return []any{map[string]any{"transactionHash": "0x" + repeat("ab", 32)}}
 	}}
-	hash, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, 5*time.Second)
+	start, err := SettlementStartBlock(context.Background(), rpc)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0x2710-lookbackBlocks), start)
+	hash, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, start, 5*time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, "0x"+repeat("ab", 32), hash)
 	// The first poll looks back lookbackBlocks; the next only at new blocks.
 	assert.Equal(t, "0xaf0", filters[0]["fromBlock"])
+	assert.Equal(t, "0x2710", filters[0]["toBlock"])
 	assert.Equal(t, "0x2711", filters[1]["fromBlock"])
 	assert.Equal(t, []any{ProcessedTopic.Hex(), nil, tag.Hex()}, filters[0]["topics"])
 
-	_, err = WaitForSettlement(context.Background(), &logsRPC{blocks: []string{"0x1"}, logs: func(map[string]any) []any { return nil }}, portal, tag, nil, 0)
+	_, err = WaitForSettlement(context.Background(), &logsRPC{blocks: []string{"0x1"}, logs: func(map[string]any) []any { return nil }}, portal, tag, nil, 0, 0)
 	assert.ErrorContains(t, err, "did not settle on Tempo")
+
+	start, err = SettlementStartBlock(context.Background(), &logsRPC{blocks: []string{"0x10"}})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), start)
+}
+
+// A wait resumed long after the first one searches from the first one's
+// start block, however far the head has moved, in bounded log ranges.
+func TestWaitForSettlementResumesFromStartBlockInChunks(t *testing.T) {
+	t.Parallel()
+	portal := PortalAddress(3)
+	tag := common.HexToHash("0x" + repeat("a1", 32))
+	const settledAt = 10_001
+	var ranges [][2]uint64
+	rpc := &logsRPC{blocks: []string{hexutil.EncodeUint64(30_000)}, logs: func(filter map[string]any) []any {
+		from := hexutil.MustDecodeUint64(filter["fromBlock"].(string))
+		to := hexutil.MustDecodeUint64(filter["toBlock"].(string))
+		ranges = append(ranges, [2]uint64{from, to})
+		if from <= settledAt && settledAt <= to {
+			return []any{map[string]any{"transactionHash": "0x" + repeat("ab", 32)}}
+		}
+		return []any{}
+	}}
+	hash, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, 2_800, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "0x"+repeat("ab", 32), hash)
+	assert.Equal(t, [][2]uint64{{2_800, 10_000}, {10_001, 17_201}}, ranges)
+
+	// With no settlement, it searches every block up to the head once.
+	ranges = nil
+	rpc.logs = func(filter map[string]any) []any {
+		from := hexutil.MustDecodeUint64(filter["fromBlock"].(string))
+		to := hexutil.MustDecodeUint64(filter["toBlock"].(string))
+		ranges = append(ranges, [2]uint64{from, to})
+		return []any{}
+	}
+	_, err = WaitForSettlement(context.Background(), rpc, portal, tag, nil, 2_800, 0)
+	assert.ErrorContains(t, err, "did not settle on Tempo")
+	assert.Equal(t, [][2]uint64{{2_800, 10_000}, {10_001, 17_201}, {17_202, 24_402}, {24_403, 30_000}}, ranges)
 }
 
 func processedLog(t *testing.T, portal, to common.Address, tag common.Hash, token common.Address, success bool) map[string]any {

@@ -2,6 +2,7 @@ package chargeclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -51,6 +52,10 @@ type zoneTestRPC struct {
 	calls    []string
 	sent     []string
 	receipts int
+	// status, when set, replaces the status of a successful withdrawal's
+	// receipt; noStatus leaves it out.
+	status   any
+	noStatus bool
 }
 
 func (r *zoneTestRPC) record(method string) {
@@ -163,7 +168,7 @@ func (r *zoneTestRPC) receipt(hash string) map[string]any {
 	if err != nil {
 		panic(err)
 	}
-	return map[string]any{
+	receipt := map[string]any{
 		"transactionHash": hash,
 		"status":          "0x1",
 		"logs": []any{map[string]any{
@@ -172,13 +177,27 @@ func (r *zoneTestRPC) receipt(hash string) map[string]any {
 			"data":    hexutil.Encode(data),
 		}},
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status != nil {
+		receipt["status"] = r.status
+	}
+	if r.noStatus {
+		delete(receipt, "status")
+	}
+	return receipt
 }
 
-// zoneTestTempoRPC is the Tempo RPC; it shows a settlement once settled.
+// zoneTestTempoRPC is the Tempo RPC; it shows a settlement once settled, in
+// any block range, or when settledAt is set only in ranges that include it.
+// Its head is block 0x10 unless head is set.
 type zoneTestTempoRPC struct {
-	mu      sync.Mutex
-	settled bool
-	topics  []any
+	mu        sync.Mutex
+	settled   bool
+	settledAt uint64
+	head      uint64
+	topics    []any
+	ranges    [][2]uint64
 }
 
 func (r *zoneTestTempoRPC) GetChainID(context.Context) (uint64, error) { return 42431, nil }
@@ -194,12 +213,21 @@ func (r *zoneTestTempoRPC) SendRawTransaction(context.Context, string) (string, 
 func (r *zoneTestTempoRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
 	switch method {
 	case "eth_blockNumber":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.head != 0 {
+			return &temporpc.JSONRPCResponse{Result: hexutil.EncodeUint64(r.head)}, nil
+		}
 		return &temporpc.JSONRPCResponse{Result: "0x10"}, nil
 	case "eth_getLogs":
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		r.topics = params[0].(map[string]any)["topics"].([]any)
-		if !r.settled {
+		filter := params[0].(map[string]any)
+		r.topics = filter["topics"].([]any)
+		from := hexutil.MustDecodeUint64(filter["fromBlock"].(string))
+		to := hexutil.MustDecodeUint64(filter["toBlock"].(string))
+		r.ranges = append(r.ranges, [2]uint64{from, to})
+		if !r.settled || (r.settledAt != 0 && (r.settledAt < from || r.settledAt > to)) {
 			return &temporpc.JSONRPCResponse{Result: []any{}}, nil
 		}
 		return &temporpc.JSONRPCResponse{Result: []any{map[string]any{"transactionHash": zoneTestSettlement}}}, nil
@@ -405,6 +433,93 @@ func TestZoneResumesSettlementWaitWithoutWithdrawingAgain(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pending.SenderTag, credential.Payload["senderTag"])
 	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A retry of a challenge whose withdrawal settled after the first wait gave
+// up searches from the first wait's start block, even after the Tempo head
+// moved further than the lookback window.
+func TestZoneResumedSettlementWaitSearchesFromFirstStartBlock(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	tempoRPC.head = 10_000
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+
+	tempoRPC.mu.Lock()
+	tempoRPC.settled = true
+	tempoRPC.settledAt = 10_001
+	tempoRPC.head = 10_001 + 7_200 + 7_200
+	tempoRPC.ranges = nil
+	tempoRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, zoneTestSettlement, credential.Payload["hash"])
+	assert.Len(t, zoneRPC.sent, 1)
+	tempoRPC.mu.Lock()
+	defer tempoRPC.mu.Unlock()
+	assert.Equal(t, [][2]uint64{{10_000 - 7_200, 10_000}, {10_001, 17_201}}, tempoRPC.ranges)
+}
+
+// A receipt status of 1 in any form is a withdrawal that went through.
+func TestZoneAcceptsSuccessReceiptStatusForms(t *testing.T) {
+	t.Parallel()
+	for _, status := range []any{"0x01", "0X1", float64(1), json.Number("1")} {
+		zoneRPC := &zoneTestRPC{mode: "ok", status: status}
+		method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+		credential, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+		require.NoError(t, err, "%v", status)
+		assert.NotEmpty(t, credential.Payload["senderTag"], "%v", status)
+	}
+}
+
+// A receipt without a status, or with one that is not 0 or 1, leaves the
+// withdrawal's outcome unknown: a retry looks for the receipt again instead
+// of withdrawing again.
+func TestZoneDoesNotWithdrawAgainAfterReceiptWithUnknownStatus(t *testing.T) {
+	t.Parallel()
+	for _, configure := range []func(*zoneTestRPC){
+		func(r *zoneTestRPC) { r.noStatus = true },
+		func(r *zoneTestRPC) { r.status = "success" },
+		func(r *zoneTestRPC) { r.status = "0x2" },
+		func(r *zoneTestRPC) { r.status = "" },
+	} {
+		zoneRPC := &zoneTestRPC{mode: "ok"}
+		configure(zoneRPC)
+		method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+		challenge := zoneChallenge(t, nil)
+		_, err := method.CreateCredential(context.Background(), challenge)
+		var unknown *ZoneWithdrawalUnknownError
+		require.ErrorAs(t, err, &unknown)
+		assert.ErrorContains(t, err, "receipt status")
+		_, err = method.CreateCredential(context.Background(), challenge)
+		require.ErrorAs(t, err, &unknown)
+		assert.Len(t, zoneRPC.sent, 1)
+
+		zoneRPC.mu.Lock()
+		zoneRPC.status, zoneRPC.noStatus = "0x1", false
+		zoneRPC.mu.Unlock()
+		_, err = method.CreateCredential(context.Background(), challenge)
+		require.NoError(t, err)
+		assert.Len(t, zoneRPC.sent, 1)
+	}
+}
+
+func TestReceiptStatus(t *testing.T) {
+	t.Parallel()
+	for value, want := range map[any]uint64{"0x0": 0, "0x00": 0, "0x1": 1, "0x01": 1, float64(0): 0, float64(1): 1, json.Number("0"): 0} {
+		status, ok := receiptStatus(value)
+		assert.True(t, ok, "%v", value)
+		assert.Equal(t, want, status, "%v", value)
+	}
+	for _, value := range []any{nil, "", "0x", "1", "0xzz", float64(-1), 1.5, true, json.Number("-1")} {
+		_, ok := receiptStatus(value)
+		assert.False(t, ok, "%v", value)
+	}
 }
 
 func TestZoneDoesNotWithdrawAgainAfterUnknownOutcome(t *testing.T) {

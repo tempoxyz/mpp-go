@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,12 +116,15 @@ func (e *ZoneWithdrawalUnknownError) Unwrap() error {
 // Zone; if so, senderTag holds its sender tag once its receipt showed it, or
 // err the error that left its outcome unknown. hash is the signed
 // transaction's hash, kept so a retry can look for a receipt that was missing.
+// settlementStart, guarded by Method.zoneMu, is the Tempo block the first
+// settlement wait searched from, so a resumed wait searches from it too.
 type zoneWithdrawal struct {
-	done      chan struct{}
-	sent      bool
-	hash      string
-	senderTag common.Hash
-	err       error
+	done            chan struct{}
+	sent            bool
+	hash            string
+	senderTag       common.Hash
+	err             error
+	settlementStart *uint64
 }
 
 // unknown reports whether a finished withdrawal's receipt was missing, so a
@@ -386,22 +391,48 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	}
 
 	recipient := common.HexToAddress(request.Recipient)
-	hash, err := zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, m.settlementTimeout(challenge.Expires))
-	if err != nil {
-		return nil, &ZoneSettlementPendingError{
-			Challenge:   challenge,
-			ChallengeID: challenge.ID,
-			SenderTag:   pending.senderTag.Hex(),
-			ZoneID:      m.zone.id,
-			Err:         err,
+	start, err := m.zoneSettlementStart(ctx, rpc, pending)
+	if err == nil {
+		var hash string
+		hash, err = zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(challenge.Expires))
+		if err == nil {
+			credential := zoneCredential(challenge, common.HexToHash(hash).Hex(), pending.senderTag.Hex(), m.zone.id)
+			if _, err := mpp.FormatCredential(credential); err != nil {
+				return nil, err
+			}
+			m.forgetZoneWithdrawal(key, pending)
+			return credential, nil
 		}
 	}
-	credential := zoneCredential(challenge, common.HexToHash(hash).Hex(), pending.senderTag.Hex(), m.zone.id)
-	if _, err := mpp.FormatCredential(credential); err != nil {
-		return nil, err
+	return nil, &ZoneSettlementPendingError{
+		Challenge:   challenge,
+		ChallengeID: challenge.ID,
+		SenderTag:   pending.senderTag.Hex(),
+		ZoneID:      m.zone.id,
+		Err:         err,
 	}
-	m.forgetZoneWithdrawal(key, pending)
-	return credential, nil
+}
+
+// zoneSettlementStart returns the Tempo block settlement waits for withdrawal
+// search from: the one its first wait chose, so a retry long after that still
+// finds a settlement the first wait missed.
+func (m *Method) zoneSettlementStart(ctx context.Context, rpc tempo.RPCClient, withdrawal *zoneWithdrawal) (uint64, error) {
+	m.zoneMu.Lock()
+	start := withdrawal.settlementStart
+	m.zoneMu.Unlock()
+	if start != nil {
+		return *start, nil
+	}
+	block, err := zone.SettlementStartBlock(ctx, rpc)
+	if err != nil {
+		return 0, err
+	}
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	if withdrawal.settlementStart == nil {
+		withdrawal.settlementStart = &block
+	}
+	return *withdrawal.settlementStart, nil
 }
 
 var errZoneWithdrawalPanicked = errors.New("tempo client: Zone withdrawal panicked; its outcome is unknown")
@@ -526,8 +557,7 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 			Err:             err,
 		}
 	}
-	senderTag, sent, err := zoneWithdrawalSenderTag(receipt, hash)
-	return senderTag, hash, sent, err
+	return m.zoneWithdrawalOutcome(challenge, receipt, hash)
 }
 
 // resumeZoneWithdrawal looks up the receipt of a withdrawal an earlier call
@@ -549,15 +579,55 @@ func (m *Method) resumeZoneWithdrawal(ctx context.Context, challenge *mpp.Challe
 			Err:             err,
 		}
 	}
-	senderTag, sent, err := zoneWithdrawalSenderTag(receipt, hash)
+	return m.zoneWithdrawalOutcome(challenge, receipt, hash)
+}
+
+// zoneWithdrawalOutcome returns what requestZoneWithdrawal returns for the
+// withdrawal hash whose receipt is receipt. A receipt whose status is neither
+// 0 nor 1, or missing, leaves the outcome unknown, so a retry of the
+// challenge looks for the receipt again rather than withdrawing again.
+func (m *Method) zoneWithdrawalOutcome(challenge *mpp.Challenge, receipt map[string]any, hash string) (common.Hash, string, bool, error) {
+	status, ok := receiptStatus(receipt["status"])
+	if !ok || status > 1 {
+		return common.Hash{}, hash, true, &ZoneWithdrawalUnknownError{
+			Challenge:       challenge,
+			TransactionHash: hash,
+			ZoneID:          m.zone.id,
+			Err:             fmt.Errorf("receipt status %v is not 0 or 1", receipt["status"]),
+		}
+	}
+	senderTag, sent, err := zoneWithdrawalSenderTag(receipt, hash, status == 1)
 	return senderTag, hash, sent, err
 }
 
+// receiptStatus parses a receipt's status, a JSON-RPC quantity such as
+// "0x1" or "0x01", or a JSON number. ok is false when it is missing or not
+// a quantity.
+func receiptStatus(value any) (uint64, bool) {
+	switch status := value.(type) {
+	case string:
+		if len(status) < 3 || (status[:2] != "0x" && status[:2] != "0X") {
+			return 0, false
+		}
+		parsed, err := strconv.ParseUint(status[2:], 16, 64)
+		return parsed, err == nil
+	case float64:
+		if status < 0 || status != math.Trunc(status) || status > math.MaxUint32 {
+			return 0, false
+		}
+		return uint64(status), true
+	case json.Number:
+		parsed, err := strconv.ParseUint(status.String(), 10, 64)
+		return parsed, err == nil
+	}
+	return 0, false
+}
+
 // zoneWithdrawalSenderTag returns the sender tag of the withdrawal whose
-// receipt is receipt. sent is false for a reverted withdrawal, which moved
-// nothing, so the challenge may be retried.
-func zoneWithdrawalSenderTag(receipt map[string]any, hash string) (common.Hash, bool, error) {
-	if !strings.EqualFold(stringValue(receipt["status"]), "0x1") {
+// receipt is receipt. sent is false for a reverted withdrawal (success
+// false), which moved nothing, so the challenge may be retried.
+func zoneWithdrawalSenderTag(receipt map[string]any, hash string, success bool) (common.Hash, bool, error) {
+	if !success {
 		return common.Hash{}, false, fmt.Errorf("tempo client: Zone withdrawal transaction %s reverted", hash)
 	}
 	sender, fallbackNonce, ok := zone.RequestedEvent(receipt)

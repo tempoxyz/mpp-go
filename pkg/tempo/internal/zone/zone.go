@@ -25,9 +25,13 @@ import (
 // withdrawal to settle on Tempo.
 const DefaultSettlementTimeout = 60 * time.Second
 
-// lookbackBlocks is how many Tempo blocks WaitForSettlement searches back
-// for a settled withdrawal.
+// lookbackBlocks is how many Tempo blocks before the current head
+// SettlementStartBlock starts the search for a settled withdrawal.
 const lookbackBlocks = 7_200
+
+// logsRangeBlocks is the most Tempo blocks one eth_getLogs request of
+// WaitForSettlement covers.
+const logsRangeBlocks = lookbackBlocks + 1
 
 // pollingInterval is the time between polls for a settled withdrawal.
 const pollingInterval = 500 * time.Millisecond
@@ -321,12 +325,27 @@ type Requester interface {
 	SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error)
 }
 
+// SettlementStartBlock returns the Tempo block a first WaitForSettlement for
+// a withdrawal searches from: lookbackBlocks before the current head.
+func SettlementStartBlock(ctx context.Context, rpc Requester) (uint64, error) {
+	latest, err := blockNumber(ctx, rpc)
+	if err != nil {
+		return 0, err
+	}
+	if latest > lookbackBlocks {
+		return latest - lookbackBlocks, nil
+	}
+	return 0, nil
+}
+
 // WaitForSettlement waits until portal emits WithdrawalProcessed for
 // senderTag (and, when to is set, that recipient) on Tempo, and returns the
-// hash of the Tempo transaction that settled it. It searches lookbackBlocks
-// back once, then only blocks added since the previous poll, and gives up
-// after timeout.
-func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, timeout time.Duration) (string, error) {
+// hash of the Tempo transaction that settled it. It searches from fromBlock
+// to the head once, logsRangeBlocks at a time, then only blocks added since
+// the previous poll, and gives up after timeout. A wait that resumes an
+// earlier one passes the earlier one's fromBlock, so it still finds a
+// settlement however far back the head has moved since.
+func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (string, error) {
 	if timeout < 0 {
 		return "", fmt.Errorf("zone settlement timeout must be non-negative")
 	}
@@ -335,38 +354,21 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 	if err != nil {
 		return "", err
 	}
-	var fromBlock uint64
-	if latest > lookbackBlocks {
-		fromBlock = latest - lookbackBlocks
-	}
 	var toTopic any
 	if to != nil {
 		toTopic = common.BytesToHash(to.Bytes()).Hex()
 	}
 	for {
-		if fromBlock <= latest {
-			response, err := rpc.SendRequest(ctx, "eth_getLogs", map[string]any{
-				"address":   portal.Hex(),
-				"topics":    []any{ProcessedTopic.Hex(), toTopic, senderTag.Hex()},
-				"fromBlock": hexutil.EncodeUint64(fromBlock),
-				"toBlock":   hexutil.EncodeUint64(latest),
-			})
-			if err != nil {
-				return "", fmt.Errorf("get Zone settlement logs: %w", err)
+		for fromBlock <= latest {
+			toBlock := latest
+			if latest-fromBlock >= logsRangeBlocks {
+				toBlock = fromBlock + logsRangeBlocks - 1
 			}
-			if err := response.CheckError(); err != nil {
-				return "", fmt.Errorf("get Zone settlement logs: %w", err)
+			hash, err := settlementLog(ctx, rpc, portal, toTopic, senderTag, fromBlock, toBlock)
+			if err != nil || hash != "" {
+				return hash, err
 			}
-			if logs, ok := response.Result.([]any); ok {
-				for _, rawLog := range logs {
-					if entry, ok := rawLog.(map[string]any); ok {
-						if hash := asString(entry["transactionHash"]); hash != "" {
-							return hash, nil
-						}
-					}
-				}
-			}
-			fromBlock = latest + 1
+			fromBlock = toBlock + 1
 		}
 		if time.Now().Add(pollingInterval).After(deadline) {
 			return "", fmt.Errorf("zone withdrawal %s did not settle on Tempo within %s", senderTag.Hex(), timeout)
@@ -382,6 +384,34 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 			return "", err
 		}
 	}
+}
+
+// settlementLog returns the hash of the transaction in blocks fromBlock to
+// toBlock in which portal emitted WithdrawalProcessed for senderTag, or ""
+// when there is none.
+func settlementLog(ctx context.Context, rpc Requester, portal common.Address, toTopic any, senderTag common.Hash, fromBlock, toBlock uint64) (string, error) {
+	response, err := rpc.SendRequest(ctx, "eth_getLogs", map[string]any{
+		"address":   portal.Hex(),
+		"topics":    []any{ProcessedTopic.Hex(), toTopic, senderTag.Hex()},
+		"fromBlock": hexutil.EncodeUint64(fromBlock),
+		"toBlock":   hexutil.EncodeUint64(toBlock),
+	})
+	if err != nil {
+		return "", fmt.Errorf("get Zone settlement logs: %w", err)
+	}
+	if err := response.CheckError(); err != nil {
+		return "", fmt.Errorf("get Zone settlement logs: %w", err)
+	}
+	if logs, ok := response.Result.([]any); ok {
+		for _, rawLog := range logs {
+			if entry, ok := rawLog.(map[string]any); ok {
+				if hash := asString(entry["transactionHash"]); hash != "" {
+					return hash, nil
+				}
+			}
+		}
+	}
+	return "", nil
 }
 
 func blockNumber(ctx context.Context, rpc Requester) (uint64, error) {
