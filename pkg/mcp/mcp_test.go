@@ -527,3 +527,63 @@ func TestUnknownSettlementStopsAutomaticMCPPayment(t *testing.T) {
 		})
 	}
 }
+
+// zoneClientMethod pays "test" charges with a zone credential, a push
+// payment already made on chain once it is created.
+type zoneClientMethod struct{ testClientMethod }
+
+func (m *zoneClientMethod) CreateCredential(_ context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
+	m.mu.Lock()
+	m.created = append(m.created, challenge.ID)
+	m.mu.Unlock()
+	return challenge.NewCredential(map[string]any{"type": "zone", "hash": "0x01", "senderTag": "0x02", "zoneId": 3}), nil
+}
+
+// A peer that answers a submitted zone credential with a fresh Challenge or
+// an invalid-payload rejection gets its answer back, never a second
+// withdrawal: the zone credential's payment is already on chain.
+func TestPushCredentialIsNotFollowedByAnotherPayment(t *testing.T) {
+	for name, answer := range map[string]func(t *testing.T, calls int) error{
+		"fresh challenge": func(t *testing.T, calls int) error {
+			challenge := mpptest.NewChallenge(secretKey, realm, "test", "charge", map[string]any{"amount": "1", "currency": fmt.Sprint("A", calls)}, mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)))
+			data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}})
+			require.NoError(t, err)
+			return &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "Payment Required", Data: data}
+		},
+		"invalid payload": func(t *testing.T, calls int) error {
+			challenge := mpptest.NewChallenge(secretKey, realm, "test", "charge", map[string]any{"amount": "1", "currency": "A"}, mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)))
+			data, err := json.Marshal(mpp.MCPPaymentRequiredData{
+				HTTPStatus: 402,
+				Challenges: []*mpp.Challenge{challenge},
+				Problem:    map[string]any{"type": string(mpp.ErrorTypeInvalidPayload)},
+			})
+			require.NoError(t, err)
+			if calls == 1 {
+				return &jsonrpc.Error{Code: mpp.MCPPaymentRequiredCode, Message: "Payment Required", Data: data}
+			}
+			return &jsonrpc.Error{Code: mpp.MCPInvalidParamsCode, Message: "Invalid payload", Data: data}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			calls := 0
+			srv := newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				return nil, answer(t, n)
+			})
+			payer := &zoneClientMethod{}
+			session := connect(t, srv, mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{payer}}))
+			result, err := callPremium(context.Background(), session, nil)
+			require.Nil(t, result)
+			var wireErr *jsonrpc.Error
+			require.ErrorAs(t, err, &wireErr)
+			assert.Len(t, payer.credentials(), 1, "a zone credential's withdrawal must not be followed by another")
+			mu.Lock()
+			assert.Equal(t, 2, calls)
+			mu.Unlock()
+		})
+	}
+}

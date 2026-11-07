@@ -44,6 +44,13 @@ type Config struct {
 	HostedFeePayer *HostedFeePayer
 	// SupportedModes limits the credential submission modes advertised to clients.
 	SupportedModes []tempo.ChargeMode
+	// Zones lists the Zones whose withdrawals pay this method's charges, as
+	// mppx's zones option: tempo.Zones{IDs: []uint32{3, 7}} accepts those
+	// Zones, tempo.Zones{Any: true} any Zone on the challenge's chain. A
+	// client then pays from its Zone balance with a zone credential, which the
+	// server verifies against the Zone portal's settlement on Tempo.
+	// ChargeParams.Zones overrides it per route. Nil accepts no Zone.
+	Zones *tempo.Zones
 	// RPC overrides the Tempo JSON-RPC client used for verification.
 	RPC tempo.RPCClient
 	// RPCURL is used to build an RPC client when RPC is nil.
@@ -96,6 +103,7 @@ func New(config Config) (*Method, error) {
 		ChainID:        config.ChainID,
 		FeePayer:       config.FeePayer,
 		SupportedModes: append([]tempo.ChargeMode(nil), config.SupportedModes...),
+		Zones:          config.Zones,
 	}
 	if config.Intent != nil && (config.FeePayerURL != "" || config.HostedFeePayer != nil) {
 		return nil, fmt.Errorf("tempo server: configure FeePayerURL or HostedFeePayer on the IntentConfig of Config.Intent")

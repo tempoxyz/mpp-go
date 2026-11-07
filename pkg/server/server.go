@@ -369,6 +369,10 @@ type ChargeParams struct {
 	FeePayerURL string
 	// SupportedModes advertises the Tempo submission modes allowed for this challenge.
 	SupportedModes []tempoparams.ChargeMode
+	// Zones overrides the Tempo method's accepted Zones for this challenge
+	// (methodDetails.zones): clients may then pay it with a withdrawal from
+	// one of those Zones.
+	Zones *tempoparams.Zones
 	// ChainID overrides the method's default Tempo chain ID.
 	ChainID int
 	// Meta stores opaque Challenge metadata.
