@@ -1182,24 +1182,38 @@ func TestZoneConcurrentPaymentsOfOneChallengeRunPolicyOnce(t *testing.T) {
 	zoneRPC := &zoneTestRPC{mode: "ok"}
 	var mu sync.Mutex
 	authorized := 0
+	entered := make(chan struct{})
+	release := make(chan struct{})
 	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) {
 		c.PaymentPolicy = func(context.Context, tempo.ChargeRequest) error {
 			mu.Lock()
-			defer mu.Unlock()
 			authorized++
+			first := authorized == 1
+			mu.Unlock()
+			if first {
+				// Hold the first payment's claim until the others wait on it.
+				close(entered)
+				<-release
+			}
 			return nil
 		}
 	})
 	challenge := zoneChallenge(t, nil)
 	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := method.CreateCredential(context.Background(), challenge)
-			assert.NoError(t, err)
-		}()
+	pay := func() {
+		defer wg.Done()
+		_, err := method.CreateCredential(context.Background(), challenge)
+		assert.NoError(t, err)
 	}
+	wg.Add(1)
+	go pay()
+	<-entered
+	for range 7 {
+		wg.Add(1)
+		go pay()
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
 	wg.Wait()
 	assert.Equal(t, 1, authorized)
 	assert.Len(t, zoneRPC.sent, 1)
