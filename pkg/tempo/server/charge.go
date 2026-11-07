@@ -530,7 +530,7 @@ func (i *Intent) validateZone(
 		return mpp.ErrVerificationFailed("failed to fetch settlement transaction")
 	}
 	if err := response.CheckError(); err != nil {
-		return mpp.ErrVerificationFailed(err.Error())
+		return mpp.ErrVerificationFailed("failed to fetch settlement transaction")
 	}
 	transaction, _ := response.Result.(map[string]any)
 	var calls []any
