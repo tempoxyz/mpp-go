@@ -187,6 +187,9 @@ func resolveZone(config *Zone, signer *temposigner.Signer, accessKey bool) (*zon
 	if resolved.id == 0 {
 		return nil, fmt.Errorf("tempo client: cannot derive a Zone ID from chain ID %d; set Zone.ZoneID", config.ChainID)
 	}
+	if !zone.IsID(resolved.id) {
+		return nil, fmt.Errorf("tempo client: invalid Zone ID %d", resolved.id)
+	}
 	if resolved.parentChainID == 0 {
 		return nil, fmt.Errorf("tempo client: cannot derive the parent chain of Zone chain %d; set Zone.ParentChainID", config.ChainID)
 	}

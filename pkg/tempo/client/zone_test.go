@@ -352,6 +352,7 @@ func TestZoneConfigValidation(t *testing.T) {
 		"missing chain ID":                   {&Zone{RPC: &zoneTestRPC{}}, "ChainID"},
 		"unknown chain scheme":               {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431}, "Zone ID"},
 		"unknown parent chain":               {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 3}, "ParentChainID"},
+		"zone ID in chain ID range":          {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 421_700_003, ParentChainID: 42431}, "invalid Zone ID"},
 		"parent chain of another Zone chain": {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, ParentChainID: tempo.ChainIDMainnet}, "does not match parent chain 42431"},
 	} {
 		_, err := New(Config{PrivateKey: testPrivateKey, Zone: tc.zone})

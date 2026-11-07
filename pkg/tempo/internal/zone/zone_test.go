@@ -43,16 +43,27 @@ func TestParentChainIDFromChainID(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// The expected portals are viem's Addresses.zonePortal.
+func TestIsID(t *testing.T) {
+	t.Parallel()
+	for _, id := range []uint32{1, 3, 421_699_999} {
+		assert.True(t, IsID(id), "zone %d", id)
+	}
+	for _, id := range []uint32{0, 421_700_000, 421_700_003, 1_424_310_003, 4_294_967_295} {
+		assert.False(t, IsID(id), "zone %d", id)
+	}
+}
+
+// The expected portals are viem's Addresses.zonePortal for valid Zone IDs.
+// Zone chain IDs are read literally, not as Zone 3's or Zone 9's portal.
 func TestPortalAddress(t *testing.T) {
 	t.Parallel()
 	for id, want := range map[uint32]string{
 		3:             "0x5ad0000000000000000000000000000000000003",
 		6:             "0x7069DeC4E64Fd07334A0933eDe836C17259c9B23",
 		7:             "0x3F5296303400B56271b476F5A0B9cBF74350D6Ac",
-		421_700_003:   "0x5ad0000000000000000000000000000000000003",
-		1_424_310_003: "0x5ad0000000000000000000000000000000000003",
-		4_217_000_009: "0x5ad0000000000000000000000000000000000009",
+		421_700_003:   "0x5ad000000000000000000000000000001922a1a3",
+		1_424_310_003: "0x5ad0000000000000000000000000000054e53ef3",
+		4_217_000_009: "0x5ad00000000000000000000000000000fb5a5049",
 		4_294_967_295: "0x5ad00000000000000000000000000000ffffffff",
 	} {
 		assert.Equal(t, common.HexToAddress(want), PortalAddress(id), "zone %d", id)

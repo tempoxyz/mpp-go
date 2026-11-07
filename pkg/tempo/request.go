@@ -67,8 +67,15 @@ type SplitParams = tempoparams.SplitParams
 // package so that pkg/server can use it without importing this package.
 type Zones = tempoparams.Zones
 
-// maxZoneID bounds Zone IDs: positive integers below 2^32, as in mppx.
-const maxZoneID = 1<<32 - 1
+// maxZoneID bounds Zone IDs, as mppx's isId: positive integers below
+// 421700000, where the Zone chain ID ranges start. It repeats the bound of
+// internal/zone.IsID, which imports this package.
+const maxZoneID = 421_699_999
+
+// validZoneID reports whether id is a valid Zone ID.
+func validZoneID(id uint32) bool {
+	return id > 0 && id <= maxZoneID
+}
 
 // MethodDetails holds Tempo-specific request fields nested under methodDetails.
 type MethodDetails struct {
@@ -717,7 +724,7 @@ func normalizeMemo(value string) (string, error) {
 // ZoneAccepted reports whether zones, a request's methodDetails.zones,
 // accepts a withdrawal from the Zone zoneID.
 func ZoneAccepted(zones *Zones, zoneID uint32) bool {
-	if zones == nil || zoneID == 0 {
+	if zones == nil || !validZoneID(zoneID) {
 		return false
 	}
 	return zones.Any || slices.Contains(zones.IDs, zoneID)
@@ -738,8 +745,10 @@ func normalizeZones(zones *Zones) (*Zones, error) {
 	if len(zones.IDs) == 0 {
 		return nil, fmt.Errorf("tempo: zones must accept any Zone or list at least one Zone ID")
 	}
-	if slices.Contains(zones.IDs, 0) {
-		return nil, fmt.Errorf("tempo: invalid Zone ID 0")
+	for _, id := range zones.IDs {
+		if !validZoneID(id) {
+			return nil, fmt.Errorf("tempo: invalid Zone ID %d", id)
+		}
 	}
 	return &Zones{IDs: append([]uint32(nil), zones.IDs...)}, nil
 }
@@ -775,7 +784,7 @@ func parseZones(value any) (*Zones, error) {
 	}
 }
 
-// parseZoneID parses a Zone ID: an integer from 1 to 2^32-1.
+// parseZoneID parses a Zone ID: an integer from 1 to maxZoneID.
 func parseZoneID(value any) (uint32, error) {
 	var id float64
 	switch typed := value.(type) {

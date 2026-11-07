@@ -49,11 +49,11 @@ func TestChargeRequestZones(t *testing.T) {
 
 func TestChargeRequestRejectsInvalidZones(t *testing.T) {
 	t.Parallel()
-	for _, zones := range []*Zones{{}, {Any: true, IDs: []uint32{1}}, {IDs: []uint32{0}}} {
+	for _, zones := range []*Zones{{}, {Any: true, IDs: []uint32{1}}, {IDs: []uint32{0}}, {IDs: []uint32{3, 421_700_003}}} {
 		_, err := NormalizeChargeRequest(ChargeRequestParams{Amount: "1", Currency: PathUSDAddress, Recipient: PathUSDAddress, Zones: zones})
 		assert.Error(t, err, "zones %+v", zones)
 	}
-	for _, raw := range []string{"false", "[]", "[0]", "[1.5]", "[4294967296]", "[-1]", "\"3\"", "{}"} {
+	for _, raw := range []string{"false", "[]", "[0]", "[1.5]", "[4294967296]", "[421700000]", "[3, 421700003]", "[-1]", "\"3\"", "{}"} {
 		input := wireRoundTrip(t, map[string]any{
 			"amount": "1", "currency": PathUSDAddress, "recipient": PathUSDAddress,
 			"methodDetails": map[string]any{"zones": json.RawMessage(raw)},
@@ -61,6 +61,14 @@ func TestChargeRequestRejectsInvalidZones(t *testing.T) {
 		_, err := ParseChargeRequest(input)
 		assert.Error(t, err, "zones %s", raw)
 	}
+}
+
+func TestZoneAcceptedRejectsInvalidZoneID(t *testing.T) {
+	t.Parallel()
+	assert.True(t, ZoneAccepted(&Zones{Any: true}, 421_699_999))
+	assert.False(t, ZoneAccepted(&Zones{Any: true}, 0))
+	assert.False(t, ZoneAccepted(&Zones{Any: true}, 421_700_003))
+	assert.False(t, ZoneAccepted(&Zones{IDs: []uint32{421_700_003}}, 421_700_003))
 }
 
 func TestZoneCredentialPayload(t *testing.T) {
@@ -88,6 +96,7 @@ func TestZoneCredentialPayload(t *testing.T) {
 		"zero zone":         {"type": "zone", "hash": hash, "senderTag": tag, "zoneId": 0},
 		"fractional zone":   {"type": "zone", "hash": hash, "senderTag": tag, "zoneId": 1.5},
 		"zone out of range": {"type": "zone", "hash": hash, "senderTag": tag, "zoneId": int64(1 << 32)},
+		"zone chain ID":     {"type": "zone", "hash": hash, "senderTag": tag, "zoneId": 421_700_003},
 	} {
 		_, err := ParseChargeCredentialPayload(wireRoundTrip(t, input))
 		assert.Error(t, err, name)

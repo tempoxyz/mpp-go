@@ -375,7 +375,8 @@ func TestZoneChecksPortalOfNamedZoneWhenAnyZoneIsAccepted(t *testing.T) {
 
 func TestZoneRejectsInvalidZoneID(t *testing.T) {
 	t.Parallel()
-	for _, zoneID := range []any{int64(0), int64(-1), 1.5, int64(1 << 32)} {
+	// 421700003 is a Zone chain ID, not a Zone ID: it must not reach Zone 3's portal.
+	for _, zoneID := range []any{int64(0), int64(-1), 1.5, int64(1 << 32), int64(421_700_000), int64(421_700_003)} {
 		s := newZoneSetup(t, &tempo.Zones{Any: true})
 		challenge, _ := s.challenge(t, server.ChargeParams{})
 		_, err := s.method.intent.Verify(context.Background(), &mpp.Credential{

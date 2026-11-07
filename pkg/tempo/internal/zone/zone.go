@@ -39,14 +39,22 @@ const pollingInterval = 500 * time.Millisecond
 // OutboxAddress is the ZoneOutbox predeploy on every Zone chain.
 var OutboxAddress = common.HexToAddress("0x1c00000000000000000000000000000000000002")
 
-// Zone chain ID schemes, as viem's Addresses.zonePortal and ox's ZoneId.
+// Zone chain ID schemes on Tempo mainnet and Moderato, as ox's ZoneId.
 const (
-	legacyChainIDBase  = 4_217_000_000
-	legacyChainIDLimit = 4_218_000_000
 	mainnetChainIDBase = 421_700_000
 	testnetChainIDBase = 1_424_310_000
-	chainIDLimit       = 1 << 31
 )
+
+// maxIDExclusive bounds Zone IDs, as mppx's maxIdExclusive: IDs from here up
+// read as Zone chain IDs in viem's portal lookup, which would map them to
+// another Zone's portal.
+const maxIDExclusive = 421_700_000
+
+// IsID reports whether id is a valid Zone ID: a positive integer below the
+// Zone chain ID ranges, as mppx's isId.
+func IsID(id uint32) bool {
+	return id > 0 && id < maxIDExclusive
+}
 
 const portalABIJSON = `[
   {"type":"function","name":"processWithdrawals","stateMutability":"nonpayable","inputs":[
@@ -138,18 +146,11 @@ type ProcessedEvent struct {
 }
 
 // PortalAddress returns the Tempo portal address of a Zone, as viem's
-// Addresses.zonePortal: an ID in a Zone chain ID range is read as that chain
-// ID, and Zones 6 and 7 keep their legacy portals.
+// Addresses.zonePortal, and Zones 6 and 7 keep their legacy portals. The ID
+// is read literally: unlike viem, a Zone chain ID is not mapped to its Zone
+// (IDFromChainID does that), and callers accept only IDs that pass IsID.
 func PortalAddress(zoneID uint32) common.Address {
 	id := uint64(zoneID)
-	switch {
-	case id >= legacyChainIDBase && id < legacyChainIDLimit:
-		id -= legacyChainIDBase
-	case id >= testnetChainIDBase && id < chainIDLimit:
-		id -= testnetChainIDBase
-	case id >= mainnetChainIDBase && id < testnetChainIDBase:
-		id -= mainnetChainIDBase
-	}
 	// TODO: drop the legacy portals once viem does.
 	switch id {
 	case 6:
