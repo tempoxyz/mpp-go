@@ -235,19 +235,21 @@ func TestZoneAcceptsSettledWithdrawal(t *testing.T) {
 
 // Nothing binds a zone credential's source to the withdrawal, so the server
 // reports no payer for it, as mppx does.
-func TestZoneDoesNotReportCredentialSourceAsPayer(t *testing.T) {
+func TestZoneRejectsCredentialWithSource(t *testing.T) {
 	t.Parallel()
 	s := newZoneSetup(t, nil)
 	challenge, memo := s.challenge(t, server.ChargeParams{})
 	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
-	validation, err := s.method.intent.(*Intent).Validate(context.Background(), &mpp.Credential{
+	credential := &mpp.Credential{
 		Challenge: challenge.ToEcho(),
 		Payload:   tempo.ChargeCredentialPayload{Type: tempo.CredentialTypeZone, Hash: zoneSettlementHash, SenderTag: zoneTagA, ZoneID: zoneTestID}.Map(),
 		Source:    fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zoneTestOther),
-	}, challenge.Request)
-	require.NoError(t, err)
-	assert.Empty(t, validation.Source)
-	assert.NotContains(t, validation.Details, "sender")
+	}
+	_, err := s.method.intent.(*Intent).Validate(context.Background(), credential, challenge.Request)
+	assert.ErrorContains(t, err, "zone credentials must not carry a source")
+	_, err = s.method.intent.Verify(context.Background(), credential, challenge.Request)
+	assert.ErrorContains(t, err, "zone credentials must not carry a source")
+	assert.NotContains(t, s.rpc.methods, "eth_getTransactionReceipt")
 }
 
 func TestZoneRejectsCredentialWithoutSettlementHash(t *testing.T) {

@@ -315,13 +315,7 @@ func (i *Intent) Validate(
 	if validated.payload.Type == tempo.CredentialTypeTransaction {
 		details["serializedTransaction"] = validated.payload.Signature
 	}
-	// Nothing binds a zone credential's source to the withdrawal, which pays
-	// from a Zone sender the server cannot see, so it names no payer, as
-	// mppx reports payer: undefined for zone credentials.
 	source := credential.Source
-	if validated.payload.Type == tempo.CredentialTypeZone {
-		source = ""
-	}
 	return &mppserver.Validation{
 		Challenge:  credential.Challenge,
 		Credential: credential,
@@ -397,6 +391,13 @@ func (i *Intent) validateCredential(
 	payload, err := tempo.ParseChargeCredentialPayload(credential.Payload)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload(err.Error())
+	}
+	// Nothing binds a zone credential's source to the withdrawal, which pays
+	// from a Zone sender the server cannot see, so a source on one could name
+	// any account as the payer. Zone clients send none (mppx reports
+	// payer: undefined for zone credentials), so refuse one that does.
+	if payload.Type == tempo.CredentialTypeZone && credential.Source != "" {
+		return nil, mpp.ErrInvalidPayload("zone credentials must not carry a source")
 	}
 	source, err := parseSourceDID(credential.Source)
 	if err != nil {

@@ -35,12 +35,19 @@ const (
 // "prepare" fails before sending; "send" loses the send response and never
 // shows a receipt; "reject" has the Zone reject the send with a JSON-RPC
 // error; "nonce" and "imported" have it answer a send it took with a
-// JSON-RPC error; "revert" reverts the withdrawal.
+// JSON-RPC error; "pending" has it answer a send it took with a JSON-RPC
+// error while the transaction is pending, showing its receipt only on a later
+// poll, and "stuck" likewise but never shows a receipt; "revert" reverts the
+// withdrawal. When sending is set, a send signals it and then waits for
+// release.
 type zoneTestRPC struct {
-	mode  string
-	mu    sync.Mutex
-	calls []string
-	sent  []string
+	mode     string
+	sending  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	calls    []string
+	sent     []string
+	receipts int
 }
 
 func (r *zoneTestRPC) record(method string) {
@@ -73,6 +80,10 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 	r.mu.Lock()
 	r.sent = append(r.sent, serialized)
 	r.mu.Unlock()
+	if r.sending != nil {
+		r.sending <- struct{}{}
+		<-r.release
+	}
 	switch r.mode {
 	case "fail", "send":
 		return "", errors.New("connection lost")
@@ -82,6 +93,8 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32003, Message: "nonce too low"})
 	case "imported":
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "transaction already imported"})
+	case "pending", "stuck":
+		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "replacement transaction underpriced"})
 	}
 	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
 }
@@ -101,10 +114,19 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 	case "eth_gasPrice":
 		return &temporpc.JSONRPCResponse{Result: "0x1"}, nil
 	case "eth_getTransactionReceipt":
-		if r.mode == "send" || r.mode == "reject" {
+		r.mu.Lock()
+		r.receipts++
+		receipts := r.receipts
+		r.mu.Unlock()
+		if r.mode == "send" || r.mode == "reject" || r.mode == "stuck" || (r.mode == "pending" && receipts == 1) {
 			return &temporpc.JSONRPCResponse{Result: nil}, nil
 		}
 		return &temporpc.JSONRPCResponse{Result: r.receipt(params[0].(string))}, nil
+	case "eth_getTransactionByHash":
+		if r.mode == "pending" || r.mode == "stuck" {
+			return &temporpc.JSONRPCResponse{Result: map[string]any{"hash": params[0]}}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: nil}, nil
 	}
 	return nil, fmt.Errorf("zone: unexpected %s", method)
 }
@@ -286,17 +308,20 @@ func TestZoneConfigValidation(t *testing.T) {
 		zone *Zone
 		want string
 	}{
-		"negative settlement timeout": {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, SettlementTimeout: -time.Second}, "SettlementTimeout"},
-		"zone ID of another chain":    {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, ZoneID: 4}, "does not match Zone 3"},
-		"missing RPC":                 {&Zone{ChainID: zoneTestChainID}, "RPC"},
-		"missing chain ID":            {&Zone{RPC: &zoneTestRPC{}}, "ChainID"},
-		"unknown chain scheme":        {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431}, "Zone ID"},
-		"unknown parent chain":        {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 3}, "ParentChainID"},
+		"negative settlement timeout":        {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, SettlementTimeout: -time.Second}, "SettlementTimeout"},
+		"zone ID of another chain":           {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, ZoneID: 4}, "does not match Zone 3"},
+		"missing RPC":                        {&Zone{ChainID: zoneTestChainID}, "RPC"},
+		"missing chain ID":                   {&Zone{RPC: &zoneTestRPC{}}, "ChainID"},
+		"unknown chain scheme":               {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431}, "Zone ID"},
+		"unknown parent chain":               {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 3}, "ParentChainID"},
+		"parent chain of another Zone chain": {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, ParentChainID: tempo.ChainIDMainnet}, "does not match parent chain 42431"},
 	} {
 		_, err := New(Config{PrivateKey: testPrivateKey, Zone: tc.zone})
 		assert.ErrorContains(t, err, tc.want, name)
 	}
 	_, err := New(Config{PrivateKey: testPrivateKey, Zone: &Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 3, ParentChainID: 42431}})
+	assert.NoError(t, err)
+	_, err = New(Config{PrivateKey: testPrivateKey, Zone: &Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, ParentChainID: tempo.ChainIDModerato}})
 	assert.NoError(t, err)
 }
 
@@ -456,6 +481,63 @@ func TestZoneSharesOneWithdrawalBetweenConcurrentCalls(t *testing.T) {
 	assert.Equal(t, 1, zoneRPC.callCount())
 }
 
+// Concurrent calls for challenges that differ only in their description
+// share one withdrawal key, so they share one withdrawal: the second waits
+// for the first's send instead of sending its own.
+func TestZoneSharesOneWithdrawalBetweenConcurrentDescriptionVariants(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", sending: make(chan struct{}, 2), release: make(chan struct{})}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	described := *challenge
+	described.Description = "another description"
+	var wg sync.WaitGroup
+	credentials := make([]*mpp.Credential, 2)
+	errs := make([]error, 2)
+	wg.Go(func() { credentials[0], errs[0] = method.CreateCredential(context.Background(), challenge) })
+	<-zoneRPC.sending
+	wg.Go(func() { credentials[1], errs[1] = method.CreateCredential(context.Background(), &described) })
+	// Give the second call time to send if it were going to.
+	time.Sleep(100 * time.Millisecond)
+	close(zoneRPC.release)
+	wg.Wait()
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.Equal(t, credentials[0].Payload["senderTag"], credentials[1].Payload["senderTag"])
+}
+
+// A Zone can answer a send with a JSON-RPC error while it holds the
+// transaction pending: the method waits for its receipt rather than
+// deciding nothing was withdrawn, which would let a retry withdraw again.
+func TestZoneWaitsForPendingWithdrawalDespiteSendError(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "pending"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	method.zoneReceiptTimeout = 5 * time.Second
+	credential, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.NoError(t, err)
+	assert.Equal(t, "zone", credential.Payload["type"])
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.Contains(t, zoneRPC.calls, "eth_getTransactionByHash")
+}
+
+// A pending withdrawal whose receipt never shows leaves its outcome unknown,
+// so a retry does not withdraw again.
+func TestZoneDoesNotWithdrawAgainWhilePendingDespiteSendError(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "stuck"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	for range 2 {
+		_, err := method.CreateCredential(context.Background(), challenge)
+		var unknown *ZoneWithdrawalUnknownError
+		require.ErrorAs(t, err, &unknown)
+		assert.ErrorContains(t, err, "replacement transaction underpriced")
+	}
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
 // A Zone that rejects the withdrawal moved nothing, so the challenge may be
 // paid again.
 func TestZoneRetriesWithdrawalTheZoneRejected(t *testing.T) {
@@ -469,14 +551,19 @@ func TestZoneRetriesWithdrawalTheZoneRejected(t *testing.T) {
 		assert.NotContains(t, err.Error(), "outcome is unknown")
 	}
 	assert.Len(t, zoneRPC.sent, 2)
-	// Each rejection was checked once for a receipt, without polling.
-	receiptLookups := 0
+	// Each rejection was checked once for a receipt and once for the
+	// transaction, without polling.
+	receiptLookups, transactionLookups := 0, 0
 	for _, call := range zoneRPC.calls {
-		if call == "eth_getTransactionReceipt" {
+		switch call {
+		case "eth_getTransactionReceipt":
 			receiptLookups++
+		case "eth_getTransactionByHash":
+			transactionLookups++
 		}
 	}
 	assert.Equal(t, 2, receiptLookups)
+	assert.Equal(t, 2, transactionLookups)
 }
 
 // A Zone can answer a send it took with a JSON-RPC error, such as "nonce too
