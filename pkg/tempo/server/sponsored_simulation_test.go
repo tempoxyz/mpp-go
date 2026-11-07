@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -18,6 +19,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
@@ -391,5 +393,117 @@ func TestIsOutOfGasError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, isOutOfGasError(tt.err))
 		})
+	}
+}
+
+// simulationTestTx returns a sponsored transaction from sender with calls.
+func simulationTestTx(sender common.Address, calls ...tempotx.Call) *tempotx.Tx {
+	return &tempotx.Tx{
+		ChainID:      big.NewInt(42431),
+		From:         sender,
+		Gas:          100_000,
+		MaxFeePerGas: big.NewInt(1),
+		Calls:        calls,
+	}
+}
+
+func simulationTestCall(to common.Address, selector string) tempotx.Call {
+	return tempotx.Call{To: &to, Value: big.NewInt(0), Data: common.FromHex("0x" + selector + strings.Repeat("00", 64))}
+}
+
+func rejectSimulations(rpc *mockRPC, message string) {
+	rpc.onCall = func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+		return temporpc.NewJSONRPCErrorResponse(1, temporpc.InvalidTransactionType, message, nil), nil
+	}
+}
+
+// A sender simulation the node rejects is a PaymentSimulationError naming the
+// sender phase, the sender and, for a single TIP-20 transfer or
+// transferWithMemo call, its token, with the node's error as its cause, under
+// the unchanged verification-failed preflight error.
+func TestSponsoredSenderSimulationFailureIsPaymentSimulationError(t *testing.T) {
+	sender := common.HexToAddress("0x00000000000000000000000000000000000000a1")
+	token := common.HexToAddress("0x20c0000000000000000000000000000000000001")
+	other := common.HexToAddress("0x00000000000000000000000000000000000000b2")
+	for name, tt := range map[string]struct {
+		calls     []tempotx.Call
+		wantToken *common.Address
+	}{
+		"transfer":          {calls: []tempotx.Call{simulationTestCall(token, tempo.TransferSelector)}, wantToken: &token},
+		"transferWithMemo":  {calls: []tempotx.Call{simulationTestCall(token, tempo.TransferWithMemoSelector)}, wantToken: &token},
+		"other call":        {calls: []tempotx.Call{simulationTestCall(token, balanceOfSelector)}},
+		"several transfers": {calls: []tempotx.Call{simulationTestCall(token, tempo.TransferSelector), simulationTestCall(other, tempo.TransferSelector)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rpc := &mockRPC{}
+			rejectSimulations(rpc, "execution reverted")
+
+			err := simulateSponsoredSenderExecution(context.Background(), rpc, simulationTestTx(sender, tt.calls...))
+
+			require.EqualError(t, err, "Verification Failed: transaction preflight failed")
+			assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+			var simulation *PaymentSimulationError
+			require.ErrorAs(t, err, &simulation)
+			assert.Equal(t, SimulationPhaseSender, simulation.Phase)
+			assert.Equal(t, sender, simulation.Sender)
+			assert.Nil(t, simulation.FeePayer)
+			assert.Equal(t, tt.wantToken, simulation.PaymentToken)
+			var rpcErr *temporpc.JSONRPCError
+			require.ErrorAs(t, simulation.Err, &rpcErr)
+			assert.Equal(t, "execution reverted", rpcErr.Message)
+		})
+	}
+}
+
+// A sponsored simulation the node rejects, other than a tolerated out of gas,
+// is a PaymentSimulationError naming the sponsored phase, the sender, the fee
+// payer and the payment token, with the node's error as its cause.
+func TestSponsoredSimulationFailureIsPaymentSimulationError(t *testing.T) {
+	sender := common.HexToAddress("0x00000000000000000000000000000000000000a1")
+	feePayer := common.HexToAddress("0x00000000000000000000000000000000000000f1")
+	token := common.HexToAddress("0x20c0000000000000000000000000000000000001")
+	rpc := &mockRPC{}
+	rejectSimulations(rpc, "insufficient fee token balance")
+	tx := simulationTestTx(sender, simulationTestCall(token, tempo.TransferSelector))
+
+	err := simulateSponsoredTransactionExecution(context.Background(), rpc, tx, feePayer, true)
+
+	require.EqualError(t, err, "Verification Failed: transaction preflight failed")
+	assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	assert.ErrorIs(t, err, mpp.ErrVerification)
+	var simulation *PaymentSimulationError
+	require.ErrorAs(t, err, &simulation)
+	assert.Equal(t, SimulationPhaseSponsored, simulation.Phase)
+	assert.Equal(t, sender, simulation.Sender)
+	require.NotNil(t, simulation.FeePayer)
+	assert.Equal(t, feePayer, *simulation.FeePayer)
+	require.NotNil(t, simulation.PaymentToken)
+	assert.Equal(t, token, *simulation.PaymentToken)
+	var rpcErr *temporpc.JSONRPCError
+	require.ErrorAs(t, simulation.Err, &rpcErr)
+	assert.Equal(t, "insufficient fee token balance", rpcErr.Message)
+
+	// Out of gas stays tolerated when the caller allows it.
+	rejectSimulations(rpc, "out of gas: gas required exceeds allowance")
+	require.NoError(t, simulateSponsoredTransactionExecution(context.Background(), rpc, tx, feePayer, true))
+}
+
+// A simulation request that never got the node's answer is not a
+// PaymentSimulationError in either phase.
+func TestSponsoredSimulationTransportErrorIsNotPaymentSimulationError(t *testing.T) {
+	sender := common.HexToAddress("0x00000000000000000000000000000000000000a1")
+	token := common.HexToAddress("0x20c0000000000000000000000000000000000001")
+	rpc := &mockRPC{onCall: func(...interface{}) (*temporpc.JSONRPCResponse, error) {
+		return nil, errors.New("connection refused")
+	}}
+	tx := simulationTestTx(sender, simulationTestCall(token, tempo.TransferSelector))
+
+	for name, err := range map[string]error{
+		"sender":    simulateSponsoredSenderExecution(context.Background(), rpc, tx),
+		"sponsored": simulateSponsoredTransactionExecution(context.Background(), rpc, tx, common.HexToAddress("0x00000000000000000000000000000000000000f1"), false),
+	} {
+		require.EqualErrorf(t, err, "Verification Failed: transaction preflight failed", "phase %s", name)
+		var simulation *PaymentSimulationError
+		assert.Falsef(t, errors.As(err, &simulation), "phase %s", name)
 	}
 }
