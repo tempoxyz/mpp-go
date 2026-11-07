@@ -1,0 +1,425 @@
+package chargeclient
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/big"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
+	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
+	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
+
+	"github.com/tempoxyz/mpp-go/pkg/mpp"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
+)
+
+const (
+	zoneTestChainID    = int64(1_424_310_003)
+	zoneTestSettlement = "0xabababababababababababababababababababababababababababababababab"
+	zoneTestFee        = 1_000
+)
+
+// zoneTestRPC is a Zone RPC. In "fail" mode every call fails with
+// "zone used", to show whether the method used the Zone; "ok" withdraws;
+// "prepare" fails before sending; "send" loses the send response and never
+// shows a receipt; "revert" reverts the withdrawal.
+type zoneTestRPC struct {
+	mode  string
+	mu    sync.Mutex
+	calls []string
+	sent  []string
+}
+
+func (r *zoneTestRPC) record(method string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, method)
+}
+
+func (r *zoneTestRPC) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+func (r *zoneTestRPC) GetChainID(context.Context) (uint64, error) {
+	r.record("eth_chainId")
+	return uint64(zoneTestChainID), nil
+}
+
+func (r *zoneTestRPC) GetTransactionCount(context.Context, string) (uint64, error) {
+	r.record("eth_getTransactionCount")
+	if r.mode == "fail" {
+		return 0, errors.New("zone used")
+	}
+	return 0, nil
+}
+
+func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (string, error) {
+	r.record("eth_sendRawTransaction")
+	r.mu.Lock()
+	r.sent = append(r.sent, serialized)
+	r.mu.Unlock()
+	switch r.mode {
+	case "fail", "send":
+		return "", errors.New("connection lost")
+	}
+	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
+}
+
+func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	r.record(method)
+	if r.mode == "fail" {
+		time.Sleep(10 * time.Millisecond)
+		return nil, errors.New("zone used")
+	}
+	switch method {
+	case "eth_call":
+		if r.mode == "prepare" {
+			return nil, errors.New("connection lost")
+		}
+		return &temporpc.JSONRPCResponse{Result: fmt.Sprintf("0x%064x", zoneTestFee)}, nil
+	case "eth_gasPrice":
+		return &temporpc.JSONRPCResponse{Result: "0x1"}, nil
+	case "eth_getTransactionReceipt":
+		if r.mode == "send" {
+			return &temporpc.JSONRPCResponse{Result: nil}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: r.receipt(params[0].(string))}, nil
+	}
+	return nil, fmt.Errorf("zone: unexpected %s", method)
+}
+
+// receipt returns the receipt of the last withdrawal sent.
+func (r *zoneTestRPC) receipt(hash string) map[string]any {
+	if r.mode == "revert" {
+		return map[string]any{"transactionHash": hash, "status": "0x0", "logs": []any{}}
+	}
+	r.mu.Lock()
+	serialized := r.sent[len(r.sent)-1]
+	r.mu.Unlock()
+	tx, err := tempotx.Deserialize(serialized)
+	if err != nil {
+		panic(err)
+	}
+	sender, err := tempotx.VerifySignature(tx)
+	if err != nil {
+		panic(err)
+	}
+	data, err := zone.OutboxABI.Events["WithdrawalRequested"].Inputs.NonIndexed().Pack(
+		common.HexToAddress(testCurrency), common.HexToAddress(testRecipient), big.NewInt(1_000_000), big.NewInt(zoneTestFee),
+		[32]byte{}, uint64(0), uint64(1), []byte{}, []byte{})
+	if err != nil {
+		panic(err)
+	}
+	return map[string]any{
+		"transactionHash": hash,
+		"status":          "0x1",
+		"logs": []any{map[string]any{
+			"address": zone.OutboxAddress.Hex(),
+			"topics":  []any{zone.RequestedTopic.Hex(), common.BigToHash(big.NewInt(0)).Hex(), common.BytesToHash(sender.Bytes()).Hex()},
+			"data":    hexutil.Encode(data),
+		}},
+	}
+}
+
+// zoneTestTempoRPC is the Tempo RPC; it shows a settlement once settled.
+type zoneTestTempoRPC struct {
+	mu      sync.Mutex
+	settled bool
+	topics  []any
+}
+
+func (r *zoneTestTempoRPC) GetChainID(context.Context) (uint64, error) { return 42431, nil }
+
+func (r *zoneTestTempoRPC) GetTransactionCount(context.Context, string) (uint64, error) {
+	return 0, errors.New("tempo: unexpected nonce")
+}
+
+func (r *zoneTestTempoRPC) SendRawTransaction(context.Context, string) (string, error) {
+	return "", errors.New("tempo: unexpected send")
+}
+
+func (r *zoneTestTempoRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	switch method {
+	case "eth_blockNumber":
+		return &temporpc.JSONRPCResponse{Result: "0x10"}, nil
+	case "eth_getLogs":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.topics = params[0].(map[string]any)["topics"].([]any)
+		if !r.settled {
+			return &temporpc.JSONRPCResponse{Result: []any{}}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: []any{map[string]any{"transactionHash": zoneTestSettlement}}}, nil
+	}
+	return nil, fmt.Errorf("tempo: %s", method)
+}
+
+func allowAll(context.Context, tempo.ChargeRequest) error { return nil }
+
+func newZoneMethod(t *testing.T, zoneRPC *zoneTestRPC, chainID int64, configure func(*Config)) (*Method, *zoneTestTempoRPC) {
+	t.Helper()
+	tempoRPC := &zoneTestTempoRPC{settled: true}
+	config := Config{
+		PrivateKey:    testPrivateKey,
+		RPC:           tempoRPC,
+		PaymentPolicy: allowAll,
+		Zone:          &Zone{RPC: zoneRPC, ChainID: chainID},
+	}
+	if configure != nil {
+		configure(&config)
+	}
+	method, err := New(config)
+	require.NoError(t, err)
+	method.zoneReceiptTimeout = 50 * time.Millisecond
+	return method, tempoRPC
+}
+
+func zoneChallenge(t *testing.T, configure func(*tempo.ChargeRequestParams)) *mpp.Challenge {
+	t.Helper()
+	params := tempo.ChargeRequestParams{
+		Amount:    "1",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		ChainID:   42431,
+		Zones:     &tempo.Zones{IDs: []uint32{3}},
+	}
+	if configure != nil {
+		configure(&params)
+	}
+	return buildChallenge(t, params)
+}
+
+func TestZonePaysFromZoneOnChallengeChain(t *testing.T) {
+	t.Parallel()
+	for name, challenge := range map[string]func(t *testing.T) *mpp.Challenge{
+		"listed zone": func(t *testing.T) *mpp.Challenge { return zoneChallenge(t, nil) },
+		"any zone": func(t *testing.T) *mpp.Challenge {
+			return zoneChallenge(t, func(p *tempo.ChargeRequestParams) { p.Zones = &tempo.Zones{Any: true} })
+		},
+		// MCP challenges are not HTTP headers, so their fields may hold line breaks.
+		"line breaks in description": func(t *testing.T) *mpp.Challenge {
+			c := zoneChallenge(t, nil)
+			c.Description = "line one\nline two"
+			return c
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			zoneRPC := &zoneTestRPC{mode: "fail"}
+			method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+			_, err := method.CreateCredential(context.Background(), challenge(t))
+			assert.ErrorContains(t, err, "zone used")
+		})
+	}
+}
+
+func TestZonePaysOnTempoWhenZoneIsNotUsable(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		zoneChainID int64
+		configure   func(*Config)
+		request     func(*tempo.ChargeRequestParams)
+		expires     time.Duration
+	}{
+		"challenge does not accept the Zone":   {zoneChainID: 1_424_310_004},
+		"Zone settles on another parent chain": {zoneChainID: 421_700_003},
+		"challenge only accepts pull payments": {request: func(p *tempo.ChargeRequestParams) {
+			p.SupportedModes = []tempo.ChargeMode{tempo.ChargeModePull}
+		}},
+		"client asks for pull mode": {configure: func(c *Config) { c.CredentialType = tempo.CredentialTypeTransaction }},
+		"challenge has splits": {request: func(p *tempo.ChargeRequestParams) {
+			p.Splits = []tempo.SplitParams{{Amount: "0.1", Recipient: testRecipient}}
+		}},
+		"challenge expires before the withdrawal could settle": {
+			configure: func(c *Config) { c.Zone.SettlementTimeout = time.Minute },
+			expires:   30 * time.Second,
+		},
+		"challenge leaves no time to send the withdrawal": {
+			configure: func(c *Config) { c.Zone.SettlementTimeout = time.Minute },
+			expires:   65 * time.Second,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			zoneRPC := &zoneTestRPC{mode: "fail"}
+			chainID := tc.zoneChainID
+			if chainID == 0 {
+				chainID = zoneTestChainID
+			}
+			method, _ := newZoneMethod(t, zoneRPC, chainID, tc.configure)
+			challenge := zoneChallenge(t, tc.request)
+			if tc.expires != 0 {
+				challenge.Expires = mpp.ExpiresIn(tc.expires)
+			}
+			_, err := method.CreateCredential(context.Background(), challenge)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "zone used")
+			assert.Zero(t, zoneRPC.callCount())
+		})
+	}
+}
+
+func TestZoneConfigValidation(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		zone *Zone
+		want string
+	}{
+		"negative settlement timeout": {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, SettlementTimeout: -time.Second}, "SettlementTimeout"},
+		"zone ID of another chain":    {&Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, ZoneID: 4}, "does not match Zone 3"},
+		"missing RPC":                 {&Zone{ChainID: zoneTestChainID}, "RPC"},
+		"missing chain ID":            {&Zone{RPC: &zoneTestRPC{}}, "ChainID"},
+		"unknown chain scheme":        {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431}, "Zone ID"},
+		"unknown parent chain":        {&Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 3}, "ParentChainID"},
+	} {
+		_, err := New(Config{PrivateKey: testPrivateKey, Zone: tc.zone})
+		assert.ErrorContains(t, err, tc.want, name)
+	}
+	_, err := New(Config{PrivateKey: testPrivateKey, Zone: &Zone{RPC: &zoneTestRPC{}, ChainID: 42431, ZoneID: 3, ParentChainID: 42431}})
+	assert.NoError(t, err)
+}
+
+func TestZoneCreatesCredentialFromSettledWithdrawal(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+
+	payload, err := tempo.ParseChargeCredentialPayload(credential.Payload)
+	require.NoError(t, err)
+	require.Len(t, zoneRPC.sent, 1)
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	txHash := crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0]))
+	assert.Equal(t, tempo.ChargeCredentialPayload{
+		Type:      tempo.CredentialTypeZone,
+		Hash:      zoneTestSettlement,
+		SenderTag: zone.SenderTag(signer.Address(), txHash, 1).Hex(),
+		ZoneID:    3,
+	}, payload)
+	assert.Empty(t, credential.Source)
+	// The method waited for the portal's event for this recipient and tag.
+	assert.Equal(t, common.BytesToHash(common.HexToAddress(testRecipient).Bytes()).Hex(), tempoRPC.topics[1])
+	assert.Equal(t, payload.SenderTag, tempoRPC.topics[2])
+
+	// The withdrawal approves the amount plus fee and withdraws the amount to
+	// the recipient with the challenge's memo, without a callback.
+	raw := zoneRPC.sent[0]
+	assert.Contains(t, []byte{27, 28}, common.FromHex(raw)[len(common.FromHex(raw))-1])
+	tx, err := tempotx.Deserialize(raw)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(zoneTestChainID), tx.ChainID)
+	require.Len(t, tx.Calls, 2)
+	assert.Equal(t, common.HexToAddress(testCurrency), *tx.Calls[0].To)
+	assert.Equal(t, fmt.Sprintf("0x095ea7b3%064x%064x", zone.OutboxAddress.Big(), 1_000_000+zoneTestFee), hexutil.Encode(tx.Calls[0].Data))
+	assert.Equal(t, zone.OutboxAddress, *tx.Calls[1].To)
+	values, err := zone.OutboxABI.Methods["requestWithdrawal"].Inputs.Unpack(tx.Calls[1].Data[4:])
+	require.NoError(t, err)
+	assert.Equal(t, common.HexToAddress(testCurrency), values[0])
+	assert.Equal(t, common.HexToAddress(testRecipient), values[1])
+	assert.Equal(t, "1000000", values[2].(*big.Int).String())
+	memo := values[3].([32]byte)
+	assert.True(t, tempo.VerifyAttributionChallenge(hexutil.Encode(memo[:]), challenge.ID))
+	assert.True(t, tempo.VerifyAttributionServer(hexutil.Encode(memo[:]), challenge.Realm))
+	assert.Equal(t, uint64(0), values[4])
+	assert.Equal(t, signer.Address(), values[5])
+}
+
+func TestZoneResumesSettlementWaitWithoutWithdrawingAgain(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+	assert.Equal(t, challenge.ID, pending.ChallengeID)
+	assert.Equal(t, uint32(3), pending.ZoneID)
+	assert.NotEmpty(t, pending.SenderTag)
+
+	tempoRPC.mu.Lock()
+	tempoRPC.settled = true
+	tempoRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, pending.SenderTag, credential.Payload["senderTag"])
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+func TestZoneDoesNotWithdrawAgainAfterUnknownOutcome(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "send"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	assert.ErrorContains(t, err, "Zone withdrawal outcome is unknown: transaction 0x")
+	assert.Contains(t, zoneRPC.calls, "eth_sendRawTransaction")
+	// The method looked for the receipt of the signed transaction before it gave up.
+	assert.Contains(t, zoneRPC.calls, "eth_getTransactionReceipt")
+	calls := zoneRPC.callCount()
+	_, err = method.CreateCredential(context.Background(), challenge)
+	assert.ErrorContains(t, err, "Zone withdrawal outcome is unknown")
+	assert.Equal(t, calls, zoneRPC.callCount())
+}
+
+func TestZoneRetriesRevertedWithdrawal(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "revert"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	for range 2 {
+		_, err := method.CreateCredential(context.Background(), challenge)
+		assert.ErrorContains(t, err, "reverted")
+	}
+	assert.Len(t, zoneRPC.sent, 2)
+}
+
+func TestZoneRetriesWithdrawalThatFailedBeforeSending(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "prepare"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "outcome is unknown")
+	calls := zoneRPC.callCount()
+	_, err = method.CreateCredential(context.Background(), challenge)
+	require.Error(t, err)
+	assert.Greater(t, zoneRPC.callCount(), calls)
+	assert.NotContains(t, zoneRPC.calls, "eth_sendRawTransaction")
+}
+
+func TestZoneSharesOneWithdrawalBetweenConcurrentCalls(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "fail"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Go(func() {
+			_, errs[i] = method.CreateCredential(context.Background(), challenge)
+		})
+	}
+	wg.Wait()
+	for _, err := range errs {
+		assert.ErrorContains(t, err, "zone used")
+	}
+	assert.Equal(t, 1, zoneRPC.callCount())
+}

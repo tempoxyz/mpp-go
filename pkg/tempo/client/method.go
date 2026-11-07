@@ -83,6 +83,48 @@ type Config struct {
 	// fee, such as a key limited to OUSD fees paying a USDC.e charge.
 	// Sponsored transactions ignore it: the fee payer chooses the fee token.
 	FeeToken string
+	// Zone pays from a Zone balance instead of the account's Tempo balance
+	// when a challenge accepts that Zone (methodDetails.zones), as mppx's
+	// zone option. Other challenges, and split payments, are paid on Tempo
+	// as usual. See Zone.
+	Zone *Zone
+}
+
+// Zone configures payments from a Zone balance. The method withdraws the
+// charge from the Zone to the recipient with a challenge-bound memo, waits for
+// the withdrawal to settle on Tempo, and sends a zone credential naming the
+// settlement. A Zone payment is a push payment: it is used only when the
+// challenge allows push and Config.CredentialType is empty or hash.
+type Zone struct {
+	// RPC is the Zone chain's JSON-RPC client. Zone RPCs authorize the
+	// paying account: build it with tempo.NewRPCClientWithOptions and the
+	// Zone's authorization token header.
+	RPC tempo.RPCClient
+	// ChainID is the Zone chain ID. It is required.
+	ChainID int64
+	// ZoneID is the Zone ID. When zero, it is derived from ChainID.
+	ZoneID uint32
+	// ParentChainID is the Tempo chain the Zone settles on. When zero, it is
+	// derived from ChainID. Zone IDs are unique per parent chain, so the
+	// method pays from the Zone only for challenges on this chain.
+	ParentChainID int64
+	// Signer signs the withdrawal on the Zone. When nil, Config.Signer or
+	// Config.PrivateKey signs it; with Config.AccessKey, set it.
+	Signer *temposigner.Signer
+	// SettlementTimeout bounds the wait for the withdrawal to settle on
+	// Tempo, cut short at the challenge expiry. Zero waits
+	// zone.DefaultSettlementTimeout (60 seconds); it must not be negative.
+	SettlementTimeout time.Duration
+}
+
+// zoneConfig is a validated Zone.
+type zoneConfig struct {
+	rpc               tempo.RPCClient
+	chainID           int64
+	id                uint32
+	parentChainID     int64
+	signer            *temposigner.Signer
+	settlementTimeout time.Duration
 }
 
 // AccessKey is a Tempo access key that pays on behalf of Account. Payments
@@ -136,6 +178,16 @@ type Method struct {
 
 	signingMu sync.Mutex
 	signing   map[string]*signingCall
+
+	// zone pays from a Zone balance; nil pays on Tempo only.
+	zone *zoneConfig
+	// zoneReceiptTimeout bounds the wait for a Zone withdrawal's receipt;
+	// zero means zoneReceiptTimeout.
+	zoneReceiptTimeout time.Duration
+	zoneMu             sync.Mutex
+	// zoneWithdrawals holds Zone withdrawals sent for a challenge, by the
+	// challenge's JSON, so a retry resumes them instead of paying again.
+	zoneWithdrawals map[string]*zoneWithdrawal
 }
 
 // signingCall is one in-flight CreateCredential shared by concurrent callers.
@@ -204,6 +256,10 @@ func New(config Config) (*Method, error) {
 		address := common.HexToAddress(config.FeeToken)
 		feeToken = &address
 	}
+	zoneSettings, err := resolveZone(config.Zone, signer, accessKey != nil)
+	if err != nil {
+		return nil, err
+	}
 	rpc := config.RPC
 	if rpc == nil && config.RPCURL != "" {
 		// Build the client once rather than per credential.
@@ -220,6 +276,7 @@ func New(config Config) (*Method, error) {
 		paymentPolicy:  config.PaymentPolicy,
 		trustedRealms:  trustedRealms,
 		feeToken:       feeToken,
+		zone:           zoneSettings,
 	}, nil
 }
 
@@ -395,6 +452,12 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 			Source: tempo.ProofSource(chainID, m.account()),
 		}, nil
 	}
+	if m.paysFromZone(challenge, request, chainID) {
+		if err := m.authorizePayment(ctx, request, chainID); err != nil {
+			return nil, err
+		}
+		return m.createZoneCredential(ctx, rpc, challenge, request)
+	}
 	if !request.Allows(credentialType) {
 		return nil, fmt.Errorf("tempo client: credential type %q is not allowed for this challenge", credentialType)
 	}
@@ -414,14 +477,8 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		}
 	}
 
-	if m.paymentPolicy == nil {
-		return nil, fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
-	}
-	policyRequest := request
-	verifiedChainID := chainID
-	policyRequest.MethodDetails.ChainID = &verifiedChainID
-	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
-		return nil, fmt.Errorf("tempo client: payment rejected by policy: %w", err)
+	if err := m.authorizePayment(ctx, request, chainID); err != nil {
+		return nil, err
 	}
 	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 
@@ -464,6 +521,21 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		return nil, err
 	}
 	return credential, nil
+}
+
+// authorizePayment runs Config.PaymentPolicy on a nonzero payment, with the
+// chain ID verified against the RPC.
+func (m *Method) authorizePayment(ctx context.Context, request tempo.ChargeRequest, chainID int64) error {
+	if m.paymentPolicy == nil {
+		return fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
+	}
+	policyRequest := request
+	verifiedChainID := chainID
+	policyRequest.MethodDetails.ChainID = &verifiedChainID
+	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
+		return fmt.Errorf("tempo client: payment rejected by policy: %w", err)
+	}
+	return nil
 }
 
 func (m *Method) buildTransfer(

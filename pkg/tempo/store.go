@@ -172,3 +172,10 @@ func ChargeSponsoredTransactionStoreKey(hash string) string {
 func ChargeProofStoreKey(challengeID string) string {
 	return ReplayKeyPrefix + "proof:" + challengeID
 }
+
+// ChargeZoneWithdrawalStoreKey normalizes a replay-protection key for a Zone
+// withdrawal that paid a charge, keyed by the Zone's Tempo portal address and
+// the withdrawal's sender tag, as mppx's mppx:charge:zone:<portal>:<senderTag>.
+func ChargeZoneWithdrawalStoreKey(portal, senderTag string) string {
+	return ReplayKeyPrefix + "zone:" + strings.ToLower(portal) + ":" + strings.ToLower(senderTag)
+}

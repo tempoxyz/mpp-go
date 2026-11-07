@@ -4,7 +4,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -39,6 +41,10 @@ const (
 	CredentialTypeHash CredentialType = "hash"
 	// CredentialTypeProof carries a zero-amount proof signature.
 	CredentialTypeProof CredentialType = "proof"
+	// CredentialTypeZone carries a Zone withdrawal that settled the payment
+	// on Tempo: the settlement transaction hash, the withdrawal's sender tag
+	// and the Zone ID. It is a push payment.
+	CredentialTypeZone CredentialType = "zone"
 )
 
 // Split is a canonical additional transfer nested under methodDetails.splits.
@@ -56,6 +62,14 @@ type Split struct {
 // can use it without importing this package.
 type SplitParams = tempoparams.SplitParams
 
+// Zones selects the Zones a charge accepts withdrawals from
+// (methodDetails.zones). It is defined in the dependency-free tempoparams
+// package so that pkg/server can use it without importing this package.
+type Zones = tempoparams.Zones
+
+// maxZoneID bounds Zone IDs: positive integers below 2^32, as in mppx.
+const maxZoneID = 1<<32 - 1
+
 // MethodDetails holds Tempo-specific request fields nested under methodDetails.
 type MethodDetails struct {
 	// ChainID binds the charge to a specific Tempo chain when present.
@@ -72,6 +86,9 @@ type MethodDetails struct {
 	Splits []Split
 	// SupportedModes restricts which credential submission modes are allowed.
 	SupportedModes []ChargeMode
+	// Zones lists the Zones the payee accepts withdrawals from; nil when the
+	// challenge accepts none.
+	Zones *Zones
 }
 
 // ChargeRequest is the canonical Tempo request shape embedded in a Challenge.
@@ -118,6 +135,9 @@ type ChargeRequestParams struct {
 	Splits []SplitParams
 	// SupportedModes restricts which credential submission modes are allowed.
 	SupportedModes []ChargeMode
+	// Zones lists the Zones the payee accepts withdrawals from; nil accepts
+	// none. See Zones.
+	Zones *Zones
 }
 
 // ChargeCredentialPayload is the Tempo-specific payload carried by a Credential.
@@ -128,6 +148,11 @@ type ChargeCredentialPayload struct {
 	Hash string
 	// Signature stores the raw transaction or proof signature.
 	Signature string
+	// SenderTag identifies a Zone withdrawal in the portal's
+	// WithdrawalProcessed event on Tempo (zone credentials only).
+	SenderTag string
+	// ZoneID is the Zone the withdrawal left (zone credentials only).
+	ZoneID uint32
 }
 
 // NormalizeChargeRequest validates request parameters and produces the canonical Tempo shape.
@@ -164,6 +189,10 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err != nil {
 		return ChargeRequest{}, err
 	}
+	zones, err := normalizeZones(params.Zones)
+	if err != nil {
+		return ChargeRequest{}, err
+	}
 	request := ChargeRequest{
 		Amount:      amount,
 		Currency:    currency,
@@ -175,6 +204,7 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 			FeePayerURL:    params.FeePayerURL,
 			Splits:         splits,
 			SupportedModes: append([]ChargeMode(nil), params.SupportedModes...),
+			Zones:          zones,
 		},
 	}
 	if params.ChainID != 0 {
@@ -225,6 +255,10 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		if err != nil {
 			return ChargeRequest{}, err
 		}
+		request.MethodDetails.Zones, err = parseZones(raw["zones"])
+		if err != nil {
+			return ChargeRequest{}, err
+		}
 	}
 	if err := validateCanonicalSplits(request.Amount, request.MethodDetails.Splits); err != nil {
 		return ChargeRequest{}, err
@@ -254,6 +288,20 @@ func ParseChargeCredentialPayload(input map[string]any) (ChargeCredentialPayload
 			return ChargeCredentialPayload{}, fmt.Errorf("tempo: proof credential payload is missing signature")
 		}
 		return ChargeCredentialPayload{Type: typeValue, Signature: signature}, nil
+	case CredentialTypeZone:
+		hash, err := normalizeTransactionHash(asString(input["hash"]))
+		if err != nil {
+			return ChargeCredentialPayload{}, err
+		}
+		senderTag, err := normalizeBytes32(asString(input["senderTag"]))
+		if err != nil {
+			return ChargeCredentialPayload{}, fmt.Errorf("tempo: zone credential payload has an invalid senderTag")
+		}
+		zoneID, err := parseZoneID(input["zoneId"])
+		if err != nil {
+			return ChargeCredentialPayload{}, err
+		}
+		return ChargeCredentialPayload{Type: typeValue, Hash: hash, SenderTag: senderTag, ZoneID: zoneID}, nil
 	default:
 		return ChargeCredentialPayload{}, fmt.Errorf("tempo: unsupported credential payload type %q", typeValue)
 	}
@@ -266,12 +314,21 @@ func (p ChargeCredentialPayload) Map() map[string]any {
 		return map[string]any{"type": string(p.Type), "hash": p.Hash}
 	case CredentialTypeProof:
 		return map[string]any{"type": string(CredentialTypeProof), "signature": p.Signature}
+	case CredentialTypeZone:
+		return map[string]any{
+			"type":      string(CredentialTypeZone),
+			"hash":      p.Hash,
+			"senderTag": p.SenderTag,
+			"zoneId":    int64(p.ZoneID),
+		}
 	default:
 		return map[string]any{"type": string(CredentialTypeTransaction), "signature": p.Signature}
 	}
 }
 
 // Allows reports whether the request accepts the supplied credential type.
+// Zone credentials are push payments: they need the push mode, and a Zone
+// the request accepts (see ZoneAccepted).
 func (r ChargeRequest) Allows(credentialType CredentialType) bool {
 	if credentialType == CredentialTypeProof {
 		return true
@@ -283,7 +340,7 @@ func (r ChargeRequest) Allows(credentialType CredentialType) bool {
 		if mode == ChargeModePull && credentialType == CredentialTypeTransaction {
 			return true
 		}
-		if mode == ChargeModePush && credentialType == CredentialTypeHash {
+		if mode == ChargeModePush && (credentialType == CredentialTypeHash || credentialType == CredentialTypeZone) {
 			return true
 		}
 	}
@@ -333,6 +390,13 @@ func (r ChargeRequest) Map() map[string]any {
 			modes = append(modes, string(mode))
 		}
 		methodDetails["supportedModes"] = modes
+	}
+	if zones := r.MethodDetails.Zones; zones != nil {
+		if zones.Any {
+			methodDetails["zones"] = true
+		} else {
+			methodDetails["zones"] = append([]uint32(nil), zones.IDs...)
+		}
 	}
 	if len(methodDetails) > 0 {
 		request["methodDetails"] = methodDetails
@@ -648,4 +712,102 @@ func normalizeMemo(value string) (string, error) {
 		return "", fmt.Errorf("tempo: memo must be hex encoded")
 	}
 	return "0x" + trimmed, nil
+}
+
+// ZoneAccepted reports whether zones, a request's methodDetails.zones,
+// accepts a withdrawal from the Zone zoneID.
+func ZoneAccepted(zones *Zones, zoneID uint32) bool {
+	if zones == nil || zoneID == 0 {
+		return false
+	}
+	return zones.Any || slices.Contains(zones.IDs, zoneID)
+}
+
+// normalizeZones validates and copies a request's accepted Zones: Any, or a
+// non-empty list of positive Zone IDs.
+func normalizeZones(zones *Zones) (*Zones, error) {
+	if zones == nil {
+		return nil, nil
+	}
+	if zones.Any {
+		if len(zones.IDs) > 0 {
+			return nil, fmt.Errorf("tempo: zones must be either any Zone or a list of Zone IDs, not both")
+		}
+		return &Zones{Any: true}, nil
+	}
+	if len(zones.IDs) == 0 {
+		return nil, fmt.Errorf("tempo: zones must accept any Zone or list at least one Zone ID")
+	}
+	if slices.Contains(zones.IDs, 0) {
+		return nil, fmt.Errorf("tempo: invalid Zone ID 0")
+	}
+	return &Zones{IDs: append([]uint32(nil), zones.IDs...)}, nil
+}
+
+// parseZones parses methodDetails.zones: true, or a non-empty array of Zone
+// IDs, as mppx's request schema.
+func parseZones(value any) (*Zones, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case bool:
+		if !typed {
+			return nil, fmt.Errorf("tempo: zones must be true or a list of Zone IDs")
+		}
+		return &Zones{Any: true}, nil
+	case []uint32:
+		return normalizeZones(&Zones{IDs: typed})
+	case []any:
+		if len(typed) == 0 {
+			return nil, fmt.Errorf("tempo: zones must list at least one Zone ID")
+		}
+		ids := make([]uint32, 0, len(typed))
+		for _, raw := range typed {
+			id, err := parseZoneID(raw)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		return &Zones{IDs: ids}, nil
+	default:
+		return nil, fmt.Errorf("tempo: zones must be true or a list of Zone IDs")
+	}
+}
+
+// parseZoneID parses a Zone ID: an integer from 1 to 2^32-1.
+func parseZoneID(value any) (uint32, error) {
+	var id float64
+	switch typed := value.(type) {
+	case uint32:
+		id = float64(typed)
+	case int:
+		id = float64(typed)
+	case int64:
+		id = float64(typed)
+	case float64:
+		id = typed
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("tempo: invalid Zone ID %q", typed.String())
+		}
+		id = parsed
+	default:
+		return 0, fmt.Errorf("tempo: invalid Zone ID %v", value)
+	}
+	if id != math.Trunc(id) || id < 1 || id > maxZoneID {
+		return 0, fmt.Errorf("tempo: invalid Zone ID %v", value)
+	}
+	return uint32(id), nil
+}
+
+// normalizeBytes32 canonicalizes 32 bytes of hex to 0x-prefixed lowercase.
+func normalizeBytes32(raw string) (string, error) {
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(raw), "0x"), "0X")
+	decoded, err := hex.DecodeString(trimmed)
+	if err != nil || len(decoded) != common.HashLength {
+		return "", fmt.Errorf("tempo: expected 32 bytes of hex")
+	}
+	return "0x" + hex.EncodeToString(decoded), nil
 }

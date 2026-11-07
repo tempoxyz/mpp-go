@@ -29,6 +29,7 @@ import (
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/rpccache"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
 )
 
 const receiptRetryDelay = 500 * time.Millisecond
@@ -297,7 +298,7 @@ func (i *Intent) Validate(
 		return nil, err
 	}
 	mode := string(tempo.ChargeModePull)
-	if validated.payload.Type == tempo.CredentialTypeHash {
+	if validated.payload.Type == tempo.CredentialTypeHash || validated.payload.Type == tempo.CredentialTypeZone {
 		mode = string(tempo.ChargeModePush)
 	} else if validated.payload.Type == tempo.CredentialTypeProof {
 		mode = string(tempo.CredentialTypeProof)
@@ -402,7 +403,19 @@ func (i *Intent) validateCredential(
 		return nil, mpp.ErrInvalidPayload("zero-amount challenges require a proof credential")
 	}
 	if !request.Allows(payload.Type) {
+		if payload.Type == tempo.CredentialTypeZone {
+			return nil, mpp.ErrVerificationFailed("zone credentials are not supported for this challenge")
+		}
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("credential type %q is not allowed for this challenge", payload.Type))
+	}
+	if payload.Type == tempo.CredentialTypeZone {
+		// Check what the challenge allows before any RPC, as mppx does.
+		if !tempo.ZoneAccepted(request.MethodDetails.Zones, payload.ZoneID) {
+			return nil, mpp.ErrVerificationFailed(fmt.Sprintf("zone is not accepted for this challenge (zoneId %d)", payload.ZoneID))
+		}
+		if len(request.MethodDetails.Splits) > 0 {
+			return nil, mpp.ErrVerificationFailed("zone credentials do not support split payments")
+		}
 	}
 
 	rpc, err := i.resolveRPC(request)
@@ -428,6 +441,10 @@ func (i *Intent) validateCredential(
 		}
 	case tempo.CredentialTypeTransaction:
 		if err := i.validateTransaction(ctx, credential, validated); err != nil {
+			return nil, err
+		}
+	case tempo.CredentialTypeZone:
+		if err := i.validateZone(ctx, credential, validated); err != nil {
 			return nil, err
 		}
 	default:
@@ -464,6 +481,66 @@ func (i *Intent) validateHash(
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	validated.sender = common.HexToAddress(source.address)
+	return nil
+}
+
+// validateZone verifies a payment that a Zone withdrawal settled on Tempo,
+// as mppx's validateZoneCredential: the Zone's portal emitted
+// WithdrawalProcessed for the sender tag in the settlement transaction, the
+// payout succeeded, and the withdrawal in that transaction's
+// processWithdrawals calldata pays the request's amount of its currency to its
+// recipient, without a callback, with a memo bound to this challenge. The
+// event carries no memo, so the calldata shows what was paid and for which
+// challenge. validateCredential has already checked the Zone and mode.
+func (i *Intent) validateZone(
+	ctx context.Context,
+	credential *mpp.Credential,
+	validated *validatedChargeCredential,
+) error {
+	request := validated.request
+	payload := validated.payload
+	portal := zone.PortalAddress(payload.ZoneID)
+	senderTag := common.HexToHash(payload.SenderTag)
+	receipt, err := fetchReceipt(ctx, validated.rpc, payload.Hash)
+	if err != nil {
+		if isTransactionReverted(err) {
+			return mpp.ErrVerificationFailed("settlement transaction reverted")
+		}
+		return err
+	}
+	event, ok := zone.FindProcessedEvent(receipt, portal, senderTag)
+	if !ok {
+		return mpp.ErrVerificationFailed("zone withdrawal not settled")
+	}
+	if !event.CallbackSuccess {
+		return mpp.ErrVerificationFailed("zone withdrawal bounced")
+	}
+	response, err := validated.rpc.SendRequest(ctx, "eth_getTransactionByHash", payload.Hash)
+	if err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement transaction")
+	}
+	if err := response.CheckError(); err != nil {
+		return mpp.ErrVerificationFailed(err.Error())
+	}
+	transaction, _ := response.Result.(map[string]any)
+	var calls []any
+	if rawCalls, ok := transaction["calls"].([]any); ok {
+		calls = rawCalls
+	} else if to := asString(transaction["to"]); to != "" {
+		calls = []any{map[string]any{"to": to, "input": transaction["input"]}}
+	}
+	withdrawal, ok := zone.FindWithdrawal(calls, portal, senderTag)
+	if !ok ||
+		withdrawal.GasLimit != 0 ||
+		!strings.EqualFold(withdrawal.To.Hex(), request.Recipient) ||
+		!strings.EqualFold(withdrawal.Token.Hex(), request.Currency) ||
+		withdrawal.Amount.String() != request.Amount {
+		return mpp.ErrVerificationFailed("zone withdrawal not found")
+	}
+	memo := hexutil.Encode(withdrawal.Memo[:])
+	if !tempo.VerifyAttributionServer(memo, credential.Challenge.Realm) || !tempo.VerifyAttributionChallenge(memo, credential.Challenge.ID) {
+		return mpp.ErrCredentialReplayed("memo is not bound to this challenge")
+	}
 	return nil
 }
 
@@ -689,6 +766,18 @@ func (i *Intent) broadcastCredential(
 		return mpp.Success(tempo.MethodName, challengeID, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeTransaction:
 		return i.broadcastTransaction(ctx, credential, validated)
+	case tempo.CredentialTypeZone:
+		// One withdrawal pays one challenge: claim its portal and sender tag,
+		// since one settlement transaction can settle several withdrawals.
+		key := tempo.ChargeZoneWithdrawalStoreKey(zone.PortalAddress(validated.payload.ZoneID).Hex(), validated.payload.SenderTag)
+		accepted, err := i.claimReplayKey(ctx, credential, key, validated.payload.Hash)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			return nil, mpp.ErrCredentialReplayed("zone withdrawal has already been used")
+		}
+		return mpp.Success(tempo.MethodName, validated.payload.Hash, mpp.WithExternalID(validated.request.ExternalID)), nil
 	default:
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("unsupported credential type %q", validated.payload.Type))
 	}
@@ -1167,8 +1256,9 @@ func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential,
 // expire: its challenge's expiry plus replayClaimExpiryGrace.
 //
 // Every charge credential is bound to its challenge: a proof key is the
-// challenge ID, and the primary transfer of a hash or transaction credential
-// must carry an attribution memo naming the challenge ID. The challenge ID is
+// challenge ID, the primary transfer of a hash or transaction credential and
+// the withdrawal of a zone credential must carry an attribution memo naming
+// the challenge ID. The challenge ID is
 // an HMAC over the challenge's expiry, which server.Mpp verifies before
 // settlement, and credentials are only accepted before that expiry, so after
 // it no challenge can accept the same proof, transaction or hash again. The
