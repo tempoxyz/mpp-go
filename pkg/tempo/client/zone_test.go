@@ -56,6 +56,15 @@ type zoneTestRPC struct {
 	// receipt; noStatus leaves it out.
 	status   any
 	noStatus bool
+	// event, when set, spoils the WithdrawalRequested event of a successful
+	// withdrawal's receipt: "none" leaves it out, "garbled" makes its data
+	// undecodable, and "sender", "token", "to", "amount" or "memo" changes
+	// that field; "hash" gives the receipt another transaction hash.
+	event string
+	// answerHash, when set, is the hash a successful send answers with.
+	answerHash string
+	// onNonce, when set, runs at the nonce lookup.
+	onNonce func()
 }
 
 func (r *zoneTestRPC) record(method string) {
@@ -77,6 +86,9 @@ func (r *zoneTestRPC) GetChainID(context.Context) (uint64, error) {
 
 func (r *zoneTestRPC) GetTransactionCount(context.Context, string) (uint64, error) {
 	r.record("eth_getTransactionCount")
+	if r.onNonce != nil {
+		r.onNonce()
+	}
 	if r.mode == "fail" {
 		return 0, errors.New("zone used")
 	}
@@ -105,6 +117,9 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "transaction already imported"})
 	case "pending", "stuck":
 		return "", fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "insufficient funds for gas"})
+	}
+	if r.answerHash != "" {
+		return r.answerHash, nil
 	}
 	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
 }
@@ -162,23 +177,49 @@ func (r *zoneTestRPC) receipt(hash string) map[string]any {
 	if err != nil {
 		panic(err)
 	}
-	data, err := zone.OutboxABI.Events["WithdrawalRequested"].Inputs.NonIndexed().Pack(
-		common.HexToAddress(testCurrency), common.HexToAddress(testRecipient), big.NewInt(1_000_000), big.NewInt(zoneTestFee),
-		[32]byte{}, uint64(0), uint64(1), []byte{}, []byte{})
+	// The event shows the withdrawal the transaction requested.
+	values, err := zone.OutboxABI.Methods["requestWithdrawal"].Inputs.Unpack(tx.Calls[1].Data[4:])
 	if err != nil {
 		panic(err)
+	}
+	token, to, amount, memo := values[0].(common.Address), values[1].(common.Address), values[2].(*big.Int), values[3].([32]byte)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch r.event {
+	case "sender":
+		sender = common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	case "token":
+		token = common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	case "to":
+		to = common.HexToAddress("0x00000000000000000000000000000000000000cc")
+	case "amount":
+		amount = new(big.Int).Add(amount, big.NewInt(1))
+	case "memo":
+		memo[31] ^= 1
+	case "hash":
+		hash = common.HexToHash("0x01").Hex()
+	}
+	data, err := zone.OutboxABI.Events["WithdrawalRequested"].Inputs.NonIndexed().Pack(
+		token, to, amount, big.NewInt(zoneTestFee), memo, uint64(0), uint64(1), []byte{}, []byte{})
+	if err != nil {
+		panic(err)
+	}
+	if r.event == "garbled" {
+		data = data[:len(data)-1]
+	}
+	logs := []any{map[string]any{
+		"address": zone.OutboxAddress.Hex(),
+		"topics":  []any{zone.RequestedTopic.Hex(), common.BigToHash(big.NewInt(0)).Hex(), common.BytesToHash(sender.Bytes()).Hex()},
+		"data":    hexutil.Encode(data),
+	}}
+	if r.event == "none" {
+		logs = []any{}
 	}
 	receipt := map[string]any{
 		"transactionHash": hash,
 		"status":          "0x1",
-		"logs": []any{map[string]any{
-			"address": zone.OutboxAddress.Hex(),
-			"topics":  []any{zone.RequestedTopic.Hex(), common.BigToHash(big.NewInt(0)).Hex(), common.BytesToHash(sender.Bytes()).Hex()},
-			"data":    hexutil.Encode(data),
-		}},
+		"logs":            logs,
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.status != nil {
 		receipt["status"] = r.status
 	}
@@ -884,4 +925,76 @@ func TestZonePaysGasInConfiguredFeeToken(t *testing.T) {
 	assert.Equal(t, common.HexToAddress(tempo.OUSDAddress), tx.FeeToken)
 	require.Len(t, tx.Calls, 2)
 	assert.Equal(t, common.HexToAddress(testCurrency), *tx.Calls[0].To)
+}
+
+// A successful receipt that does not show the signed withdrawal (no
+// WithdrawalRequested event, one that does not decode or does not match the
+// signed sender, token, recipient, amount or memo, or a receipt of another
+// transaction) leaves the withdrawal's outcome unknown: a retry looks for the
+// receipt again, and resumes the withdrawal once it shows it, without
+// withdrawing again.
+func TestZoneDoesNotWithdrawAgainAfterReceiptWithoutMatchingEvent(t *testing.T) {
+	t.Parallel()
+	for _, event := range []string{"none", "garbled", "sender", "token", "to", "amount", "memo", "hash"} {
+		t.Run(event, func(t *testing.T) {
+			t.Parallel()
+			zoneRPC := &zoneTestRPC{mode: "ok", event: event}
+			method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+			challenge := zoneChallenge(t, nil)
+			_, err := method.CreateCredential(context.Background(), challenge)
+			var unknown *ZoneWithdrawalUnknownError
+			require.ErrorAs(t, err, &unknown)
+			require.Len(t, zoneRPC.sent, 1)
+			assert.Equal(t, crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0])).Hex(), unknown.TransactionHash)
+
+			zoneRPC.mu.Lock()
+			receipts := zoneRPC.receipts
+			zoneRPC.mu.Unlock()
+			_, err = method.CreateCredential(context.Background(), challenge)
+			require.ErrorAs(t, err, &unknown)
+			zoneRPC.mu.Lock()
+			assert.Equal(t, receipts+1, zoneRPC.receipts, "a retry looks for the receipt again")
+			zoneRPC.event = ""
+			zoneRPC.mu.Unlock()
+			assert.Len(t, zoneRPC.sent, 1)
+
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			require.NoError(t, err)
+			assert.Equal(t, "zone", credential.Payload["type"])
+			assert.Len(t, zoneRPC.sent, 1)
+		})
+	}
+}
+
+// The method looks for the receipt of the transaction it signed, whatever
+// hash the Zone answers the send with.
+func TestZoneLooksUpReceiptOfSignedTransaction(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", answerHash: common.HexToHash("0x02").Hex()}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	credential, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.NoError(t, err)
+	require.Len(t, zoneRPC.sent, 1)
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	txHash := crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0]))
+	assert.Equal(t, zone.SenderTag(signer.Address(), txHash, 1).Hex(), credential.Payload["senderTag"])
+}
+
+// Preparing the withdrawal can take long enough that it could no longer
+// settle before the challenge expires: the method checks the expiry again
+// just before sending and sends nothing.
+func TestZoneRechecksExpiryBeforeSending(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{now: time.Now()}
+	zoneRPC := &zoneTestRPC{mode: "ok", onNonce: func() { clock.Advance(4 * time.Minute) }}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Minute })
+	method.now = clock.Now
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.ErrorIs(t, err, ErrZoneChallengeExpiresTooSoon)
+	assert.Contains(t, zoneRPC.calls, "eth_getTransactionCount")
+	assert.NotContains(t, zoneRPC.calls, "eth_sendRawTransaction")
+	assert.Empty(t, zoneRPC.sent)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
 }

@@ -290,11 +290,22 @@ func convertWithdrawals(value any) (withdrawals []Withdrawal, ok bool) {
 	return *converted, true
 }
 
-// RequestedEvent returns the sender and fallback nonce of the ZoneOutbox
-// WithdrawalRequested event in a Zone transaction receipt.
-func RequestedEvent(receipt map[string]any) (sender common.Address, fallbackNonce uint64, ok bool) {
+// Requested is a ZoneOutbox WithdrawalRequested event.
+type Requested struct {
+	Sender        common.Address
+	Token         common.Address
+	To            common.Address
+	Amount        *big.Int
+	Memo          common.Hash
+	FallbackNonce uint64
+}
+
+// RequestedEvents returns the ZoneOutbox WithdrawalRequested events in a Zone
+// transaction receipt, skipping logs that do not decode as one.
+func RequestedEvents(receipt map[string]any) []Requested {
 	logs, _ := receipt["logs"].([]any)
 	event := OutboxABI.Events["WithdrawalRequested"]
+	var events []Requested
 	for _, rawLog := range logs {
 		entry, isMap := rawLog.(map[string]any)
 		if !isMap || !strings.EqualFold(asString(entry["address"]), OutboxAddress.Hex()) {
@@ -312,13 +323,24 @@ func RequestedEvent(receipt map[string]any) (sender common.Address, fallbackNonc
 		if err != nil || len(values) != 9 {
 			continue
 		}
+		token, isToken := values[0].(common.Address)
+		to, isTo := values[1].(common.Address)
+		amount, isAmount := values[2].(*big.Int)
+		memo, isMemo := values[4].([32]byte)
 		nonce, isNonce := values[6].(uint64)
-		if !isNonce {
+		if !isToken || !isTo || !isAmount || !isMemo || !isNonce {
 			continue
 		}
-		return tempoTopicAddress(asString(topics[2])), nonce, true
+		events = append(events, Requested{
+			Sender:        tempoTopicAddress(asString(topics[2])),
+			Token:         token,
+			To:            to,
+			Amount:        amount,
+			Memo:          memo,
+			FallbackNonce: nonce,
+		})
 	}
-	return common.Address{}, 0, false
+	return events
 }
 
 // Requester is the JSON-RPC subset WaitForSettlement uses.
