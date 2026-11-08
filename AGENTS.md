@@ -21,7 +21,7 @@ go run ./examples/charge-basic  # run one example against it
 
 Run one test with `go test -run '^TestName$' ./pkg/server`, and one fuzz target with `go test -run='^$' -fuzz='^FuzzParseChallenge$' -fuzztime=30s ./pkg/mpp`. Unit tests need nothing external. The live tests in `tests/` (build tag `integration`) need Docker or a running node; see Testing.
 
-CI (`.github/workflows/ci.yml`) runs unit tests on the minimum Go version in go.mod (`go` line, with `GOTOOLCHAIN=local`) and on the latest stable release, checks gofmt, `go vet`, `go mod tidy -diff` and `go mod verify`, and cross-compiles for darwin and windows. Install golangci-lint v2 to run `make lint`; CI reports only issues on lines a change touches, so don't reformat untouched code to fix existing findings. Other workflows: `api-compat.yml` (see Conventions), `smoke-cross-sdk.yml`, `govulncheck.yml` and `changelogs.yml`. mpp-tools' daily SDK Conformance Monitor runs the cross-SDK conformance suite against `main` with the `go` adapter and opens a `conformance-failure` issue in tempoxyz/mpp-tools when it fails; this repository's CI does not run it. Protocol changes add or update vectors there.
+CI (`.github/workflows/ci.yml`) runs unit tests on the minimum Go version in go.mod (`go` line, with `GOTOOLCHAIN=local`) and on the latest stable release, checks gofmt, `go vet`, `go mod tidy -diff` and `go mod verify`, and cross-compiles for darwin and windows. Install golangci-lint v2 to run `make lint`; CI reports only issues on lines a change touches, so don't reformat untouched code to fix existing findings. Other workflows: `smoke-cross-sdk.yml`, `govulncheck.yml` and `changelogs.yml`. mpp-tools' daily SDK Conformance Monitor runs the cross-SDK conformance suite against `main` with the `go` adapter and opens a `conformance-failure` issue in tempoxyz/mpp-tools when it fails; this repository's CI does not run it. Protocol changes add or update vectors there.
 
 ## Layout
 
@@ -77,7 +77,7 @@ Exception: internal library code in `pkg/tempo/server`, `pkg/tempo/client`, `pkg
 
 ### API compatibility
 
-The API compatibility workflow (`.github/workflows/api-compat.yml`) runs `apidiff` between a pull request's merge base and head and fails on an incompatible change to an exported API under `pkg/` unless one of the pull request's `.changelog/*.md` files declares `github.com/tempoxyz/mpp-go: minor` (or `major`). Before v1, a breaking change is a minor bump. Prefer a compatible change: add rather than remove or rename, and mark old APIs `// Deprecated:`. To run it locally:
+An incompatible change to an exported API under `pkg/` needs a `.changelog/*.md` entry declaring `github.com/tempoxyz/mpp-go: minor` (or `major`). Before v1, a breaking change is a minor bump. Prefer a compatible change: add rather than remove or rename, and mark old APIs `// Deprecated:`. CI doesn't check this, so compare the API locally with `apidiff` when a change touches exported names:
 
 ```bash
 go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261014143641-f0251eb4aa3e
