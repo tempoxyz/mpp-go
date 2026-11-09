@@ -177,3 +177,17 @@ func TestComposeMiddlewareMalformedCredentialWithoutChallengesIsInternalError(t 
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem))
 	assert.Equal(t, string(mpp.ErrorTypeInternalPayment), problem["type"])
 }
+
+func TestServeVerifiedCommitsEmptyResponseBeforeOuterMiddleware(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			serveVerified(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), recorder,
+				httptest.NewRequest(http.MethodGet, "/", nil), &mpp.Credential{}, mpp.Success("tempo", "receipt"))
+			recorder.WriteHeader(status)
+			response := recorder.Result()
+			assert.Equal(t, http.StatusOK, response.StatusCode)
+			assert.NotEmpty(t, response.Header.Get(mpp.HeaderPaymentReceipt))
+		})
+	}
+}
