@@ -201,10 +201,6 @@ type Method struct {
 	// zoneWithdrawals holds Zone withdrawals sent for a challenge, by the
 	// challenge's JSON, so a retry resumes them instead of paying again.
 	zoneWithdrawals map[string]*zoneWithdrawal
-	// zoneStalled holds sent withdrawals whose settlement wait gave up, by
-	// payment key (zonePaymentKey), so a fresh challenge for the same payment
-	// resumes them instead of withdrawing again.
-	zoneStalled map[string]stalledZoneWithdrawal
 }
 
 // signingCall is one in-flight CreateCredential shared by concurrent callers.
