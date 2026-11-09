@@ -20,6 +20,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
@@ -1265,6 +1266,75 @@ func TestZonePolicyPanicLeavesChallengePayable(t *testing.T) {
 	_, err := method.CreateCredential(context.Background(), challenge)
 	require.NoError(t, err)
 	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// zoneRetryChallenge returns a challenge for the payment params describes as
+// a server issues it for a retried request: same realm and request, but its
+// own expiry, and so its own ID.
+func zoneRetryChallenge(t *testing.T, expiresIn time.Duration, configure func(*tempo.ChargeRequestParams)) *mpp.Challenge {
+	t.Helper()
+	params := tempo.ChargeRequestParams{
+		Amount:    "1",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		ChainID:   42431,
+		Zones:     &tempo.Zones{IDs: []uint32{3}},
+	}
+	if configure != nil {
+		configure(&params)
+	}
+	request, err := tempo.NormalizeChargeRequest(params)
+	require.NoError(t, err)
+	return mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(),
+		mpp.WithExpires(mpp.ExpiresIn(expiresIn)))
+}
+
+// A retried HTTP request or MCP tool call gets a fresh challenge for the
+// same payment. While the withdrawal for the first challenge has not settled,
+// the fresh one resumes it instead of withdrawing again, and once it settles
+// the credential names the first challenge. Later payments withdraw again.
+func TestZoneFreshChallengeForStalledPaymentResumesWithdrawal(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	first := zoneRetryChallenge(t, 5*time.Minute, nil)
+	_, err := method.CreateCredential(context.Background(), first)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+
+	retry := zoneRetryChallenge(t, 6*time.Minute, nil)
+	require.NotEqual(t, first.ID, retry.ID)
+	_, err = method.CreateCredential(context.Background(), retry)
+	var again *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &again)
+	assert.Same(t, first, again.Challenge)
+	assert.Equal(t, pending.SenderTag, again.SenderTag)
+	assert.Len(t, zoneRPC.sent, 1)
+
+	// Another payment, here of another amount, is not held back.
+	other := zoneRetryChallenge(t, 5*time.Minute, func(p *tempo.ChargeRequestParams) { p.Amount = "2" })
+	_, err = method.CreateCredential(context.Background(), other)
+	require.ErrorAs(t, err, &again)
+	assert.Same(t, other, again.Challenge)
+	assert.Len(t, zoneRPC.sent, 2)
+
+	tempoRPC.mu.Lock()
+	tempoRPC.settled = true
+	tempoRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), retry)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, credential.Challenge.ID)
+	assert.Equal(t, pending.SenderTag, credential.Payload["senderTag"])
+	assert.Len(t, zoneRPC.sent, 2)
+
+	// Once settled, a new challenge for the same payment pays again.
+	method.zone.settlementTimeout = time.Minute
+	next := zoneRetryChallenge(t, 7*time.Minute, nil)
+	credential, err = method.CreateCredential(context.Background(), next)
+	require.NoError(t, err)
+	assert.Equal(t, next.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 3)
 }
 
 // A withdrawal fee above Zone.MaxWithdrawalFee is refused before signing.
