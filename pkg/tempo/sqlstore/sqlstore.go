@@ -26,6 +26,10 @@ import (
 // DefaultTable is the table New uses when Options.Table is empty.
 const DefaultTable = "mppx_store"
 
+// DefaultPurgeGrace is how long PurgeExpired keeps an entry after its expiry
+// when Options.PurgeGrace is zero.
+const DefaultPurgeGrace = time.Hour
+
 // Dialect selects the SQL placeholder style.
 type Dialect int
 
@@ -51,6 +55,12 @@ type Options struct {
 	// SkipCreateTable stops the store from running CREATE TABLE IF NOT EXISTS
 	// on first use, for databases whose migrations create the table.
 	SkipCreateTable bool
+	// PurgeGrace is how long after its expiry PurgeExpired keeps an entry, so
+	// a purge on a process whose clock runs ahead never deletes a claim
+	// another verifier still relies on. Set it above the largest clock skew
+	// between processes sharing the table. DefaultPurgeGrace when zero; New
+	// rejects a negative value.
+	PurgeGrace time.Duration
 }
 
 // tableName matches a table name, optionally schema-qualified, that is safe
@@ -63,6 +73,7 @@ type Store struct {
 	dialect Dialect
 	table   string
 	create  bool
+	grace   time.Duration
 
 	// sem guards table creation: a one-slot semaphore rather than a mutex, so a
 	// caller whose context ends stops waiting for another caller's CREATE TABLE.
@@ -92,7 +103,14 @@ func New(db DB, dialect Dialect, options Options) (*Store, error) {
 	if !tableName.MatchString(table) {
 		return nil, fmt.Errorf("sqlstore: invalid table name %q", table)
 	}
-	return &Store{db: db, dialect: dialect, table: table, create: !options.SkipCreateTable, sem: make(chan struct{}, 1)}, nil
+	grace := options.PurgeGrace
+	if grace < 0 {
+		return nil, fmt.Errorf("sqlstore: negative PurgeGrace %s", grace)
+	}
+	if grace == 0 {
+		grace = DefaultPurgeGrace
+	}
+	return &Store{db: db, dialect: dialect, table: table, create: !options.SkipCreateTable, grace: grace, sem: make(chan struct{}, 1)}, nil
 }
 
 // Get loads a replay-protection value. An entry whose expiry has passed is
@@ -150,19 +168,22 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return err
 }
 
-// PurgeExpired deletes entries whose expiry has passed and reports how many it
-// removed. Get already reports them missing and the next claim of the same key
-// replaces them, but replay keys are rarely claimed twice, so call it
-// periodically (for example from a ticker) to keep the table from growing.
-// Entries that never expire and live claims are never removed. mppx's Store.sql
-// has no equivalent.
+// PurgeExpired deletes entries whose expiry passed more than
+// Options.PurgeGrace ago (DefaultPurgeGrace by default) and reports how many it
+// removed. Get already reports expired entries missing and the next claim of
+// the same key replaces them, but replay keys are rarely claimed twice, so call
+// it periodically (for example from a ticker) to keep the table from growing.
+// Entries that never expire and live claims are never removed. The grace
+// period keeps a purge on a process whose clock runs ahead of another
+// verifier's from deleting a claim that verifier still treats as live. mppx's
+// Store.sql has no equivalent.
 func (s *Store) PurgeExpired(ctx context.Context) (int64, error) {
 	if err := s.ensureTable(ctx); err != nil {
 		return 0, err
 	}
 	res, err := s.db.ExecContext(ctx,
 		s.prepare("DELETE FROM "+s.table+" WHERE expires IS NOT NULL AND expires <= ?"),
-		millis(time.Now()))
+		millis(time.Now().Add(-s.grace)))
 	if err != nil {
 		return 0, err
 	}

@@ -89,10 +89,16 @@ func forEachBackend(t *testing.T, fn func(t *testing.T, store *Store, db *sql.DB
 // lapsed.
 func insertExpired(t *testing.T, store *Store, key, value string) {
 	t.Helper()
+	insertExpiredAt(t, store, key, value, time.Now().Add(-time.Second))
+}
+
+// insertExpiredAt writes key with the expiry expiresAt.
+func insertExpiredAt(t *testing.T, store *Store, key, value string, expiresAt time.Time) {
+	t.Helper()
 	require.NoError(t, store.ensureTable(context.Background()))
 	_, err := store.db.ExecContext(context.Background(),
 		store.prepare("INSERT INTO "+store.table+" (key, value, expires) VALUES (?, ?, ?)"),
-		key, value, millis(time.Now().Add(-time.Second)))
+		key, value, millis(expiresAt))
 	require.NoError(t, err)
 }
 
@@ -110,6 +116,8 @@ func TestNew(t *testing.T) {
 		_, err := New(db, SQLite, Options{Table: table})
 		assert.ErrorContainsf(t, err, "invalid table name", "table %q", table)
 	}
+	_, err = New(db, SQLite, Options{PurgeGrace: -time.Second})
+	assert.ErrorContains(t, err, "negative PurgeGrace")
 	_, err = New(db, Dialect(0), Options{})
 	assert.ErrorContains(t, err, "unknown dialect")
 	_, err = New(nil, SQLite, Options{})
@@ -252,11 +260,21 @@ func TestStorePurgeExpired(t *testing.T) {
 		ok, err := store.PutIfAbsentUntil(ctx, "live", "2", time.Now().Add(time.Hour))
 		require.NoError(t, err)
 		require.True(t, ok)
-		insertExpired(t, store, "stale", "3")
+		insertExpiredAt(t, store, "stale", "3", time.Now().Add(-DefaultPurgeGrace-time.Minute))
+		// Expired, but within the grace period that covers clock skew between
+		// processes: PurgeExpired keeps it, Get reports it missing.
+		insertExpired(t, store, "recent", "4")
 
 		n, err := store.PurgeExpired(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), n)
+		_, found, err := store.Get(ctx, "recent")
+		require.NoError(t, err)
+		assert.False(t, found)
+		var count int
+		require.NoError(t, store.db.QueryRowContext(ctx,
+			store.prepare("SELECT COUNT(*) FROM "+store.table+" WHERE key = ?"), "recent").Scan(&count))
+		assert.Equal(t, 1, count, "an entry within the grace period is kept")
 		for key, want := range map[string]string{"permanent": "1", "live": "2"} {
 			value, found, err := store.Get(ctx, key)
 			require.NoError(t, err)
