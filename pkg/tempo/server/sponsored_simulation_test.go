@@ -466,7 +466,7 @@ func TestSponsoredSimulationFailureIsPaymentSimulationError(t *testing.T) {
 	rejectSimulations(rpc, "insufficient fee token balance")
 	tx := simulationTestTx(sender, simulationTestCall(token, tempo.TransferSelector))
 
-	err := simulateSponsoredTransactionExecution(context.Background(), rpc, tx, feePayer, true)
+	err := simulateSponsoredTransactionExecution(context.Background(), rpc, tx, tx, feePayer, true)
 
 	require.EqualError(t, err, "Verification Failed: transaction preflight failed")
 	assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
@@ -485,7 +485,7 @@ func TestSponsoredSimulationFailureIsPaymentSimulationError(t *testing.T) {
 
 	// Out of gas stays tolerated when the caller allows it.
 	rejectSimulations(rpc, "out of gas: gas required exceeds allowance")
-	require.NoError(t, simulateSponsoredTransactionExecution(context.Background(), rpc, tx, feePayer, true))
+	require.NoError(t, simulateSponsoredTransactionExecution(context.Background(), rpc, tx, tx, feePayer, true))
 }
 
 // A simulation request that never got the node's answer is not a
@@ -500,7 +500,7 @@ func TestSponsoredSimulationTransportErrorIsNotPaymentSimulationError(t *testing
 
 	for name, err := range map[string]error{
 		"sender":    simulateSponsoredSenderExecution(context.Background(), rpc, tx),
-		"sponsored": simulateSponsoredTransactionExecution(context.Background(), rpc, tx, common.HexToAddress("0x00000000000000000000000000000000000000f1"), false),
+		"sponsored": simulateSponsoredTransactionExecution(context.Background(), rpc, tx, tx, common.HexToAddress("0x00000000000000000000000000000000000000f1"), false),
 	} {
 		require.EqualErrorf(t, err, "Verification Failed: transaction preflight failed", "phase %s", name)
 		var simulation *PaymentSimulationError

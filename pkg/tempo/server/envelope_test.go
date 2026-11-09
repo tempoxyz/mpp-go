@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
@@ -164,10 +165,30 @@ func TestChargeFlow_FeePayerCoSignsNonSecp256k1Senders(t *testing.T) {
 				return hash.Hex(), receipt, nil
 			}
 			credential := sponsoredCredentialWithEnvelope(t, rpc, request, tt.sender, tt.envelope)
+			var observedKeys []string
+			rpc.onCall = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+				call := params[0].(map[string]any)
+				if strings.HasPrefix(tt.name, "keychain") {
+					expected := access.Address()
+					if tt.name == "keychain v2 p256 inner" {
+						expected = p256Address
+					}
+					assert.Equal(t, expected.Hex(), call["keyId"])
+					observedKeys = append(observedKeys, call["keyId"].(string))
+				} else {
+					assert.NotContains(t, call, "keyId")
+				}
+				return &temporpc.JSONRPCResponse{Result: "0x"}, nil
+			}
+
 			intent, err := NewIntent(IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey})
 			require.NoError(t, err)
 			_, err = intent.Verify(context.Background(), credential, request.Map())
 			require.NoError(t, err)
+			if strings.HasPrefix(tt.name, "keychain") {
+				require.NotEmpty(t, observedKeys)
+			}
+
 			require.Len(t, rpc.sentRawTxs, 1)
 			broadcast, _, err := deserializeTransactionCredential(rpc.sentRawTxs[0])
 			require.NoError(t, err)
@@ -182,6 +203,55 @@ func TestChargeFlow_FeePayerCoSignsNonSecp256k1Senders(t *testing.T) {
 			if tt.name != "keychain v1" && tt.name != "keychain v2" {
 				assert.Equal(t, want, sent)
 			}
+		})
+	}
+}
+
+func TestRestrictedAccessKeyRejectedBeforeSponsorship(t *testing.T) {
+	root, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	access, err := temposigner.NewSigner(secondPayerPrivateKey)
+	require.NoError(t, err)
+	for _, hosted := range []bool{false, true} {
+		name := "local"
+		if hosted {
+			name = "hosted"
+		}
+		t.Run(name, func(t *testing.T) {
+			request := buildRequest(t, true, nil)
+			rpc := newMockRPC(request)
+			credential := sponsoredCredentialWithEnvelope(t, rpc, request, root.Address(), func(hash common.Hash) []byte {
+				wrapped := crypto.Keccak256Hash([]byte{envelopeTypeKeychainV2}, hash.Bytes(), root.Address().Bytes())
+				sig, err := access.Sign(wrapped)
+				require.NoError(t, err)
+				inner := make([]byte, 65)
+				sig.R.FillBytes(inner[:32])
+				sig.S.FillBytes(inner[32:64])
+				inner[64] = sig.YParity
+				return append(append([]byte{envelopeTypeKeychainV2}, root.Address().Bytes()...), inner...)
+			})
+			calls := 0
+			rpc.onCall = func(params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+				calls++
+				call := params[0].(map[string]any)
+				if call["keyId"] == access.Address().Hex() {
+					return temporpc.NewJSONRPCErrorResponse(1, 3, "execution reverted: access key spending limit exceeded", nil), nil
+				}
+				return &temporpc.JSONRPCResponse{Result: "0x"}, nil
+			}
+			config := IntentConfig{RPC: rpc, Store: tempo.NewMemoryStore(), FeePayerPrivateKey: feePayerKey}
+			fake, sponsor := newFakeHostedFeePayer(t, 42431, common.HexToAddress(tempo.PathUSDAddress))
+			if hosted {
+				config.FeePayerPrivateKey = ""
+				config.FeePayerURL = sponsor.URL
+			}
+			intent, err := NewIntent(config)
+			require.NoError(t, err)
+			_, err = intent.Verify(context.Background(), credential, request.Map())
+			require.ErrorContains(t, err, "transaction preflight failed")
+			assert.Positive(t, calls)
+			assert.Empty(t, rpc.sentRawTxs)
+			assert.Empty(t, fake.requests)
 		})
 	}
 }

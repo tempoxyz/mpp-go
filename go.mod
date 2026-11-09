@@ -11,7 +11,7 @@ require (
 	github.com/gofiber/fiber/v2 v2.52.15
 	github.com/gowebpki/jcs v1.0.1
 	github.com/jackc/pgx/v5 v5.12.0
-	github.com/labstack/echo/v5 v5.4.2
+	github.com/labstack/echo/v5 v5.4.4
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.12.1
