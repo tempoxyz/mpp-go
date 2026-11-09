@@ -38,6 +38,7 @@ pkg/
 └── tempo/           # Tempo blockchain support (MemoryStore, constants, RPC helpers)
     ├── client/      # Tempo charge client method
     ├── redisstore/  # Redis replay Store (own package: pkg/tempo does not link go-redis)
+    ├── sqlstore/    # SQL (Postgres, SQLite) replay Store on database/sql (own package, no driver)
     ├── server/      # Tempo charge server method
     └── internal/    # rpccache (RPC clients cached per method)
 internal/
