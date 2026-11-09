@@ -20,6 +20,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
@@ -823,7 +824,6 @@ func TestZoneWaitsForPendingWithdrawalDespiteSendError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "zone", credential.Payload["type"])
 	assert.Len(t, zoneRPC.sent, 1)
-	assert.Contains(t, zoneRPC.calls, "eth_getTransactionByHash")
 }
 
 // A pending withdrawal whose receipt never shows leaves its outcome unknown,
@@ -842,32 +842,24 @@ func TestZoneDoesNotWithdrawAgainWhilePendingDespiteSendError(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 1)
 }
 
-// A Zone that rejects the withdrawal moved nothing, so the challenge may be
-// paid again.
-func TestZoneRetriesWithdrawalTheZoneRejected(t *testing.T) {
+// A Zone that answers the send with a refusal, such as insufficient funds,
+// and shows neither the receipt nor the transaction does not prove nothing was
+// withdrawn: another node behind a load-balanced or lagging RPC may have taken
+// it. The outcome stays unknown, so a retry looks for the receipt without
+// withdrawing again, as in mppx.
+func TestZoneDoesNotWithdrawAgainAfterTheZoneRefusedTheSend(t *testing.T) {
 	t.Parallel()
 	zoneRPC := &zoneTestRPC{mode: "reject"}
 	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
 	challenge := zoneChallenge(t, nil)
 	for range 2 {
 		_, err := method.CreateCredential(context.Background(), challenge)
+		var unknown *ZoneWithdrawalUnknownError
+		require.ErrorAs(t, err, &unknown)
 		assert.ErrorContains(t, err, "insufficient funds")
-		assert.NotContains(t, err.Error(), "outcome is unknown")
 	}
-	assert.Len(t, zoneRPC.sent, 2)
-	// Each rejection was checked once for a receipt and once for the
-	// transaction, without polling.
-	receiptLookups, transactionLookups := 0, 0
-	for _, call := range zoneRPC.calls {
-		switch call {
-		case "eth_getTransactionReceipt":
-			receiptLookups++
-		case "eth_getTransactionByHash":
-			transactionLookups++
-		}
-	}
-	assert.Equal(t, 2, receiptLookups)
-	assert.Equal(t, 2, transactionLookups)
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.NotContains(t, zoneRPC.calls, "eth_getTransactionByHash")
 }
 
 // A JSON-RPC send error that names no reason the Zone refused the
@@ -891,38 +883,6 @@ func TestZoneDoesNotWithdrawAgainAfterUnrecognizedSendError(t *testing.T) {
 	assert.Equal(t, calls+1, zoneRPC.callCount())
 	assert.Equal(t, "eth_getTransactionReceipt", zoneRPC.calls[len(zoneRPC.calls)-1])
 	assert.Len(t, zoneRPC.sent, 1)
-}
-
-func TestZoneSendRejected(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		code     int
-		message  string
-		rejected bool
-	}{
-		{-32000, "insufficient funds for gas * price + value", true},
-		{-32003, "Insufficient funds for transfer", true},
-		{-32000, "insufficient balance for transfer", true},
-		{-32000, "intrinsic gas too low", true},
-		{-32000, "exceeds block gas limit", true},
-		{-32000, "invalid signature", true},
-		{-32000, "invalid sender", true},
-		{-32000, "max fee per gas less than block base fee", true},
-		{-32000, "transaction fee cap less than base fee", true},
-		{-32602, "invalid params", true},
-		{-32602, "nonce too low", false},
-		{-32000, "nonce too low", false},
-		{-32000, "replacement transaction underpriced", false},
-		{-32000, "transaction underpriced", false},
-		{-32000, "already known", false},
-		{-32000, "transaction already imported", false},
-		{-32000, "internal error", false},
-		{-32603, "request timed out", false},
-	} {
-		err := fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: tc.code, Message: tc.message})
-		assert.Equal(t, tc.rejected, zoneSendRejected(err), "%d %q", tc.code, tc.message)
-	}
-	assert.False(t, zoneSendRejected(errors.New("insufficient funds")))
 }
 
 // A Zone can answer a send it took with a JSON-RPC error, such as "nonce too
@@ -1306,4 +1266,93 @@ func TestZonePolicyPanicLeavesChallengePayable(t *testing.T) {
 	_, err := method.CreateCredential(context.Background(), challenge)
 	require.NoError(t, err)
 	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// zoneRetryChallenge returns a challenge for the payment params describes as
+// a server issues it for a retried request: same realm and request, but its
+// own expiry, and so its own ID.
+func zoneRetryChallenge(t *testing.T, expiresIn time.Duration, configure func(*tempo.ChargeRequestParams)) *mpp.Challenge {
+	t.Helper()
+	params := tempo.ChargeRequestParams{
+		Amount:    "1",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		ChainID:   42431,
+		Zones:     &tempo.Zones{IDs: []uint32{3}},
+	}
+	if configure != nil {
+		configure(&params)
+	}
+	request, err := tempo.NormalizeChargeRequest(params)
+	require.NoError(t, err)
+	return mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(),
+		mpp.WithExpires(mpp.ExpiresIn(expiresIn)))
+}
+
+// A retried HTTP request or MCP tool call gets a fresh challenge for the
+// same payment. While the withdrawal for the first challenge has not settled,
+// the fresh one resumes it instead of withdrawing again, and once it settles
+// the credential names the first challenge. Later payments withdraw again.
+func TestZoneFreshChallengeForStalledPaymentResumesWithdrawal(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	first := zoneRetryChallenge(t, 5*time.Minute, nil)
+	_, err := method.CreateCredential(context.Background(), first)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+
+	retry := zoneRetryChallenge(t, 6*time.Minute, nil)
+	require.NotEqual(t, first.ID, retry.ID)
+	_, err = method.CreateCredential(context.Background(), retry)
+	var again *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &again)
+	assert.Same(t, first, again.Challenge)
+	assert.Equal(t, pending.SenderTag, again.SenderTag)
+	assert.Len(t, zoneRPC.sent, 1)
+
+	// Another payment, here of another amount, is not held back.
+	other := zoneRetryChallenge(t, 5*time.Minute, func(p *tempo.ChargeRequestParams) { p.Amount = "2" })
+	_, err = method.CreateCredential(context.Background(), other)
+	require.ErrorAs(t, err, &again)
+	assert.Same(t, other, again.Challenge)
+	assert.Len(t, zoneRPC.sent, 2)
+
+	tempoRPC.mu.Lock()
+	tempoRPC.settled = true
+	tempoRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), retry)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, credential.Challenge.ID)
+	assert.Equal(t, pending.SenderTag, credential.Payload["senderTag"])
+	assert.Len(t, zoneRPC.sent, 2)
+
+	// Once settled, a new challenge for the same payment pays again.
+	method.zone.settlementTimeout = time.Minute
+	next := zoneRetryChallenge(t, 7*time.Minute, nil)
+	credential, err = method.CreateCredential(context.Background(), next)
+	require.NoError(t, err)
+	assert.Equal(t, next.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 3)
+}
+
+// A withdrawal fee above Zone.MaxWithdrawalFee is refused before signing.
+func TestZoneRefusesWithdrawalFeeAboveMax(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.MaxWithdrawalFee = big.NewInt(zoneTestFee - 1) })
+	_, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.ErrorIs(t, err, ErrZoneWithdrawalFeeTooHigh)
+	assert.Empty(t, zoneRPC.sent)
+
+	zoneRPC = &zoneTestRPC{mode: "ok"}
+	method, _ = newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.MaxWithdrawalFee = big.NewInt(zoneTestFee) })
+	_, err = method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.NoError(t, err)
+	assert.Len(t, zoneRPC.sent, 1)
+
+	_, err = New(Config{PrivateKey: testPrivateKey, RPC: &zoneTestTempoRPC{}, PaymentPolicy: allowAll,
+		Zone: &Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, MaxWithdrawalFee: big.NewInt(-1)}})
+	assert.ErrorContains(t, err, "MaxWithdrawalFee must not be negative")
 }

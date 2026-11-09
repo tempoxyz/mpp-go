@@ -541,7 +541,9 @@ func (i *Intent) validateZone(
 		if isTransactionReverted(err) {
 			return mpp.ErrVerificationFailed("settlement transaction reverted")
 		}
-		return err
+		// fetchReceipt passes a JSON-RPC error's text on; keep the upstream
+		// node's message out of the client's problem response.
+		return mpp.ErrVerificationFailed("failed to fetch settlement receipt")
 	}
 	event, ok := zone.FindProcessedEvent(receipt, portal, senderTag)
 	if !ok {
@@ -812,7 +814,12 @@ func (i *Intent) broadcastCredential(
 		if !accepted {
 			return nil, mpp.ErrCredentialReplayed("zone withdrawal has already been used")
 		}
-		return mpp.Success(tempo.MethodName, validated.payload.Hash, mpp.WithExternalID(validated.request.ExternalID)), nil
+		// validateZone checked that the withdrawal paid the request's
+		// currency, so the receipt reports it as the funding currency, as for
+		// hash and transaction payments.
+		return mpp.Success(tempo.MethodName, validated.payload.Hash,
+			mpp.WithExternalID(validated.request.ExternalID),
+			mpp.WithFundingCurrency(validated.request.Currency)), nil
 	default:
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("unsupported credential type %q", validated.payload.Type))
 	}

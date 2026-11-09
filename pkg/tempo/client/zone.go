@@ -14,13 +14,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
-	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/txsend"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
 )
 
@@ -50,8 +48,11 @@ const approveSelector = "095ea7b3"
 // but did not settle on Tempo before the method stopped waiting. The
 // withdrawal cannot be undone and may still settle: pass Challenge to the same
 // Method's CreateCredential to resume waiting without withdrawing again, or
-// find the settlement by SenderTag on the Zone's portal. A new request gets a
-// new challenge, which the method would pay with a new withdrawal.
+// find the settlement by SenderTag on the Zone's portal. A new challenge for
+// the same payment (the same realm, request and route, as a retried HTTP
+// request or MCP tool call gets) resumes it too: until the withdrawal settles,
+// the method answers such a challenge with this withdrawal, returning a
+// credential for Challenge once it settles, and never withdraws again for it.
 type ZoneSettlementPendingError struct {
 	// Challenge is the challenge the withdrawal pays.
 	Challenge *mpp.Challenge
@@ -141,6 +142,11 @@ func (e *ZoneWithdrawalBouncedError) Error() string {
 // nothing, so the challenge may be paid another way.
 var ErrZoneChallengeExpiresTooSoon = errors.New("tempo client: challenge expires too soon for a Zone withdrawal to settle")
 
+// ErrZoneWithdrawalFeeTooHigh reports a Zone withdrawal fee above
+// Zone.MaxWithdrawalFee: the method sends nothing, so the challenge may be
+// paid another way.
+var ErrZoneWithdrawalFeeTooHigh = errors.New("tempo client: Zone withdrawal fee too high")
+
 // ErrZoneDeadlineTooSoon reports a request context whose deadline is too
 // close for a Zone withdrawal to be sent and its receipt found: none is sent.
 var ErrZoneDeadlineTooSoon = errors.New("tempo client: request deadline too soon to send a Zone withdrawal")
@@ -153,6 +159,9 @@ var ErrZoneDeadlineTooSoon = errors.New("tempo client: request deadline too soon
 // transaction's hash, kept so a retry can look for a receipt that was missing.
 // settlementStart, guarded by Method.zoneMu, is the Tempo block the first
 // settlement wait searched from, so a resumed wait searches from it too.
+//
+// Once a settlement wait for it gave up, stalled, guarded by Method.zoneMu,
+// is its payment key in Method.zoneStalled.
 type zoneWithdrawal struct {
 	done            chan struct{}
 	sent            bool
@@ -160,6 +169,15 @@ type zoneWithdrawal struct {
 	senderTag       common.Hash
 	err             error
 	settlementStart *uint64
+	stalled         string
+}
+
+// stalledZoneWithdrawal is a sent Zone withdrawal whose settlement wait gave
+// up: the challenge and request it pays, and its withdrawal key.
+type stalledZoneWithdrawal struct {
+	key       string
+	challenge *mpp.Challenge
+	request   tempo.ChargeRequest
 }
 
 // unknown reports whether a finished withdrawal's receipt was missing, so a
@@ -184,6 +202,9 @@ func resolveZone(config *Zone, signer *temposigner.Signer, accessKey bool) (*zon
 	if config.SettlementTimeout < 0 {
 		return nil, fmt.Errorf("tempo client: Zone.SettlementTimeout must not be negative")
 	}
+	if config.MaxWithdrawalFee != nil && config.MaxWithdrawalFee.Sign() < 0 {
+		return nil, fmt.Errorf("tempo client: Zone.MaxWithdrawalFee must not be negative")
+	}
 	resolved := &zoneConfig{
 		rpc:               config.RPC,
 		chainID:           config.ChainID,
@@ -192,6 +213,9 @@ func resolveZone(config *Zone, signer *temposigner.Signer, accessKey bool) (*zon
 		signer:            config.Signer,
 		settlementTimeout: config.SettlementTimeout,
 		nonceLock:         make(chan struct{}, 1),
+	}
+	if config.MaxWithdrawalFee != nil {
+		resolved.maxWithdrawalFee = new(big.Int).Set(config.MaxWithdrawalFee)
 	}
 	if resolved.settlementTimeout == 0 {
 		resolved.settlementTimeout = zone.DefaultSettlementTimeout
@@ -253,6 +277,9 @@ func (m *Method) paysFromZone(challenge *mpp.Challenge, request tempo.ChargeRequ
 	if m.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)) != nil {
 		return true
 	}
+	if _, ok := m.stalledZoneWithdrawal(challenge); ok {
+		return true
+	}
 	return m.settlesBeforeExpiry(challenge.Expires)
 }
 
@@ -294,6 +321,68 @@ func zoneWithdrawalKey(challenge *mpp.Challenge) string {
 		return ""
 	}
 	return string(encoded)
+}
+
+// zonePaymentKey keys a Zone payment by its challenge's echo without the
+// fields that differ between challenges a server issues for one payment: the
+// ID, the expiry and the random nonce in the opaque metadata. A retried HTTP
+// request or MCP tool call gets a challenge with the same payment key, while
+// one for another realm, request, route or body does not.
+func zonePaymentKey(challenge *mpp.Challenge) string {
+	echo := challenge.ToEcho()
+	echo.ID, echo.Expires = "", ""
+	if len(echo.Opaque) > 0 {
+		opaque := make(map[string]string, len(echo.Opaque))
+		for name, value := range echo.Opaque {
+			if name != "_mppx_nonce" && name != "_mpp_nonce" {
+				opaque[name] = value
+			}
+		}
+		echo.Opaque = opaque
+	}
+	encoded, err := json.Marshal(echo)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// stalledZoneWithdrawal returns the sent withdrawal, for another challenge
+// with challenge's payment key, whose settlement wait gave up and that has not
+// settled since.
+func (m *Method) stalledZoneWithdrawal(challenge *mpp.Challenge) (stalledZoneWithdrawal, bool) {
+	paymentKey := zonePaymentKey(challenge)
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	stalled, ok := m.zoneStalled[paymentKey]
+	if !ok || stalled.key == zoneWithdrawalKey(challenge) {
+		return stalledZoneWithdrawal{}, false
+	}
+	if withdrawal := m.zoneWithdrawals[stalled.key]; withdrawal == nil || withdrawal.stalled != paymentKey {
+		delete(m.zoneStalled, paymentKey)
+		return stalledZoneWithdrawal{}, false
+	}
+	return stalled, true
+}
+
+// stallZoneWithdrawal records that the settlement wait for withdrawal, which
+// pays challenge, gave up, so a new challenge for the same payment resumes it
+// instead of withdrawing again.
+func (m *Method) stallZoneWithdrawal(key string, withdrawal *zoneWithdrawal, challenge *mpp.Challenge, request tempo.ChargeRequest) {
+	paymentKey := zonePaymentKey(challenge)
+	if paymentKey == "" {
+		return
+	}
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	if m.zoneWithdrawals[key] != withdrawal {
+		return
+	}
+	if m.zoneStalled == nil {
+		m.zoneStalled = map[string]stalledZoneWithdrawal{}
+	}
+	withdrawal.stalled = paymentKey
+	m.zoneStalled[paymentKey] = stalledZoneWithdrawal{key: key, challenge: challenge, request: request}
 }
 
 func (m *Method) pendingZoneWithdrawal(key string) *zoneWithdrawal {
@@ -373,6 +462,9 @@ func (m *Method) forgetZoneWithdrawal(key string, withdrawal *zoneWithdrawal) {
 	if m.zoneWithdrawals[key] == withdrawal {
 		delete(m.zoneWithdrawals, key)
 	}
+	if withdrawal.stalled != "" && m.zoneStalled[withdrawal.stalled].key == key {
+		delete(m.zoneStalled, withdrawal.stalled)
+	}
 }
 
 // createZoneCredential pays a challenge from the Zone balance: it requests a
@@ -384,7 +476,17 @@ func (m *Method) forgetZoneWithdrawal(key string, withdrawal *zoneWithdrawal) {
 //
 // authorize runs only before a new withdrawal is sent, while this call holds
 // the challenge's claim; its error refuses the payment and sends nothing.
+//
+// A challenge for the same payment as a withdrawal whose settlement wait gave
+// up, such as a retried request's fresh challenge, resumes that withdrawal
+// instead: the credential, or *ZoneSettlementPendingError, names the
+// withdrawal's own challenge.
 func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, challenge *mpp.Challenge, request tempo.ChargeRequest, authorize func(context.Context) error) (*mpp.Credential, error) {
+	if m.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)) == nil {
+		if stalled, ok := m.stalledZoneWithdrawal(challenge); ok {
+			return m.createZoneCredential(ctx, rpc, stalled.challenge, stalled.request, authorize)
+		}
+	}
 	// Refuse a credential too large to send before withdrawing: the
 	// settlement hash and sender tag are 32 bytes each.
 	placeholder := "0x" + strings.Repeat("0", 64)
@@ -474,6 +576,7 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			return credential, nil
 		}
 	}
+	m.stallZoneWithdrawal(key, pending, challenge, request)
 	return nil, &ZoneSettlementPendingError{
 		Challenge:   challenge,
 		ChallengeID: challenge.ID,
@@ -572,6 +675,11 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if err != nil {
 		return common.Hash{}, "", false, err
 	}
+	// PaymentPolicy authorized only the amount: refuse a fee above the
+	// configured ceiling before signing, so nothing is sent.
+	if m.zone.maxWithdrawalFee != nil && fee.Cmp(m.zone.maxWithdrawalFee) > 0 {
+		return common.Hash{}, "", false, fmt.Errorf("%w: fee %s exceeds Zone.MaxWithdrawalFee %s", ErrZoneWithdrawalFeeTooHigh, fee, m.zone.maxWithdrawalFee)
+	}
 	approve := fmt.Sprintf("0x%s%064x%064x", approveSelector, zone.OutboxAddress.Big(), new(big.Int).Add(amount, fee))
 	// A bounced payout refunds the payer, not the payee's Zone address.
 	withdrawal, err := zone.OutboxABI.Pack("requestWithdrawal", currency, recipient, amount, [32]byte(memo), uint64(0), signer.Address(), []byte{}, []byte{})
@@ -652,25 +760,12 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if sentHash, sendErr := rpc.SendRawTransaction(ctx, serialized); sendErr == nil && sentHash != "" && !strings.EqualFold(sentHash, hash) {
 		err = fmt.Errorf("zone answered the send with transaction hash %s", sentHash)
 	} else if sendErr != nil {
-		if zoneSendRejected(sendErr) {
-			// The Zone refused the transaction for a reason it checks before
-			// admitting one, but another node behind the same RPC may have
-			// taken it: look for its receipt, and then for the transaction
-			// itself, which a node holds while it is pending. Only when the
-			// Zone knows neither, and says so, was nothing withdrawn;
-			// otherwise wait for the receipt below. Any other send error
-			// leaves the outcome unknown, since a load-balanced or
-			// still-indexing Zone may not show a transaction it took yet.
-			var lookupErr error
-			receipt, lookupErr = lookupZoneTransaction(ctx, rpc, "eth_getTransactionReceipt", hash)
-			if receipt == nil {
-				var transaction map[string]any
-				transaction, err = lookupZoneTransaction(ctx, rpc, "eth_getTransactionByHash", hash)
-				if lookupErr == nil && err == nil && transaction == nil {
-					return common.Hash{}, "", false, fmt.Errorf("tempo client: send Zone withdrawal: %w", sendErr)
-				}
-			}
-		}
+		// Whatever the error, another node behind a load-balanced or lagging
+		// Zone RPC may have taken the transaction while this one refused it
+		// and does not show it, so a send error never proves nothing was
+		// withdrawn, as in mppx: wait for the receipt below, and leave the
+		// outcome unknown without one, so a retry of the challenge looks for
+		// the receipt again rather than withdrawing again.
 		err = sendErr
 	}
 	if receipt == nil {
@@ -770,62 +865,6 @@ func receiptStatus(value any) (uint64, bool) {
 	return 0, false
 }
 
-// zoneSendRejected reports whether a send error is the node's JSON-RPC
-// refusal to admit the transaction, as opposed to a transport failure, a
-// timeout or any other JSON-RPC error, which leave it unknown whether the
-// node took it. Only errors that name a reason the node checks before
-// admitting a transaction count, such as insufficient funds or an invalid
-// signature; errors a node also gives for a transaction it already holds or
-// included, such as "nonce too low", "already known" or an underpriced
-// replacement, never do.
-func zoneSendRejected(err error) bool {
-	var rpcErr *temporpc.JSONRPCError
-	if !errors.As(err, &rpcErr) || txsend.IsDuplicateSubmission(err) {
-		return false
-	}
-	message := strings.ToLower(rpcErr.Message)
-	for _, marker := range zoneAdmittedMarkers {
-		if strings.Contains(message, marker) {
-			return false
-		}
-	}
-	if rpcErr.Code == -32602 {
-		return true
-	}
-	for _, marker := range zoneRefusedMarkers {
-		if strings.Contains(message, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// zoneAdmittedMarkers are send error messages a node can give for a
-// transaction it already holds or included.
-var zoneAdmittedMarkers = []string{
-	"nonce too low",
-	"replacement",
-	"underpriced",
-	"already known",
-	"already imported",
-	"known transaction",
-}
-
-// zoneRefusedMarkers are send error messages for checks a node makes before
-// it admits a transaction.
-var zoneRefusedMarkers = []string{
-	"insufficient funds",
-	"insufficient balance",
-	"intrinsic gas too low",
-	"exceeds block gas limit",
-	"invalid signature",
-	"invalid sender",
-	"fee cap less than block base fee",
-	"fee cap less than base fee",
-	"fee per gas less than block base fee",
-	"invalid params",
-}
-
 // lookupZoneTransaction calls method (eth_getTransactionReceipt or
 // eth_getTransactionByHash) once for a transaction, without polling, even
 // when ctx has ended. It returns nil and no error when the Zone answers that
@@ -854,6 +893,10 @@ func (m *Method) waitForZoneReceipt(ctx context.Context, rpc tempo.RPCClient, ha
 		timeout = zoneReceiptTimeout
 	}
 	deadline := time.Now().Add(timeout)
+	// Bound each lookup too, so a stalled Zone RPC cannot hold the wait past
+	// its timeout; the last lookup gets zoneReceiptLookupTimeout to answer.
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(zoneReceiptLookupTimeout))
+	defer cancel()
 	for {
 		response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash)
 		if err == nil && response.CheckError() == nil {

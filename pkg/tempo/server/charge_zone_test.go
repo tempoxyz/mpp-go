@@ -54,6 +54,9 @@ type zoneRPC struct {
 	withdrawals []zoneWithdrawalFixture
 	reverted    bool
 	methods     []string
+	// rpcError, when set, has method answer with a JSON-RPC error carrying
+	// this message.
+	rpcError map[string]string
 }
 
 func (r *zoneRPC) GetChainID(context.Context) (uint64, error) { return 42431, nil }
@@ -66,6 +69,9 @@ func (r *zoneRPC) SendRawTransaction(context.Context, string) (string, error) {
 
 func (r *zoneRPC) SendRequest(_ context.Context, method string, _ ...interface{}) (*temporpc.JSONRPCResponse, error) {
 	r.methods = append(r.methods, method)
+	if message, ok := r.rpcError[method]; ok {
+		return &temporpc.JSONRPCResponse{Error: &temporpc.JSONRPCError{Code: -32000, Message: message}}, nil
+	}
 	portal := zone.PortalAddress(zoneTestID)
 	switch method {
 	case "eth_getTransactionReceipt":
@@ -224,6 +230,7 @@ func TestZoneAcceptsSettledWithdrawal(t *testing.T) {
 	assert.Equal(t, tempo.MethodName, receipt.Method)
 	assert.Equal(t, zoneSettlementHash, receipt.Reference)
 	assert.Equal(t, "success", receipt.Status)
+	assert.True(t, strings.EqualFold(testCurrency, receipt.FundingCurrency), receipt.FundingCurrency)
 
 	validation, err := s.method.intent.(*Intent).Validate(context.Background(), &mpp.Credential{
 		Challenge: challenge.ToEcho(),
@@ -431,4 +438,25 @@ func TestZoneSettlementRejectedAsHashCredential(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.verify(b, zoneTagB, zoneTestID)
 	require.NoError(t, err)
+}
+
+// An upstream node's JSON-RPC error text never reaches the client's problem
+// response.
+func TestZoneHidesUpstreamRPCErrors(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{"eth_getTransactionReceipt", "eth_getTransactionByHash"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			s := newZoneSetup(t, nil)
+			challenge, memo := s.challenge(t, server.ChargeParams{})
+			s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+			s.rpc.rpcError = map[string]string{method: "upstream secret: node-7.internal"}
+			_, err := s.verify(challenge, zoneTagA, zoneTestID)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "node-7.internal")
+			var paymentErr *mpp.PaymentError
+			require.ErrorAs(t, err, &paymentErr)
+			assert.NotContains(t, paymentErr.Detail, "node-7.internal")
+		})
+	}
 }

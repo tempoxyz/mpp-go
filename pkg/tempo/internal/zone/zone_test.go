@@ -269,3 +269,25 @@ func repeat(s string, n int) string {
 	}
 	return out
 }
+
+// stalledRPC answers eth_blockNumber and then stalls every eth_getLogs call
+// until its context ends.
+type stalledRPC struct{}
+
+func (stalledRPC) SendRequest(ctx context.Context, method string, _ ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	if method == "eth_blockNumber" {
+		return &temporpc.JSONRPCResponse{Result: "0x10"}, nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A stalled Tempo RPC cannot hold a wait without a context deadline past its
+// timeout and rpcGrace.
+func TestWaitForSettlementBoundsStalledRPCCalls(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	_, err := WaitForSettlement(context.Background(), stalledRPC{}, PortalAddress(3), common.HexToHash("0x01"), nil, 0, 10*time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), rpcGrace+5*time.Second)
+}

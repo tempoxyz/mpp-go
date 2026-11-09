@@ -115,6 +115,13 @@ type Zone struct {
 	// Tempo, cut short at the challenge expiry. Zero waits
 	// zone.DefaultSettlementTimeout (60 seconds); it must not be negative.
 	SettlementTimeout time.Duration
+	// MaxWithdrawalFee, when set, caps the Zone outbox fee a withdrawal may
+	// pay on top of the charge amount, in base units of the charge currency.
+	// PaymentPolicy authorizes only the amount, so without a cap a fee spike
+	// debits more than it allowed. A higher fee fails with
+	// ErrZoneWithdrawalFeeTooHigh before anything is signed. It must not be
+	// negative.
+	MaxWithdrawalFee *big.Int
 }
 
 // zoneConfig is a validated Zone.
@@ -125,6 +132,7 @@ type zoneConfig struct {
 	parentChainID     int64
 	signer            *temposigner.Signer
 	settlementTimeout time.Duration
+	maxWithdrawalFee  *big.Int
 	// nonceLock, a one-slot semaphore, serializes withdrawals from the
 	// signer on the Zone chain (one per zoneConfig, and so per Method): it is
 	// held from the nonce lookup until the send's outcome is known, so
@@ -193,6 +201,10 @@ type Method struct {
 	// zoneWithdrawals holds Zone withdrawals sent for a challenge, by the
 	// challenge's JSON, so a retry resumes them instead of paying again.
 	zoneWithdrawals map[string]*zoneWithdrawal
+	// zoneStalled holds sent withdrawals whose settlement wait gave up, by
+	// payment key (zonePaymentKey), so a fresh challenge for the same payment
+	// resumes them instead of withdrawing again.
+	zoneStalled map[string]stalledZoneWithdrawal
 }
 
 // signingCall is one in-flight CreateCredential shared by concurrent callers.

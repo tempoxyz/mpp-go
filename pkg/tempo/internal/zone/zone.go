@@ -372,11 +372,16 @@ type Settlement struct {
 	Bounced bool
 }
 
+// rpcGrace is how long past its timeout WaitForSettlement lets the RPC calls
+// under way finish.
+const rpcGrace = 5 * time.Second
+
 // WaitForSettlement waits until portal emits WithdrawalProcessed for
 // senderTag (and, when to is set, that recipient) on Tempo, and returns the
 // Tempo transaction that settled it and whether its payout bounced. It searches from fromBlock
 // to the head once, logsRangeBlocks at a time, then only blocks added since
-// the previous poll, and gives up after timeout. A wait that resumes an
+// the previous poll, and gives up after timeout, cutting off RPC calls that
+// run rpcGrace past it. A wait that resumes an
 // earlier one passes the earlier one's fromBlock, so it still finds a
 // settlement however far back the head has moved since.
 func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (Settlement, error) {
@@ -384,6 +389,11 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 		return Settlement{}, fmt.Errorf("zone settlement timeout must be non-negative")
 	}
 	deadline := time.Now().Add(timeout)
+	// Bound every RPC call by the deadline too, so a stalled Tempo RPC cannot
+	// hold the wait past its timeout; the calls under way when it passes get
+	// rpcGrace to answer.
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(rpcGrace))
+	defer cancel()
 	latest, err := blockNumber(ctx, rpc)
 	if err != nil {
 		return Settlement{}, err
