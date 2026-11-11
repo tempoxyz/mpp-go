@@ -178,3 +178,13 @@ func TestSpecVerifyOrChallengeRefusesShortSecret(t *testing.T) {
 	_, err := VerifyOrChallenge(context.Background(), VerifyParams{Intent: verifyTestIntent{}, Request: map[string]any{"amount": "100"}, Realm: "example.com", SecretKey: strings.Repeat("s", 31), Method: "tempo"})
 	assert.ErrorContains(t, err, "at least 32 bytes")
 }
+
+func TestSpecCredentialInLaterFieldLineIsVerified(t *testing.T) {
+	t.Parallel()
+
+	handler := specHandler(t)
+	challenge := specIssue(t, handler)
+	recorder := specSend(handler, http.Header{mpp.HeaderAuthorization: {"Bearer app-key", paymentFor(challenge)}})
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "ok", recorder.Body.String())
+}

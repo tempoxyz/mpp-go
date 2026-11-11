@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 
@@ -340,5 +342,62 @@ func TestTransport_OnChallenge_ErrPaymentDeclinedAfterCreateIsError(t *testing.T
 	assert.Nil(t, resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "after creating credential")
+	assert.Equal(t, 1, method.calls)
+}
+
+func TestTransport_OnChallenge_ErrPaymentDeclinedAfterFailedCreateIsError(t *testing.T) {
+	srv, calls := declineServer(t)
+	boom := errors.New("broadcast failed after submit")
+	method := &echoMethod{err: boom}
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
+		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+			_, _ = create(ctx)
+			return nil, ErrPaymentDeclined
+		}))
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	assert.Nil(t, resp, "the method ran, so the 402 is not a clean decline")
+	require.ErrorIs(t, err, boom)
+	assert.Contains(t, err.Error(), "after creating credential failed")
+	assert.Equal(t, 1, method.calls)
+	assert.Equal(t, 1, *calls)
+}
+
+// A 402 body that stalls after its headers must not hold back the paid retry
+// once the method created (and possibly broadcast) a payment.
+func TestTransport_StalledChallengeBodyDoesNotDelayPaidRetry(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			once.Do(func() { close(release) })
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte("payment required"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	defer once.Do(func() { close(release) })
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &echoMethod{}
+	tr := newTestTransport([]Method{method}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, 1, method.calls)
 }

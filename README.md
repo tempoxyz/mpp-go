@@ -59,18 +59,15 @@ import (
 )
 
 func main() {
-	method, err := charge.New(charge.Config{
+	method, _ := charge.New(charge.Config{
 		// Development only; use a shared persistent Store in production.
 		Store:     tempo.NewMemoryStore(),
 		RPCURL:    "https://rpc.moderato.tempo.xyz",
 		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
 	})
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	// An empty secret reads MPP_SECRET_KEY, which must be at least 32 bytes.
-	payment, err := server.New(method, "api.example.com", "")
+	// Secret must be at least 32 bytes (generate with: openssl rand -base64 32).
+	payment, err := server.New(method, "api.example.com", "replace-me-with-a-32-byte-min-secret")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -85,23 +82,14 @@ func main() {
 		})
 	}))
 
-	log.Fatal(http.ListenAndServe(":8080", handler))
+	_ = http.ListenAndServe(":8080", handler)
 }
-```
-
-The server signs its Challenges with `MPP_SECRET_KEY` (at least 32 bytes; use the same value on every replica). Generate one and run it:
-
-```bash
-go mod init example.com/quickstart && go mod tidy   # in the directory holding main.go
-export MPP_SECRET_KEY="$(openssl rand -base64 32)"
-go run .
-curl -i http://localhost:8080/   # 402 Payment Required with a WWW-Authenticate: Payment challenge
 ```
 
 If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `server.WithRequiresAuth(true)`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 
 ```go
-payment, err := server.New(method, "api.example.com", "", server.WithRequiresAuth(true))
+payment, err := server.New(method, "api.example.com", secret, server.WithRequiresAuth(true))
 if err != nil {
 	log.Fatal(err)
 }
@@ -141,15 +129,12 @@ import (
 )
 
 func main() {
-	method, err := charge.New(charge.Config{
+	method, _ := charge.New(charge.Config{
 		PrivateKey: os.Getenv("MPP_PRIVATE_KEY"),
 		RPCURL:     "https://rpc.moderato.tempo.xyz",
 		// Pay at most 0.50 per request, in any of the 6-decimal Tempo stablecoins.
 		PaymentPolicy: charge.MaxAmount("", "0.50", 6),
 	})
-	if err != nil {
-		panic(err)
-	}
 
 	c := client.New([]client.Method{method})
 	response, err := c.Get(context.Background(), "https://api.example.com/paid")
@@ -158,10 +143,7 @@ func main() {
 	}
 	defer response.Body.Close()
 
-	receipt, err := mpp.ReceiptFromResponse(response)
-	if err != nil {
-		panic(err)
-	}
+	receipt, _ := mpp.ParseReceipt(response.Header.Get("Payment-Receipt"))
 
 	var body struct {
 		Data  string `json:"data"`

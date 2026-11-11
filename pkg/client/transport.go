@@ -271,7 +271,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			},
 		}
 		cred := credentials[key]
-		if cred == nil {
+		created := cred == nil
+		if created {
 			cred, err = t.createCredential(baseRequest.Context(), selected)
 			if err != nil {
 				if retry.Body != nil {
@@ -288,7 +289,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			credentials[key] = cred
 		}
-		drainAndClose(resp.Body)
+		if created {
+			// The method may already have broadcast a payment: close the 402
+			// without reading the rest of its body, which a stalled server
+			// could otherwise use to hold back the paid retry.
+			_ = resp.Body.Close()
+		} else {
+			drainAndClose(resp.Body)
+		}
 
 		authorization, err := mpp.FormatCredential(cred)
 		if err != nil {
@@ -440,6 +448,11 @@ func (t *Transport) createCredential(ctx context.Context, selected challengeCand
 		// only errors the hook made itself are reported as a decline.
 		if created && createdErr != nil && errors.Is(err, createdErr) {
 			return nil, err
+		}
+		// A hook that declines after the method failed is not a clean
+		// decline either: the method may have paid before failing.
+		if created && createdErr != nil {
+			return nil, fmt.Errorf("mpp: onChallenge after creating credential failed: %w", errors.Join(err, createdErr))
 		}
 		// A hook that failed after createCredential made a credential did not
 		// decline: the method may already have paid.

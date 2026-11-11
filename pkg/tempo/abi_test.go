@@ -1,6 +1,7 @@
 package tempo
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 )
@@ -29,5 +30,22 @@ func TestMatchTransferCalldata_RejectsMalformedAmountHex(t *testing.T) {
 
 	if MatchTransferCalldata(dataHex, request, "example.com", "challenge-1") {
 		t.Fatal("MatchTransferCalldata() = true, want false for calldata with non-hex amount field")
+	}
+}
+
+// TestMatchTransferCalldata_RejectsNonHexMemo proves a memo field with
+// non-hex characters never matches, even without methodDetails.memo.
+func TestMatchTransferCalldata_RejectsNonHexMemo(t *testing.T) {
+	request := ChargeRequest{Amount: "1000000", Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"}
+	valid, err := EncodeTransferWithMemo(request.Recipient, big.NewInt(1000000), "0x"+strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !MatchTransferCalldata(valid, request, "example.com", "challenge-1") {
+		t.Fatal("MatchTransferCalldata() = false, want true for a hex memo")
+	}
+	nonHex := valid[:len(valid)-2] + "zz"
+	if MatchTransferCalldata(nonHex, request, "example.com", "challenge-1") {
+		t.Fatal("MatchTransferCalldata() = true, want false for a non-hex memo")
 	}
 }

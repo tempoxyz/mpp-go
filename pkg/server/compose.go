@@ -37,16 +37,45 @@ type composedEntry struct {
 }
 
 // withRequestHeaders returns a copy of entries whose params carry the raw
-// Authorization and Payment-Authorization values of header.
-func withRequestHeaders(entries []composedEntry, header http.Header) []composedEntry {
+// Authorization and Payment-Authorization values of header: the first field
+// line of each, except that the field credential arrived in (source) carries
+// the field line holding credential, so Charge verifies the credential
+// composePaymentCredential found even when it is in a later field line.
+func withRequestHeaders(entries []composedEntry, header http.Header, credential string, source credentialSource) []composedEntry {
+	authorization := header.Get(mpp.HeaderAuthorization)
+	paymentAuthorization := header.Get(mpp.HeaderPaymentAuthorization)
+	switch source {
+	case sourceAuthorization:
+		authorization = fieldLineWith(header, mpp.HeaderAuthorization, credential, authorization)
+	case sourcePaymentAuthorization:
+		paymentAuthorization = fieldLineWith(header, mpp.HeaderPaymentAuthorization, credential, paymentAuthorization)
+	}
 	bound := make([]composedEntry, len(entries))
 	for i, entry := range entries {
-		entry.params.Authorization = header.Get(mpp.HeaderAuthorization)
-		entry.params.PaymentAuthorization = header.Get(mpp.HeaderPaymentAuthorization)
+		entry.params.Authorization = authorization
+		entry.params.PaymentAuthorization = paymentAuthorization
 		entry.requestHeaders = true
 		bound[i] = entry
 	}
 	return bound
+}
+
+// fieldLineWith returns the field line of header field name that carries
+// credential, as paymentCredentialField found it, or first when credential is
+// empty or no line carries it.
+func fieldLineWith(header http.Header, name, credential, first string) string {
+	if credential == "" {
+		return first
+	}
+	for _, value := range header.Values(name) {
+		if value == credential {
+			return value
+		}
+		if found, err := mpp.FindPaymentAuthorizationStrict(value); err == nil && found == credential {
+			return value
+		}
+	}
+	return first
 }
 
 // ComposeMiddleware creates an http.Handler middleware that supports multiple

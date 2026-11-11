@@ -262,19 +262,29 @@ func TestValidationTransferDetailsDistinguishesConfiguredFromWildcardMemo(t *tes
 		Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
 	}}
 
-	// Without methodDetails.memo, the primary's attribution memo is optional.
-	details := validationTransferDetails(request)
+	// Without methodDetails.memo, the primary's attribution memo is optional
+	// for pull credentials and required for push credentials.
+	details := validationTransferDetails(request, false)
 	require.Len(t, details, 2)
 	assert.Equal(t, true, details[0]["allowAnyMemo"])
 	assert.NotContains(t, details[0], "memo")
 	assert.Equal(t, true, details[1]["allowAnyMemo"])
 
+	details = validationTransferDetails(request, true)
+	require.Len(t, details, 2)
+	assert.Equal(t, true, details[0]["requireAttribution"])
+	assert.NotContains(t, details[0], "allowAnyMemo")
+	assert.Equal(t, true, details[1]["allowAnyMemo"])
+
 	memo := "0x" + strings.Repeat("ab", 32)
 	request.MethodDetails.Memo = memo
-	details = validationTransferDetails(request)
-	require.Len(t, details, 2)
-	assert.Equal(t, memo, details[0]["memo"])
-	assert.NotContains(t, details[0], "allowAnyMemo")
+	for _, push := range []bool{false, true} {
+		details = validationTransferDetails(request, push)
+		require.Len(t, details, 2)
+		assert.Equal(t, memo, details[0]["memo"])
+		assert.NotContains(t, details[0], "allowAnyMemo")
+		assert.NotContains(t, details[0], "requireAttribution")
+	}
 }
 
 func TestIntentValidateTransactionRejectsFailedSimulationWithoutMutation(t *testing.T) {

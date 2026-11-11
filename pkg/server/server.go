@@ -355,8 +355,14 @@ type ChargeParams struct {
 	// Splits adds Tempo split-payment transfers under methodDetails.splits.
 	Splits []tempoparams.SplitParams
 	// Memo is a 32-byte hex Tempo memo the primary transfer must carry,
-	// advertised as methodDetails.memo. Leave it empty to let clients attach
-	// their own attribution memo, which servers accept but never require.
+	// advertised as methodDetails.memo. Leave it empty to use the client's
+	// attribution memo instead: push (hash) credentials must carry the
+	// attribution memo for the Challenge, while pull (transaction)
+	// credentials may carry it, another memo or none. A push payment
+	// without the memo is rejected after the client has broadcast it, so
+	// set Memo on push routes only when every payer's client reads
+	// methodDetails.memo (mpp-go from this release, mppx); mpp-go clients
+	// before it attach their attribution memo instead.
 	Memo string
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
 	// A Tempo method with a fee payer sponsors every route without it.

@@ -314,7 +314,7 @@ func (i *Intent) Validate(
 		details["sender"] = validated.sender.Hex()
 	}
 	if validated.payload.Type == tempo.CredentialTypeHash || validated.payload.Type == tempo.CredentialTypeTransaction {
-		details["transfers"] = validationTransferDetails(validated.request)
+		details["transfers"] = validationTransferDetails(validated.request, validated.payload.Type == tempo.CredentialTypeHash)
 	}
 	if validated.payload.Type == tempo.CredentialTypeTransaction {
 		details["serializedTransaction"] = validated.payload.Signature
@@ -330,8 +330,11 @@ func (i *Intent) Validate(
 	}, nil
 }
 
-func validationTransferDetails(request tempo.ChargeRequest) []map[string]any {
+func validationTransferDetails(request tempo.ChargeRequest, push bool) []map[string]any {
 	transfers := expectedTransfers(request)
+	if push {
+		transfers = expectedPushTransfers(request)
+	}
 	details := make([]map[string]any, 0, len(transfers))
 	for _, transfer := range transfers {
 		detail := map[string]any{
@@ -340,6 +343,8 @@ func validationTransferDetails(request tempo.ChargeRequest) []map[string]any {
 		}
 		if transfer.memo != "" {
 			detail["memo"] = transfer.memo
+		} else if transfer.requireAttribution {
+			detail["requireAttribution"] = true
 		} else if transfer.allowAnyMemo {
 			detail["allowAnyMemo"] = true
 		}
@@ -470,7 +475,7 @@ func (i *Intent) validateHash(
 		return err
 	}
 	transfers, ok := receiptTransfers(receiptMap, request, source.address)
-	if !ok || !matchTransfers(transfers, expectedTransfers(request), credential.Challenge.Realm, credential.Challenge.ID) {
+	if !ok || !matchTransfers(transfers, expectedPushTransfers(request), credential.Challenge.Realm, credential.Challenge.ID) {
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	validated.challengeBound = boundToChallenge(transfers, credential.Challenge.Realm, credential.Challenge.ID)
@@ -1050,7 +1055,7 @@ func hashPaymentFundedByCurrency(ctx context.Context, credential *mpp.Credential
 		calls = []any{map[string]any{"to": to, "input": transaction["input"], "value": transaction["value"]}}
 	}
 	request := validated.request
-	expected := expectedTransfers(request)
+	expected := expectedPushTransfers(request)
 	if len(calls) != len(expected) {
 		return false
 	}
@@ -1286,7 +1291,8 @@ func transactionTransfers(tx *tempotx.Tx, request tempo.ChargeRequest) ([]decode
 
 // boundToChallenge reports whether a transfer carries an attribution memo
 // for this challenge's realm and ID. matchTransfers rejects such a memo on
-// every other challenge, so the payment can pay no other.
+// every other challenge of the realm, including one that configures it as
+// its methodDetails.memo or a split memo, so the payment can pay no other.
 func boundToChallenge(transfers []decodedTransfer, realm, challengeID string) bool {
 	for _, transfer := range transfers {
 		if transfer.hasMemo && tempo.VerifyAttributionServer(transfer.memo, realm) && tempo.VerifyAttributionChallenge(transfer.memo, challengeID) {
@@ -1503,6 +1509,9 @@ type expectedTransfer struct {
 	allowAnyMemo bool
 	memo         string
 	recipient    string
+	// requireAttribution requires the attribution memo for the challenge's
+	// realm and ID.
+	requireAttribution bool
 }
 
 type decodedTransfer struct {
@@ -1512,6 +1521,25 @@ type decodedTransfer struct {
 	recipient string
 }
 
+// expectedPushTransfers is expectedTransfers for a push (hash) credential:
+// without a methodDetails.memo, the primary transfer must carry the
+// attribution memo for the challenge's realm and ID. A hash credential proves
+// only that some transfer reached the recipient, and its source is unsigned,
+// so the attribution memo is what ties the transfer to this challenge;
+// otherwise anyone could claim an unrelated transfer's hash.
+func expectedPushTransfers(request tempo.ChargeRequest) []expectedTransfer {
+	transfers := expectedTransfers(request)
+	if request.MethodDetails.Memo == "" {
+		transfers[0].allowAnyMemo = false
+		transfers[0].requireAttribution = true
+	}
+	return transfers
+}
+
+// expectedTransfers returns the transfers a pull (transaction) credential's
+// transaction must make. The server broadcasts the client's own signed
+// transaction, which the chain refuses to include twice, so the attribution
+// memo is optional there.
 func expectedTransfers(request tempo.ChargeRequest) []expectedTransfer {
 	transfers := make([]expectedTransfer, 0, len(request.MethodDetails.Splits)+1)
 	primaryAmount, _ := new(big.Int).SetString(request.Amount, 10)
@@ -1609,7 +1637,25 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 			if !strings.EqualFold(got.recipient, want.recipient) || got.amount != want.amount {
 				continue
 			}
+			if want.requireAttribution {
+				if got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
+					tempo.VerifyAttributionServer(got.memo, realm) && tempo.VerifyAttributionChallenge(got.memo, challengeID) {
+					used[index] = true
+					matched = true
+					break
+				}
+				continue
+			}
 			if want.memo != "" {
+				// A configured memo that is this realm's attribution memo for
+				// another challenge never matches: a payment carrying it is
+				// bound to that challenge, whose replay key may expire (see
+				// boundToChallenge). Another realm's attribution memo, such
+				// as a partner's split memo, still matches.
+				if tempo.IsAttributionMemo(want.memo) && tempo.VerifyAttributionServer(want.memo, realm) &&
+					!tempo.VerifyAttributionChallenge(want.memo, challengeID) {
+					continue
+				}
 				if got.hasMemo && strings.EqualFold(got.memo, want.memo) {
 					used[index] = true
 					matched = true
@@ -1621,7 +1667,7 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 			// attribution memo bound to another challenge or realm. Otherwise
 			// one payment could carry memos for two challenges and pay
 			// both once the first replay marker expires. Memos the server
-			// configured are matched exactly above and are exempt.
+			// configured are matched exactly above.
 			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
 				(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
 				continue
@@ -1650,7 +1696,7 @@ func sortExpectedTransfers(transfers []expectedTransfer) {
 }
 
 func transferPriority(transfer expectedTransfer) int {
-	if transfer.memo != "" {
+	if transfer.memo != "" || transfer.requireAttribution {
 		return 0
 	}
 	if transfer.allowAnyMemo {

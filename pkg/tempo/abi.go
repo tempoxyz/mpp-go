@@ -56,6 +56,10 @@ func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challen
 	default:
 		return false
 	}
+	// Every field must be hex: the memo is compared as text below.
+	if _, err := hex.DecodeString(dataHex); err != nil {
+		return false
+	}
 	toAddress := "0x" + dataHex[8+24:8+64]
 	amount, ok := new(big.Int).SetString(dataHex[72:136], 16)
 	if !ok {

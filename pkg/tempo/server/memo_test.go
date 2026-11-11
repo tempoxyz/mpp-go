@@ -48,41 +48,89 @@ func plainHashCredential(t *testing.T, request tempo.ChargeRequest, memo string)
 	return credential, rpc
 }
 
-func TestChargeFlow_PrimaryAttributionMemoIsOptional(t *testing.T) {
+func TestChargeFlow_PrimaryAttributionMemoIsRequiredForPush(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
 
-	t.Run("hash without memo", func(t *testing.T) {
-		credential, rpc := plainHashCredential(t, request, "")
+	// A hash credential proves only that a transfer reached the recipient,
+	// so without methodDetails.memo it must carry this challenge's
+	// attribution memo: a plain or unrelated transfer could be anyone's.
+	for name, memo := range map[string]string{
+		"without memo":              "",
+		"with non-attribution memo": serverMemo,
+	} {
+		t.Run("hash "+name, func(t *testing.T) {
+			credential, rpc := plainHashCredential(t, request, memo)
+			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+			require.NoError(t, err)
+			_, err = intent.Verify(ctx, credential, request.Map())
+			assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+		})
+	}
+
+	t.Run("hash with attribution memo", func(t *testing.T) {
+		challenge := buildChallenge(t, request)
+		credential, rpc := plainHashCredential(t, request, tempo.EncodeAttribution(testRealm, "", challenge.ID))
+		credential.Challenge = challenge.ToEcho()
 		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 		require.NoError(t, err)
 		receipt, err := intent.Verify(ctx, credential, request.Map())
 		require.NoError(t, err)
 		assert.Equal(t, testReceiptHash, receipt.Reference)
 	})
+}
 
-	t.Run("hash with non-attribution memo", func(t *testing.T) {
-		credential, rpc := plainHashCredential(t, request, serverMemo)
+func TestChargeFlow_PrimaryAttributionMemoIsOptionalForPull(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	t.Run("transaction with non-attribution memo", func(t *testing.T) {
+		// The client carries the challenge's memo; the server verifies
+		// against a request without methodDetails.memo, which accepts a
+		// plain transfer (TestMatchTransfers_PushRequiresAttribution) or any
+		// memo but a mismatched attribution memo, because the server
+		// broadcasts the client's own signed transaction.
+		rpc := newMockRPC(request)
+		credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, withMemo(request, serverMemo)))
+		require.NoError(t, err)
 		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 		require.NoError(t, err)
 		_, err = intent.Verify(ctx, credential, request.Map())
 		require.NoError(t, err)
 	})
 
-	for _, credentialType := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
-		t.Run(string(credentialType)+" with non-attribution memo", func(t *testing.T) {
-			// The client carries the challenge's memo; the server verifies
-			// against a request without one, which accepts any memo but a
-			// mismatched attribution memo.
-			rpc := newMockRPC(request)
-			credential, err := newClientMethod(t, rpc, credentialType).CreateCredential(ctx, buildChallenge(t, withMemo(request, serverMemo)))
-			require.NoError(t, err)
-			intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
-			require.NoError(t, err)
-			_, err = intent.Verify(ctx, credential, request.Map())
-			require.NoError(t, err)
-		})
-	}
+	// A push payment the client made for a challenge with
+	// methodDetails.memo does not pay one without it.
+	rpc := newMockRPC(request)
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeHash).CreateCredential(ctx, buildChallenge(t, withMemo(request, serverMemo)))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+	_, err = intent.Verify(ctx, credential, request.Map())
+	assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+}
+
+// A challenge that configures this realm's attribution memo for another
+// challenge as its methodDetails.memo must not accept the payment bound to
+// that challenge, whose replay key may have expired.
+func TestChargeFlow_ConfiguredMemoNeverRedeemsAnotherChallengesPayment(t *testing.T) {
+	ctx := context.Background()
+	base := buildRequest(t, false, nil)
+	other := tempo.EncodeAttribution(testRealm, "", "earlier-challenge")
+	request := withMemo(base, other)
+	credential, rpc := plainHashCredential(t, request, other)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+	_, err = intent.Verify(ctx, credential, request.Map())
+	assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+
+	// Another realm's attribution memo, such as a partner's, still works.
+	partner := tempo.EncodeAttribution("partner.example.com", "", "partner-challenge")
+	request = withMemo(base, partner)
+	credential, rpc = plainHashCredential(t, request, partner)
+	intent, err = NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
 }
 
 func TestChargeFlow_RejectsAttributionMemoForAnotherChallenge(t *testing.T) {
@@ -201,13 +249,16 @@ func TestReplayClaimsPersistWithoutChallengeBoundMemo(t *testing.T) {
 		assert.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
 	}
 
-	t.Run("hash without memo", func(t *testing.T) {
-		credential, rpc := plainHashCredential(t, request, "")
+	t.Run("hash with methodDetails.memo", func(t *testing.T) {
+		memoRequest := withMemo(request, serverMemo)
+		credential, rpc := plainHashCredential(t, memoRequest, serverMemo)
 		intent, store := newIntent(rpc)
-		assertPersisted(t, intent, store, credential, request)
+		assertPersisted(t, intent, store, credential, memoRequest)
 	})
-	t.Run("hash with non-attribution memo", func(t *testing.T) {
-		credential, rpc := plainHashCredential(t, request, serverMemo)
+	t.Run("plain transaction", func(t *testing.T) {
+		rpc := newMockRPC(request)
+		credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, withMemo(request, serverMemo)))
+		require.NoError(t, err)
 		intent, store := newIntent(rpc)
 		assertPersisted(t, intent, store, credential, request)
 	})
@@ -249,4 +300,35 @@ func TestProofReplayIsRejectedBeforeSignatureVerification(t *testing.T) {
 	_, err = intent.Validate(ctx, &replay, request.Map())
 	require.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
 	assert.ErrorContains(t, err, "proof credential already used")
+}
+
+func TestMatchTransfers_PushRequiresAttribution(t *testing.T) {
+	t.Parallel()
+	const challengeID = "challenge-1"
+	request := tempo.ChargeRequest{Amount: "1000000", Recipient: testRecipient}
+	transfer := func(memo string) []decodedTransfer {
+		return []decodedTransfer{{amount: "1000000", recipient: testRecipient, hasMemo: memo != "", memo: memo}}
+	}
+	bound := tempo.EncodeAttribution(testRealm, "", challengeID)
+	for name, tt := range map[string]struct {
+		memo       string
+		pull, push bool
+	}{
+		"plain":           {"", true, false},
+		"custom":          {serverMemo, true, false},
+		"bound":           {bound, true, true},
+		"other challenge": {tempo.EncodeAttribution(testRealm, "", "other"), false, false},
+		"other realm":     {tempo.EncodeAttribution("other.example.com", "", challengeID), false, false},
+	} {
+		assert.Equal(t, tt.pull, matchTransfers(transfer(tt.memo), expectedTransfers(request), testRealm, challengeID), "pull/%s", name)
+		assert.Equal(t, tt.push, matchTransfers(transfer(tt.memo), expectedPushTransfers(request), testRealm, challengeID), "push/%s", name)
+	}
+
+	// With methodDetails.memo, both require exactly that memo.
+	request.MethodDetails.Memo = serverMemo
+	for _, expected := range [][]expectedTransfer{expectedTransfers(request), expectedPushTransfers(request)} {
+		assert.True(t, matchTransfers(transfer(serverMemo), expected, testRealm, challengeID))
+		assert.False(t, matchTransfers(transfer(bound), expected, testRealm, challengeID))
+		assert.False(t, matchTransfers(transfer(""), expected, testRealm, challengeID))
+	}
 }
