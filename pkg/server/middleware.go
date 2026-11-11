@@ -137,15 +137,18 @@ func serveVerified(next http.Handler, w http.ResponseWriter, r *http.Request, cr
 	// rather than failing the request.
 	header, _ := mpp.FormatReceiptWithError(receipt)
 	ctx := ContextWithPayment(r.Context(), credential, receipt)
-	wrapped, complete := deferPaymentReceiptHeader(w, header)
+	wrapped := &paymentReceiptWriter{ResponseWriter: w, receipt: header}
 	next.ServeHTTP(wrapped, r.WithContext(ctx))
-	complete()
+	if !wrapped.wroteHeader && !wrapped.hijacked {
+		wrapped.WriteHeader(http.StatusOK)
+	}
 }
 
 // DeferPaymentReceipt returns a writer that adds the receipt only when a
 // 2xx response status is committed. Call complete after the handler
-// returns to commit an otherwise empty successful response. A receipt
-// mpp.FormatReceiptWithError rejects is left out.
+// returns to stage the receipt for an otherwise empty successful response. All
+// later status writes must use the returned writer, including framework error
+// handlers. A receipt mpp.FormatReceiptWithError rejects is left out.
 func DeferPaymentReceipt(w http.ResponseWriter, receipt *mpp.Receipt) (http.ResponseWriter, func()) {
 	header, _ := mpp.FormatReceiptWithError(receipt)
 	return deferPaymentReceiptHeader(w, header)
@@ -155,7 +158,10 @@ func deferPaymentReceiptHeader(w http.ResponseWriter, receipt string) (http.Resp
 	wrapped := &paymentReceiptWriter{ResponseWriter: w, receipt: receipt}
 	return wrapped, func() {
 		if !wrapped.wroteHeader && !wrapped.hijacked {
-			wrapped.WriteHeader(http.StatusOK)
+			// Outer middleware may still have a buffered status to flush.
+			// Stage headers for net/http's implicit 200 without committing it;
+			// a later WriteHeader can still remove the receipt on failure.
+			setPaymentReceiptForStatus(wrapped.Header(), http.StatusOK, wrapped.receipt)
 		}
 	}
 }

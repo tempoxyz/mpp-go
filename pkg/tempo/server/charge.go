@@ -1035,7 +1035,7 @@ func (i *Intent) broadcastTransaction(
 				}
 			}
 			tolerateOutOfGas := simulated.Gas-tx.Gas < sponsoredSimulationGasBuffer
-			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, sponsorAddress, tolerateOutOfGas); err != nil {
+			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, tx, sponsorAddress, tolerateOutOfGas); err != nil {
 				return nil, err
 			}
 		} else {
@@ -1843,7 +1843,19 @@ func simulateSponsoredSenderExecution(ctx context.Context, rpc tempo.RPCClient, 
 	delete(callObject, "feeToken")
 	delete(callObject, "maxFeePerGas")
 	delete(callObject, "maxPriorityFeePerGas")
-	return simulateCall(ctx, rpc, callObject)
+	response, err := rpc.SendRequest(ctx, "eth_call", callObject, "latest")
+	if err != nil {
+		return mpp.ErrVerificationFailed("transaction preflight failed")
+	}
+	if err := response.CheckError(); err != nil {
+		return paymentSimulationFailed(&PaymentSimulationError{
+			Phase:        SimulationPhaseSender,
+			Sender:       tx.From,
+			PaymentToken: simulationPaymentToken(tx),
+			Err:          err,
+		})
+	}
+	return nil
 }
 
 // sponsoredSimulationGasBuffer is the most gas a local fee payer's
@@ -1922,10 +1934,11 @@ func simulateSponsoredTransactionExecution(
 	ctx context.Context,
 	rpc tempo.RPCClient,
 	tx *tempotx.Tx,
+	senderTx *tempotx.Tx,
 	feePayer common.Address,
 	tolerateOutOfGas bool,
 ) error {
-	callObject, err := transactionCallObject(tx)
+	callObject, err := transactionCallObject(tx, senderTx)
 	if err != nil {
 		return mpp.ErrVerificationFailed("transaction preflight failed")
 	}
@@ -1941,9 +1954,91 @@ func simulateSponsoredTransactionExecution(
 		if tolerateOutOfGas && isOutOfGasError(err) {
 			return nil
 		}
-		return mpp.ErrVerificationFailed("transaction preflight failed")
+		return paymentSimulationFailed(&PaymentSimulationError{
+			Phase:        SimulationPhaseSponsored,
+			Sender:       tx.From,
+			FeePayer:     &feePayer,
+			PaymentToken: simulationPaymentToken(tx),
+			Err:          err,
+		})
 	}
 	return nil
+}
+
+// SimulationPhase names the preflight simulation of a fee-sponsored
+// transaction that failed.
+type SimulationPhase string
+
+const (
+	// SimulationPhaseSender is the simulation of the sender's calls before
+	// sponsorship, without any fee payer.
+	SimulationPhaseSender SimulationPhase = "sender"
+	// SimulationPhaseSponsored is the simulation of the final sponsored
+	// transaction, billed to its fee payer.
+	SimulationPhaseSponsored SimulationPhase = "sponsored"
+)
+
+// PaymentSimulationError reports a fee-sponsored transaction whose preflight
+// simulation the node rejected, such as a revert or an insufficient fee token
+// balance, as mppx's PaymentSimulationError. It is the cause of the
+// verification-failed "transaction preflight failed" error the charge returns,
+// so the problem details sent to clients are unchanged; reach it with
+// errors.As. Transport failures that never got the node's answer are not
+// reported as one.
+type PaymentSimulationError struct {
+	// Phase is the simulation that failed.
+	Phase SimulationPhase
+	// Sender is the sender of the simulated transaction.
+	Sender common.Address
+	// FeePayer is the fee payer the sponsored simulation billed: set only in
+	// SimulationPhaseSponsored.
+	FeePayer *common.Address
+	// PaymentToken is the TIP-20 token of the transaction's call when it is a
+	// single transfer or transferWithMemo call, and nil otherwise.
+	PaymentToken *common.Address
+	// Err is the node's simulation error.
+	Err error
+}
+
+func (e *PaymentSimulationError) Error() string {
+	if e.Err == nil {
+		return "payment simulation failed (" + string(e.Phase) + ")"
+	}
+	return "payment simulation failed (" + string(e.Phase) + "): " + e.Err.Error()
+}
+
+// Unwrap returns the node's simulation error.
+func (e *PaymentSimulationError) Unwrap() error {
+	return e.Err
+}
+
+// Is reports whether target is mpp.ErrVerification, so a tagged preflight
+// failure still matches errors.Is(err, mpp.ErrVerification) as the untagged
+// one did.
+func (e *PaymentSimulationError) Is(target error) bool {
+	return target == mpp.ErrVerification
+}
+
+// paymentSimulationFailed returns the verification-failed preflight error with
+// simulation as its cause.
+func paymentSimulationFailed(simulation *PaymentSimulationError) error {
+	return mpp.ErrVerificationFailed("transaction preflight failed").WithCause(simulation)
+}
+
+// simulationPaymentToken returns the token of tx's call when tx is a single
+// TIP-20 transfer or transferWithMemo call, as mppx's preflightSponsorship
+// does, and nil otherwise.
+func simulationPaymentToken(tx *tempotx.Tx) *common.Address {
+	if len(tx.Calls) != 1 || tx.Calls[0].To == nil || len(tx.Calls[0].Data) < 4 {
+		return nil
+	}
+	switch common.Bytes2Hex(tx.Calls[0].Data[:4]) {
+	case tempo.TransferSelector, tempo.TransferWithMemoSelector:
+		token := *tx.Calls[0].To
+		return &token
+	default:
+		return nil
+	}
 }
 
 // isOutOfGasError reports whether err is a JSON-RPC error from the node
@@ -2015,7 +2110,7 @@ func simulateCall(ctx context.Context, rpc tempo.RPCClient, callObject map[strin
 // transactionCallObject renders tx as an eth_call request without its
 // signatures (simulateSponsoredTransactionExecution adds the fee payer's), with its keyAuthorization as viem formats it (ox
 // KeyAuthorization.toRpc), as mppx simulates a transaction.
-func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
+func transactionCallObject(tx *tempotx.Tx, senderTransactions ...*tempotx.Tx) (map[string]any, error) {
 	callObject := map[string]any{
 		"accessList":           accessListCallObject(tx.AccessList),
 		"calls":                callsCallObject(tx.Calls),
@@ -2025,6 +2120,19 @@ func transactionCallObject(tx *tempotx.Tx) (map[string]any, error) {
 		"maxFeePerGas":         hexBig(tx.MaxFeePerGas),
 		"maxPriorityFeePerGas": hexBig(tx.MaxPriorityFeePerGas),
 		"nonce":                hexutil.EncodeUint64(tx.Nonce),
+	}
+	// A simulation-only gas adjustment invalidates the original signature.
+	// Recover the key from the actual sender-signed transaction, never that copy.
+	senderTx := tx
+	if len(senderTransactions) > 0 {
+		senderTx = senderTransactions[0]
+	}
+	keyID, err := transactionAccessKey(senderTx)
+	if err != nil {
+		return nil, err
+	}
+	if keyID != nil {
+		callObject["keyId"] = keyID.Hex()
 	}
 	if tx.NonceKey != nil {
 		callObject["nonceKey"] = hexBig(tx.NonceKey)

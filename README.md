@@ -280,7 +280,7 @@ router.GET("/paid", ginadapter.ChargeMiddleware(payment, server.ChargeParams{
 Echo route middleware:
 
 ```go
-e.GET("/paid", func(c echo.Context) error {
+e.GET("/paid", func(c *echo.Context) error {
 	credential := echoadapter.Credential(c)
 	receipt := echoadapter.Receipt(c)
 	return c.JSON(http.StatusOK, map[string]any{

@@ -21,6 +21,7 @@ import (
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
+	"github.com/tempoxyz/mpp-go/pkg/mcp/internal/payment"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -33,6 +34,23 @@ const methodCallTool = "tools/call"
 // payment. It is client.ErrPaymentDeclined, which the HTTP client returns
 // when an OnChallenge hook declines, so errors.Is matches either.
 var ErrPaymentDeclined = mppclient.ErrPaymentDeclined
+
+// ErrPaymentReconciliationRequired indicates a submitted transfer must be reconciled
+// before retrying a tool call. Use errors.As to obtain its ReconciliationError.
+var ErrPaymentReconciliationRequired = errors.New("mpp: reconcile the sent payment before paying another challenge")
+
+// ReconciliationError preserves the submitted hash or zone Credential and the
+// server failure.
+// A caller must reconcile Credential before attempting a new payment.
+type ReconciliationError struct {
+	Credential *mpp.Credential
+	Cause      error
+}
+
+func (e *ReconciliationError) Error() string { return ErrPaymentReconciliationRequired.Error() }
+func (e *ReconciliationError) Unwrap() error {
+	return errors.Join(ErrPaymentReconciliationRequired, e.Cause)
+}
 
 // OnPaymentRequired approves a payment before a Credential is created for
 // challenge. Returning false declines it.
@@ -143,18 +161,38 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		// twice. Only an invalid-payload rejection discards the Credential.
 		credentials := make(map[credentialKey]*mpp.Credential)
 		var sent credentialKey
-		// pushSent records that a push credential (a Tempo hash or zone
-		// credential, whose payment is already on chain) was submitted: as
-		// in the HTTP Transport, the call may then only resend it, never pay
-		// a new Challenge, which would pay twice.
-		pushSent := false
+		// sentPush is the last push credential (a Tempo hash or zone
+		// credential, whose payment is already on chain) submitted for this
+		// call, by the caller or by this middleware: as in the HTTP
+		// Transport, the call may then only resend it, never pay a new
+		// Challenge, which would pay twice.
+		var sentPush *mpp.Credential
+		authorization, parseErr := payment.Authorization(params.Meta)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if authorization != "" {
+			credential, parseErr := mpp.ParseCredential(authorization)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if isPushCredential(credential) {
+				sentPush = credential
+			}
+		}
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
 			data, invalidPayload, ok := paymentRequired(result, err)
-			if !ok || attempt == maxPaymentAttempts {
+			if !ok {
+				if sentPush != nil && err != nil {
+					return result, &ReconciliationError{Credential: sentPush, Cause: err}
+				}
 				return result, err
 			}
-			if pushSent && invalidPayload {
+			if attempt == maxPaymentAttempts {
+				if sentPush != nil {
+					return result, &ReconciliationError{Credential: sentPush, Cause: err}
+				}
 				return result, err
 			}
 			if invalidPayload {
@@ -164,15 +202,17 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, payErr := config.pay(ctx, session, params, data, credentials, pushSent, cause)
-			if errors.Is(payErr, errPushCredentialSpent) {
-				return result, err
+			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause, sentPush != nil)
+			if payErr != nil && sentPush != nil {
+				return result, &ReconciliationError{Credential: sentPush, Cause: errors.Join(err, payErr)}
 			}
 			if payErr != nil {
 				return nil, payErr
 			}
 			sent = key
-			pushSent = pushSent || isPushCredential(credentials[key])
+			if credential := credentials[key]; isPushCredential(credential) {
+				sentPush = credential
+			}
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}
 	}
@@ -195,10 +235,6 @@ func newCredentialKey(challenge *mpp.Challenge) (credentialKey, error) {
 	return credentialKey{id: challenge.ID, method: challenge.Method, intent: challenge.Intent, challenge: string(encoded)}, nil
 }
 
-// errPushCredentialSpent is pay's answer when reuseOnly is set and the
-// selected Challenge has no Credential to resend.
-var errPushCredentialSpent = errors.New("mpp: a push credential was already submitted for this call")
-
 // isPushCredential reports whether a credential names a payment the client
 // already made on chain: a Tempo hash or zone credential.
 func isPushCredential(credential *mpp.Credential) bool {
@@ -214,17 +250,17 @@ func isPushCredential(credential *mpp.Credential) bool {
 
 // pay selects a Challenge, approves and pays it (or reuses the Credential
 // already created for it), and returns a copy of the original call's params
-// with the Credential in their metadata. With reuseOnly, it only resends a
-// Credential already created and returns errPushCredentialSpent instead of
-// creating one.
+// with the Credential in their metadata. With pushSent, it only resends a
+// Credential already created and returns ErrPaymentReconciliationRequired
+// instead of creating one.
 func (config *Config) pay(
 	ctx context.Context,
 	session *mcp.ClientSession,
 	original *mcp.CallToolParams,
 	data *mpp.MCPPaymentRequiredData,
 	credentials map[credentialKey]*mpp.Credential,
-	reuseOnly bool,
 	cause error,
+	pushSent bool,
 ) (*mcp.CallToolParams, credentialKey, error) {
 	offered := make([]mpp.Challenge, 0, len(data.Challenges))
 	for _, challenge := range data.Challenges {
@@ -278,8 +314,11 @@ func (config *Config) pay(
 	if credential, ok := credentials[key]; ok {
 		return withCredential(original, credential), key, nil
 	}
-	if reuseOnly {
-		return nil, credentialKey{}, errPushCredentialSpent
+	// A hash or zone credential proves an already-broadcast payment. A fresh
+	// challenge (or a rejected payload) must not create another payment for
+	// the same tool call.
+	if pushSent {
+		return nil, credentialKey{}, ErrPaymentReconciliationRequired
 	}
 
 	approve := config.OnPaymentRequired
