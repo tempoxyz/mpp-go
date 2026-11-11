@@ -296,6 +296,19 @@ func (i *Intent) Validate(
 	if err != nil {
 		return nil, err
 	}
+	// Broadcast checks the fee payer deadline only after it looks up whether
+	// a retry of a transaction this server broadcast already landed, so a
+	// late retry of a paid request still settles. Validate never settles, so
+	// it reports the deadline here.
+	if validated.payload.Type == tempo.CredentialTypeTransaction && validated.request.MethodDetails.FeePayer {
+		tx, _, err := deserializeTransactionCredential(validated.payload.Signature)
+		if err != nil {
+			return nil, mpp.ErrInvalidPayload("failed to deserialize transaction payload")
+		}
+		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
+			return nil, err
+		}
+	}
 	mode := string(tempo.ChargeModePull)
 	if validated.payload.Type == tempo.CredentialTypeHash {
 		mode = string(tempo.ChargeModePush)
@@ -612,9 +625,6 @@ func (i *Intent) validateTransaction(
 		}
 		if !tx.AwaitingFeePayer {
 			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
-		}
-		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
-			return err
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")

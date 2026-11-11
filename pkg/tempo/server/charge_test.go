@@ -1469,9 +1469,11 @@ func TestChargeFlow_FeePayerRetrySettlesOwnIncludedBroadcast(t *testing.T) {
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
-// A sponsored retry that arrives after its fee payer deadline fails it,
-// whether or not its transaction landed.
-func TestChargeFlow_FeePayerRetryRejectedAfterDeadline(t *testing.T) {
+// A sponsored retry that arrives after its fee payer deadline settles a
+// transaction this server broadcast that landed, and is rejected when its
+// transaction never landed. Validate, which never settles, reports the
+// deadline.
+func TestChargeFlow_FeePayerRetryAfterDeadline(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
 	rpc := newMockRPC(request)
@@ -1498,9 +1500,10 @@ func TestChargeFlow_FeePayerRetryRejectedAfterDeadline(t *testing.T) {
 	rpc.onCall = drainedBalanceCall
 	_, err = intent.Validate(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "remaining validity")
-	_, err = intent.Verify(ctx, credential, request.Map())
-	require.ErrorContains(t, err, "remaining validity")
+	receipt, err := intent.Verify(ctx, credential, request.Map())
+	require.NoError(t, err)
 	require.Len(t, rpc.sentRawTxs, 1)
+	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
 
 	// The same late credential is rejected when its transaction never landed.
 	unsentRPC := newMockRPC(request)
