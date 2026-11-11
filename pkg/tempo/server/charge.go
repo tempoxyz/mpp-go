@@ -1070,6 +1070,15 @@ func (i *Intent) broadcastTransaction(
 		i.forgetBroadcast(storeCtx, hash, client)
 	}
 	if txHash, err = rpc.SendRawTransaction(ctx, serialized); err != nil {
+		// A first broadcast of an unsponsored transaction that the node
+		// already holds was submitted by someone else: another server, or
+		// anyone who saw it pending. Its receipt proves nothing for this
+		// credential unless a transfer carries this challenge's attribution
+		// memo, and this attempt's record must not let a retry settle it.
+		if isDuplicateSubmission(err) && recordedHash && !request.MethodDetails.FeePayer && !validated.challengeBound {
+			forgetRefused()
+			return nil, mpp.ErrVerificationFailed("transaction was already submitted elsewhere")
+		}
 		// The node may have included the transaction before its RPC reply
 		// failed, or hold it from a pending earlier broadcast. The check
 		// above saw it not yet on chain, so a receipt found now is for a
@@ -1079,8 +1088,7 @@ func (i *Intent) broadcastTransaction(
 			// A node that already holds the transaction, such as one an
 			// earlier attempt broadcast that is still pending, may include
 			// it later.
-			var rpcErr *temporpc.JSONRPCError
-			if isDuplicateSubmission(err) || !errors.As(err, &rpcErr) {
+			if !isBroadcastRefused(err) {
 				return nil, broadcastOutcomeUnknown(credential.Challenge.ID)
 			}
 			// The node refused the transaction, which may be because it is
@@ -1398,8 +1406,7 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 	// JSON-RPC error means the node answered and rejected it, so check once,
 	// unless it rejected a duplicate of a transaction it already holds.
 	attempts := receiptRetryAttempts
-	var rpcErr *temporpc.JSONRPCError
-	if errors.As(sendErr, &rpcErr) && !isDuplicateSubmission(sendErr) {
+	if isBroadcastRefused(sendErr) {
 		attempts = 1
 	}
 	// The send may have failed because ctx ended; the lookup still needs to run.
@@ -1424,6 +1431,23 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 		}
 	}
 	return "", nil, false
+}
+
+// isBroadcastRefused reports whether eth_sendRawTransaction failed with the
+// node's definite rejection of the transaction: a JSON-RPC error that is not
+// a duplicate of a transaction it already holds, an internal error (-32603),
+// EIP-7966's timeout (code 4) or a proxy's timeout, after any of which the
+// transaction may still land.
+func isBroadcastRefused(err error) bool {
+	var rpcErr *temporpc.JSONRPCError
+	if !errors.As(err, &rpcErr) || isDuplicateSubmission(err) {
+		return false
+	}
+	if rpcErr.Code == -32603 || rpcErr.Code == 4 {
+		return false
+	}
+	message := strings.ToLower(rpcErr.Message)
+	return !strings.Contains(message, "timeout") && !strings.Contains(message, "timed out")
 }
 
 // isDuplicateSubmission reports whether eth_sendRawTransaction failed because
@@ -1563,7 +1587,10 @@ func (i *Intent) forgetBroadcast(ctx context.Context, hash, clientHash string) {
 // until the credential's challenge can no longer be accepted when the Store
 // supports expiry, and otherwise until it is deleted.
 func (i *Intent) putUntilChallengeExpiry(ctx context.Context, credential *mpp.Credential, key, value string) (bool, error) {
-	if store, ok := i.store.(tempo.ExpiringStore); ok {
+	// Expiring writes need ExpireReplayKeys, as for replay claims: a Store
+	// may implement them with commands its backend lacks (redisstore's SET
+	// EXAT needs Redis 6.2).
+	if store, ok := i.store.(tempo.ExpiringStore); ok && i.expireReplayKeys {
 		if expiresAt, ok := replayClaimExpiry(credential); ok {
 			return store.PutIfAbsentUntil(ctx, key, value, expiresAt)
 		}

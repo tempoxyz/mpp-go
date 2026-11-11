@@ -2937,3 +2937,80 @@ func TestBroadcastOutcomeUnknownDoesNotExposeTransportDetails(t *testing.T) {
 		t.Fatalf("transport detail leaked: %s", paymentErr.Detail)
 	}
 }
+
+// A first broadcast of an unsponsored transaction without this challenge's
+// attribution memo that the node already holds was submitted by someone
+// else, such as a payer's own pending transaction copied from the mempool:
+// it is not settled, and once it lands a retry is refused as already on
+// chain.
+func TestChargeFlow_UnboundDuplicateFirstBroadcastIsNotSettled(t *testing.T) {
+	ctx := context.Background()
+	request := buildRequest(t, false, nil)
+	rpc := newMockRPC(request)
+	var receipt map[string]any
+	rpc.onSend = func(raw string) (string, map[string]any, error) {
+		tx, err := deserializeTestTx(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		sender, err := tempotx.VerifySignature(tx)
+		if err != nil {
+			return "", nil, err
+		}
+		receipt = buildReceipt(raw, request, sender)
+		return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", &temporpc.JSONRPCError{Code: -32000, Message: "already known"})
+	}
+	rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+		if receipt == nil {
+			return &temporpc.JSONRPCResponse{}, nil
+		}
+		return &temporpc.JSONRPCResponse{Result: receipt}, nil
+	}
+	// The client's transfer carries a non-attribution memo, which a
+	// challenge without methodDetails.memo accepts but which binds nothing.
+	credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, withMemo(request, serverMemo)))
+	require.NoError(t, err)
+	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	require.ErrorContains(t, err, "submitted elsewhere")
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "already on chain")
+	assert.Len(t, rpc.sentRawTxs, 1)
+}
+
+// A JSON-RPC internal error or timeout from the send says nothing about
+// whether the node admitted the transaction, so its outcome is unknown and
+// the broadcast record stays for a retry.
+func TestChargeFlow_AmbiguousSendErrorIsOutcomeUnknown(t *testing.T) {
+	for name, rpcErr := range map[string]*temporpc.JSONRPCError{
+		"internal error": {Code: -32603, Message: "internal error"},
+		"timeout":        {Code: -32000, Message: "request timed out"},
+		"eip-7966":       {Code: 4, Message: "transaction not included"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, false, nil)
+			rpc := newMockRPC(request)
+			rpc.onSend = func(string) (string, map[string]any, error) {
+				return "", nil, fmt.Errorf("eth_sendRawTransaction: %w", rpcErr)
+			}
+			rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+				return &temporpc.JSONRPCResponse{}, nil
+			}
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			store := tempo.NewMemoryStore()
+			intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc})
+			require.NoError(t, err)
+
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+			_, exists, err := store.Get(ctx, broadcastStoreKey(mustTxHash(rpc.sentRawTxs[0])))
+			require.NoError(t, err)
+			assert.True(t, exists)
+		})
+	}
+}
