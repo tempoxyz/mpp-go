@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -336,4 +337,69 @@ func TestMatchTransfers_PushRequiresAttribution(t *testing.T) {
 		assert.False(t, matchTransfers(transfer(bound), expected, testRealm, challengeID))
 		assert.False(t, matchTransfers(transfer(""), expected, testRealm, challengeID))
 	}
+}
+
+// A pull payment's broadcast transaction is recorded under the same replay
+// key push (hash) credentials check, so a transaction settled for one
+// challenge can't be redeemed as a push credential for another, even one
+// whose static methodDetails.memo the transfer satisfies.
+func TestChargeFlow_PullSettledHashCannotPayAnotherChallengeAsPush(t *testing.T) {
+	for _, feePayer := range []bool{false, true} {
+		t.Run(map[bool]string{false: "transaction", true: "sponsored"}[feePayer], func(t *testing.T) {
+			testPullSettledHashCannotPayAnotherChallengeAsPush(t, feePayer)
+		})
+	}
+}
+
+func testPullSettledHashCannotPayAnotherChallengeAsPush(t *testing.T, feePayer bool) {
+	ctx := context.Background()
+	request := withMemo(buildRequest(t, feePayer, nil), serverMemo)
+	pushRequest := withMemo(buildRequest(t, false, nil), serverMemo)
+	rpc := newMockRPC(request)
+	store := tempo.NewMemoryStore()
+	config := IntentConfig{Store: store, RPC: rpc}
+	if feePayer {
+		config.FeePayerPrivateKey = feePayerKey
+	}
+	intent, err := NewIntent(config)
+	require.NoError(t, err)
+
+	pull, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+	require.NoError(t, err)
+	receipt, err := intent.Verify(ctx, pull, request.Map())
+	require.NoError(t, err)
+	txHash := receipt.Reference
+
+	// The same transaction, presented as a push credential for another
+	// challenge, satisfies its transfer and memo checks.
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	sender := signer.Address().Hex()
+	amount, ok := new(big.Int).SetString(request.Amount, 10)
+	require.True(t, ok)
+	rpc.receipts[txHash] = map[string]any{"status": "0x1", "logs": []any{
+		transferLog(request.Currency, sender, request.Recipient, amount, ""),
+		transferLog(request.Currency, sender, request.Recipient, amount, serverMemo),
+	}}
+	other := mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, pushRequest.Map(),
+		mpp.WithExpires(mpp.ExpiresIn(10*time.Minute)))
+	require.NotEqual(t, pull.Challenge.ID, other.ID)
+	push := other.NewCredential(
+		map[string]any{"type": "hash", "hash": txHash},
+		mpp.WithCredentialSource("did:pkh:eip155:42431:"+sender),
+	)
+
+	// A server that never counted the transaction would accept it.
+	fresh, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
+	_, err = fresh.Verify(ctx, push, pushRequest.Map())
+	require.NoError(t, err)
+
+	// This one counted it for the pull credential and refuses it.
+	_, err = intent.Verify(ctx, push, pushRequest.Map())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "transaction hash already used")
+	_, exists, err := store.Get(ctx, tempo.ChargeStoreKey(txHash))
+	require.NoError(t, err)
+	assert.True(t, exists)
 }
