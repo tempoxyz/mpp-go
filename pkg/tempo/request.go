@@ -70,7 +70,9 @@ type MethodDetails struct {
 	FeePayerURL string
 	// Memo is the 32-byte hex Tempo memo the primary transfer must carry,
 	// set by the server. When empty, clients attach an attribution memo,
-	// which servers accept but do not require.
+	// which servers require of push (hash) credentials and accept but do
+	// not require of pull (transaction) credentials. Servers accept only
+	// pull credentials when it is set.
 	Memo string
 	// Splits lists any additional transfers included in the charge.
 	Splits []Split

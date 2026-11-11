@@ -116,22 +116,78 @@ func TestChargeFlow_PrimaryAttributionMemoIsOptionalForPull(t *testing.T) {
 func TestChargeFlow_ConfiguredMemoNeverRedeemsAnotherChallengesPayment(t *testing.T) {
 	ctx := context.Background()
 	base := buildRequest(t, false, nil)
-	other := tempo.EncodeAttribution(testRealm, "", "earlier-challenge")
-	request := withMemo(base, other)
-	credential, rpc := plainHashCredential(t, request, other)
-	intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
-	require.NoError(t, err)
-	_, err = intent.Verify(ctx, credential, request.Map())
-	assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	verify := func(memo string) error {
+		request := withMemo(base, memo)
+		rpc := newMockRPC(request)
+		credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+		require.NoError(t, err)
+		intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+		require.NoError(t, err)
+		_, err = intent.Verify(ctx, credential, request.Map())
+		return err
+	}
+	assert.ErrorContains(t, verify(tempo.EncodeAttribution(testRealm, "", "earlier-challenge")), "does not contain a matching Tempo transfer")
 
 	// Another realm's attribution memo, such as a partner's, still works.
-	partner := tempo.EncodeAttribution("partner.example.com", "", "partner-challenge")
-	request = withMemo(base, partner)
-	credential, rpc = plainHashCredential(t, request, partner)
-	intent, err = NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, verify(tempo.EncodeAttribution("partner.example.com", "", "partner-challenge")))
+}
+
+// A configured methodDetails.memo is shared by every payer on the route, so
+// it cannot tie an unsigned hash credential to one challenge: hash
+// credentials are refused on such routes, even for a transfer that carries
+// the memo.
+func TestChargeFlow_HashCredentialRejectedWithMethodDetailsMemo(t *testing.T) {
+	ctx := context.Background()
+	request := withMemo(buildRequest(t, false, nil), serverMemo)
+	credential, rpc := plainHashCredential(t, request, serverMemo)
+	store := tempo.NewMemoryStore()
+	intent, err := NewIntent(IntentConfig{Store: store, RPC: rpc})
 	require.NoError(t, err)
 	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	assert.ErrorContains(t, err, "hash credentials are not accepted when methodDetails.memo is set")
+	_, err = intent.Validate(ctx, credential, request.Map())
+	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	// The transfer stays unclaimed for its payer's own credential.
+	_, exists, err := store.Get(ctx, tempo.ChargeStoreKey(testReceiptHash))
 	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestBuildChargeRequestMemoOffersOnlyPull(t *testing.T) {
+	newTestMethod := func(modes ...tempo.ChargeMode) *Method {
+		return newMethod(methodConfig{Intent: testStoredIntent(),
+			Currencies:     []string{testCurrency},
+			Recipient:      testRecipient,
+			Decimals:       6,
+			ChainID:        42431,
+			SupportedModes: modes,
+		})
+	}
+	modes := func(requestMap map[string]any) any {
+		return requestMap["methodDetails"].(map[string]any)["supportedModes"]
+	}
+
+	requestMap, err := newTestMethod().BuildChargeRequest(server.ChargeParams{Amount: "0.50", Memo: serverMemo})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pull"}, modes(requestMap))
+
+	requestMap, err = newTestMethod(tempo.ChargeModePush, tempo.ChargeModePull).BuildChargeRequest(server.ChargeParams{Amount: "0.50", Memo: serverMemo})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pull"}, modes(requestMap))
+
+	_, err = newTestMethod().BuildChargeRequest(server.ChargeParams{Amount: "0.50", Memo: serverMemo, SupportedModes: []tempo.ChargeMode{tempo.ChargeModePush}})
+	assert.ErrorContains(t, err, "ChargeParams.Memo cannot be combined with push-only SupportedModes")
+	_, err = newTestMethod(tempo.ChargeModePush).BuildChargeRequest(server.ChargeParams{Amount: "0.50", Memo: serverMemo})
+	assert.ErrorContains(t, err, "ChargeParams.Memo cannot be combined with push-only SupportedModes")
+
+	// Without a memo, push mode stays available.
+	requestMap, err = newTestMethod().BuildChargeRequest(server.ChargeParams{Amount: "0.50"})
+	require.NoError(t, err)
+	assert.Nil(t, modes(requestMap))
+	requestMap, err = newTestMethod(tempo.ChargeModePush).BuildChargeRequest(server.ChargeParams{Amount: "0.50"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"push"}, modes(requestMap))
 }
 
 func TestChargeFlow_RejectsAttributionMemoForAnotherChallenge(t *testing.T) {
@@ -171,7 +227,7 @@ func TestChargeFlow_RejectsAttributionMemoForAnotherChallenge(t *testing.T) {
 func TestChargeFlow_MethodDetailsMemoIsRequiredExactly(t *testing.T) {
 	ctx := context.Background()
 	base := buildRequest(t, false, nil)
-	for _, credentialType := range []tempo.CredentialType{tempo.CredentialTypeTransaction, tempo.CredentialTypeHash} {
+	for _, credentialType := range []tempo.CredentialType{tempo.CredentialTypeTransaction} {
 		t.Run(string(credentialType), func(t *testing.T) {
 			request := withMemo(base, serverMemo)
 			verify := func(challengeRequest tempo.ChargeRequest) error {
@@ -201,11 +257,8 @@ func TestChargeFlow_MethodDetailsMemoIsRequiredExactly(t *testing.T) {
 	assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
 
 	// The server memo is compared case-insensitively.
-	credential, rpc = plainHashCredential(t, request, "0x"+strings.Repeat("AB", 32))
-	intent, err = NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
-	require.NoError(t, err)
-	_, err = intent.Verify(ctx, credential, request.Map())
-	require.NoError(t, err)
+	upper := []decodedTransfer{{amount: request.Amount, recipient: request.Recipient, hasMemo: true, memo: "0x" + strings.Repeat("AB", 32)}}
+	assert.True(t, matchTransfers(upper, expectedTransfers(request), testRealm, "challenge-1"))
 }
 
 func TestBuildChargeRequestCarriesMemo(t *testing.T) {
@@ -250,12 +303,6 @@ func TestReplayClaimsPersistWithoutChallengeBoundMemo(t *testing.T) {
 		assert.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
 	}
 
-	t.Run("hash with methodDetails.memo", func(t *testing.T) {
-		memoRequest := withMemo(request, serverMemo)
-		credential, rpc := plainHashCredential(t, memoRequest, serverMemo)
-		intent, store := newIntent(rpc)
-		assertPersisted(t, intent, store, credential, memoRequest)
-	})
 	t.Run("plain transaction", func(t *testing.T) {
 		rpc := newMockRPC(request)
 		credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, withMemo(request, serverMemo)))
@@ -325,19 +372,22 @@ func TestMatchTransfers_PushRequiresAttribution(t *testing.T) {
 		assert.Equal(t, tt.push, matchTransfers(transfer(tt.memo), expectedPushTransfers(request), testRealm, challengeID), "push/%s", name)
 	}
 
-	// With methodDetails.memo, both require exactly that memo.
+	// With methodDetails.memo, pull requires exactly that memo. Push still
+	// requires the attribution memo; validateHash refuses push credentials
+	// on such routes before matching.
 	request.MethodDetails.Memo = serverMemo
-	for _, expected := range [][]expectedTransfer{expectedTransfers(request), expectedPushTransfers(request)} {
-		assert.True(t, matchTransfers(transfer(serverMemo), expected, testRealm, challengeID))
-		assert.False(t, matchTransfers(transfer(bound), expected, testRealm, challengeID))
-		assert.False(t, matchTransfers(transfer(""), expected, testRealm, challengeID))
-	}
+	assert.True(t, matchTransfers(transfer(serverMemo), expectedTransfers(request), testRealm, challengeID))
+	assert.False(t, matchTransfers(transfer(bound), expectedTransfers(request), testRealm, challengeID))
+	assert.False(t, matchTransfers(transfer(""), expectedTransfers(request), testRealm, challengeID))
+	assert.False(t, matchTransfers(transfer(serverMemo), expectedPushTransfers(request), testRealm, challengeID))
+	assert.True(t, matchTransfers(transfer(bound), expectedPushTransfers(request), testRealm, challengeID))
 }
 
 // A pull payment's broadcast transaction is recorded under the same replay
-// key push (hash) credentials check, so a transaction settled for one
-// challenge can't be redeemed as a push credential for another, even one
-// whose static methodDetails.memo the transfer satisfies.
+// key push (hash) credentials check, and a challenge whose static
+// methodDetails.memo the transfer satisfies refuses hash credentials, so a
+// transaction settled for one challenge can't be redeemed as a push
+// credential for another.
 func TestChargeFlow_PullSettledHashCannotPayAnotherChallengeAsPush(t *testing.T) {
 	for _, feePayer := range []bool{false, true} {
 		t.Run(map[bool]string{false: "transaction", true: "sponsored"}[feePayer], func(t *testing.T) {
@@ -384,16 +434,17 @@ func testPullSettledHashCannotPayAnotherChallengeAsPush(t *testing.T, feePayer b
 		mpp.WithCredentialSource("did:pkh:eip155:42431:"+sender),
 	)
 
-	// A server that never counted the transaction would accept it.
+	// A server that never counted the transaction refuses it too: the
+	// shared memo does not bind the hash to the other challenge.
 	fresh, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 	require.NoError(t, err)
 	_, err = fresh.Verify(ctx, push, pushRequest.Map())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	assert.ErrorContains(t, err, "hash credentials are not accepted when methodDetails.memo is set")
 
 	// This one counted it for the pull credential and refuses it.
 	_, err = intent.Verify(ctx, push, pushRequest.Map())
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "transaction hash already used")
 	_, exists, err := store.Get(ctx, tempo.ChargeStoreKey(txHash))
 	require.NoError(t, err)
 	assert.True(t, exists)

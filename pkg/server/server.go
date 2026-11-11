@@ -358,11 +358,12 @@ type ChargeParams struct {
 	// advertised as methodDetails.memo. Leave it empty to use the client's
 	// attribution memo instead: push (hash) credentials must carry the
 	// attribution memo for the Challenge, while pull (transaction)
-	// credentials may carry it, another memo or none. A push payment
-	// without the memo is rejected after the client has broadcast it, so
-	// set Memo on push routes only when every payer's client reads
-	// methodDetails.memo (mpp-go from this release, mppx); mpp-go clients
-	// before it attach their attribution memo instead.
+	// credentials may carry it, another memo or none. A route with Memo
+	// accepts only pull credentials: every payer on the route carries the
+	// same memo, so it cannot bind an unsigned hash credential to one
+	// Challenge. The Tempo method drops push from such a route's
+	// supportedModes, refuses hash credentials for it, and rejects Memo
+	// combined with push-only SupportedModes.
 	Memo string
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
 	// A Tempo method with a fee payer sponsors every route without it.
