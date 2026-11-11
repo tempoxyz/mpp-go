@@ -957,11 +957,12 @@ func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
 		{"bound", "custom", true},
 		{"bound", "other challenge", false},
 		{"other challenge", "bound", false},
-		// Another realm's attribution memo is accepted.
-		{"bound", "other realm", true},
-		{"other realm", "bound", true},
+		// Another realm's attribution memo is rejected too: that realm
+		// could accept the same transfer as a push credential.
+		{"bound", "other realm", false},
+		{"other realm", "bound", false},
 		{"other challenge", "plain", false},
-		{"other realm", "plain", true},
+		{"other realm", "plain", false},
 		// The primary's attribution memo is optional.
 		{"plain", "plain", true},
 		{"custom", "plain", true},
@@ -1240,7 +1241,7 @@ func TestChargeFlow_TransactionCredentialReservesHashBeforeBroadcast(t *testing.
 
 }
 
-func TestChargeFlow_TransactionCredentialRetryRecoversAfterReceiptFailure(t *testing.T) {
+func TestChargeFlow_TransactionCredentialRetryRejectedOnceIncluded(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
 	rpc := newMockRPC(request)
@@ -1266,18 +1267,15 @@ func TestChargeFlow_TransactionCredentialRetryRecoversAfterReceiptFailure(t *tes
 	require.ErrorContains(t, err, "Check the original transaction on chain")
 	require.Len(t, rpc.sentRawTxs, 1)
 
-	// The transaction was included and spent the payer's balance, so
-	// simulating it again fails. A retry with the same credential finds its
-	// receipt first and settles from it without simulating or re-broadcasting.
+	// The transaction was included in the meantime. This server holds no
+	// record of it, so it cannot tell its own broadcast from another
+	// server's: the retry is rejected before simulating or re-broadcasting.
 	rpc.onCall = drainedBalanceCall
-	receipt, err := intent.Verify(ctx, credential, request.Map())
-	require.NoError(t, err)
-	require.Len(t, rpc.sentRawTxs, 1)
-	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
-
-	// Only the successful settlement consumes the credential.
-	_, err = intent.Verify(ctx, credential, request.Map())
-	require.ErrorContains(t, err, "transaction hash already used")
+	for range 2 {
+		_, err = intent.Verify(ctx, credential, request.Map())
+		require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+		require.ErrorContains(t, err, "transaction is already on chain")
+	}
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
@@ -1302,8 +1300,10 @@ func TestChargeFlow_TransactionCredentialRetryRebroadcastsWhenNotIncluded(t *tes
 		}
 		return hash, receipt, err
 	}
+	failReceiptFetch := true
 	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
-		if len(rpc.sentRawTxs) == 1 {
+		// Fail every receipt read after the first broadcast.
+		if failReceiptFetch && len(rpc.sentRawTxs) > 0 {
 			return nil, fmt.Errorf("temporary receipt rpc failure")
 		}
 		return &temporpc.JSONRPCResponse{Result: rpc.receipts[hash]}, nil
@@ -1316,6 +1316,7 @@ func TestChargeFlow_TransactionCredentialRetryRebroadcastsWhenNotIncluded(t *tes
 	_, err = intent.Verify(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "outcome is unknown")
 	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
+	failReceiptFetch = false
 
 	// No receipt yet: the retry simulates and re-broadcasts the identical
 	// signed transaction.
@@ -1333,6 +1334,10 @@ func TestChargeFlow_TransactionCredentialReceiptWaitOutlivesRequest(t *testing.T
 	defer cancel()
 	receiptLookups := 0
 	rpc.onGetReceipt = func(hash string) (*temporpc.JSONRPCResponse, error) {
+		if len(rpc.sentRawTxs) == 0 {
+			// The checks before the broadcast find nothing on chain.
+			return &temporpc.JSONRPCResponse{}, nil
+		}
 		receiptLookups++
 		if receiptLookups == 1 {
 			// The client disconnects while the receipt is pending.
@@ -1386,7 +1391,7 @@ func TestChargeFlow_TransactionRejectsMismatchedBroadcastHash(t *testing.T) {
 	}
 }
 
-func TestChargeFlow_FeePayerRetryRecoversAfterReceiptFailure(t *testing.T) {
+func TestChargeFlow_FeePayerRetryRejectedOnceIncluded(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
 	rpc := newMockRPC(request)
@@ -1409,23 +1414,21 @@ func TestChargeFlow_FeePayerRetryRecoversAfterReceiptFailure(t *testing.T) {
 	require.ErrorIs(t, err, mpp.ErrorTypePaymentOutcomeUnknown)
 	require.Len(t, rpc.sentRawTxs, 1)
 
-	// The included transaction spent the payer's balance. The local fee
-	// payer re-signs the retry identically, so its receipt is found before
-	// any simulation and the retry settles without re-broadcasting.
+	// The transaction was included in the meantime. The local fee payer
+	// re-signs the retry identically, so its receipt is found before any
+	// simulation and the retry is rejected without re-broadcasting.
 	rpc.onCall = drainedBalanceCall
-	receipt, err := intent.Verify(ctx, credential, request.Map())
-	require.NoError(t, err)
-	require.Len(t, rpc.sentRawTxs, 1)
-	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
-
-	_, err = intent.Verify(ctx, credential, request.Map())
-	require.ErrorContains(t, err, "already used")
+	for range 2 {
+		_, err = intent.Verify(ctx, credential, request.Map())
+		require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+		require.ErrorContains(t, err, "transaction is already on chain")
+	}
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
-// A sponsored payment that landed is recovered by a retry that arrives after
-// its fee payer deadline, while a transaction that never landed still fails it.
-func TestChargeFlow_FeePayerRetryRecoversAfterDeadline(t *testing.T) {
+// A sponsored retry that arrives after its fee payer deadline fails it,
+// whether or not its transaction landed.
+func TestChargeFlow_FeePayerRetryRejectedAfterDeadline(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
 	rpc := newMockRPC(request)
@@ -1450,14 +1453,11 @@ func TestChargeFlow_FeePayerRetryRecoversAfterDeadline(t *testing.T) {
 	// Less than 15 seconds of the 60-second window are left.
 	intent.now = func() time.Time { return time.Now().Add(50 * time.Second) }
 	rpc.onCall = drainedBalanceCall
-	// Validate must not co-sign to look the transaction up, so it still
-	// reports the deadline.
 	_, err = intent.Validate(ctx, credential, request.Map())
 	require.ErrorContains(t, err, "remaining validity")
-	receipt, err := intent.Verify(ctx, credential, request.Map())
-	require.NoError(t, err)
+	_, err = intent.Verify(ctx, credential, request.Map())
+	require.ErrorContains(t, err, "remaining validity")
 	require.Len(t, rpc.sentRawTxs, 1)
-	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
 
 	// The same late credential is rejected when its transaction never landed.
 	unsentRPC := newMockRPC(request)
@@ -1487,7 +1487,8 @@ func (s *failNthPutIfAbsentStore) PutIfAbsent(ctx context.Context, key, value st
 }
 
 // A sponsored payment whose final replay claim fails after the transaction is
-// included must recover its receipt on retry instead of being rejected as used.
+// included leaves no record, so a retry finds an included transaction it
+// cannot attribute to this server and is rejected without re-broadcasting.
 func TestChargeFlow_FeePayerRetryAfterFinalClaimStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
@@ -1506,14 +1507,10 @@ func TestChargeFlow_FeePayerRetryAfterFinalClaimStoreFailure(t *testing.T) {
 
 	// The transaction is on chain and the payer's balance is spent.
 	rpc.onCall = drainedBalanceCall
-	receipt, err := intent.Verify(ctx, credential, request.Map())
-	require.NoError(t, err)
-	require.Len(t, rpc.sentRawTxs, 1)
-	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
-
-	// The payment is now consumed.
 	_, err = intent.Verify(ctx, credential, request.Map())
-	require.Error(t, err)
+	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	require.ErrorContains(t, err, "transaction is already on chain")
+	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
 func TestChargeFlow_TransactionCredentialReleasesReservationAfterBroadcastFailure(t *testing.T) {
@@ -2085,6 +2082,10 @@ func TestChargeFlow_TransactionCredentialRecoversPendingChargeAfterSubmissionErr
 	}
 	lookups := 0
 	rpc.onGetReceipt = func(string) (*temporpc.JSONRPCResponse, error) {
+		if len(rpc.sentRawTxs) == 0 {
+			// The checks before the broadcast find nothing on chain.
+			return &temporpc.JSONRPCResponse{}, nil
+		}
 		lookups++
 		if lookups < 2 {
 			return &temporpc.JSONRPCResponse{}, nil
@@ -2200,7 +2201,7 @@ func TestChargeFlow_TransactionCredentialWaitsAfterDuplicateSubmission(t *testin
 	}
 }
 
-func TestChargeFlow_FeePayerRetryFindsReceiptForEarlierFeeToken(t *testing.T) {
+func TestChargeFlow_FeePayerRetryRejectsReceiptForEarlierFeeToken(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, true, nil)
 	rpc := newMockRPC(request)
@@ -2234,17 +2235,13 @@ func TestChargeFlow_FeePayerRetryFindsReceiptForEarlierFeeToken(t *testing.T) {
 	require.Equal(t, usdceToken, first.FeeToken)
 
 	// The included transaction spent the fee payer's USDC.e and the payer's
-	// balance, so the retry picks pathUSD and its simulation would fail. It
-	// still finds the USDC.e envelope's receipt and settles from it.
+	// balance, so the retry picks pathUSD. It still finds the USDC.e
+	// envelope on chain and rejects the credential without broadcasting.
 	rpc.balances = nil
 	rpc.onCall = drainedBalanceCall
-	receipt, err := intent.Verify(ctx, credential, request.Map())
-	require.NoError(t, err)
-	require.Len(t, rpc.sentRawTxs, 1)
-	assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
-
 	_, err = intent.Verify(ctx, credential, request.Map())
-	require.ErrorContains(t, err, "already used")
+	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	require.ErrorContains(t, err, "transaction is already on chain")
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
 
@@ -2647,24 +2644,55 @@ func TestChargeFlow_TransactionCredentialSourceMustMatchSenderAndChain(t *testin
 	require.NoError(t, err)
 }
 
+// A pull credential whose signed transaction is already on chain is rejected
+// even when this server holds no replay record for it: another server, or an
+// earlier settlement whose record expired, may already have counted it.
+func TestChargeFlow_TransactionAlreadyIncludedRejected(t *testing.T) {
+	for _, feePayer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("feePayer=%t", feePayer), func(t *testing.T) {
+			ctx := context.Background()
+			request := buildRequest(t, feePayer, nil)
+			config := func(rpc *mockRPC) IntentConfig {
+				config := IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc}
+				if feePayer {
+					config.FeePayerPrivateKey = feePayerKey
+				}
+				return config
+			}
+
+			// Another server settles the credential.
+			rpc := newMockRPC(request)
+			credential, err := newClientMethod(t, rpc, tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
+			require.NoError(t, err)
+			other, err := NewIntent(config(rpc))
+			require.NoError(t, err)
+			receipt, err := other.Verify(ctx, credential, request.Map())
+			require.NoError(t, err)
+			require.Len(t, rpc.sentRawTxs, 1)
+			assert.Equal(t, mustTxHash(rpc.sentRawTxs[0]), receipt.Reference)
+
+			// This server shares the chain but not the replay records.
+			rpc.onCall = drainedBalanceCall
+			intent, err := NewIntent(config(rpc))
+			require.NoError(t, err)
+			_, err = intent.Verify(ctx, credential, request.Map())
+			require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+			require.ErrorContains(t, err, "transaction is already on chain")
+			assert.Len(t, rpc.sentRawTxs, 1)
+		})
+	}
+}
+
 func TestChargeFlow_ConcurrentTransactionReplay(t *testing.T) {
 	ctx := context.Background()
 	request := buildRequest(t, false, nil)
 	credential, err := newClientMethod(t, newMockRPC(request), tempo.CredentialTypeTransaction).CreateCredential(ctx, buildChallenge(t, request))
-	require.NoError(t, err)
-	raw := credential.Payload["signature"].(string)
-	hash, err := tempotx.ComputeHash(raw)
-	require.NoError(t, err)
-	tx, err := deserializeTestTx(raw)
-	require.NoError(t, err)
-	sender, err := tempotx.VerifySignature(tx)
 	require.NoError(t, err)
 	store := tempo.NewMemoryStore()
 	start := make(chan struct{})
 	results := make(chan error, 8)
 	for range 8 {
 		rpc := newMockRPC(request)
-		rpc.receipts[hash.Hex()] = buildReceipt(raw, request, sender)
 		intent, err := NewIntent(IntentConfig{RPC: rpc, Store: store})
 		require.NoError(t, err)
 		go func() {

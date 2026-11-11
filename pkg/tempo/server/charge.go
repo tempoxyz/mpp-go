@@ -181,17 +181,10 @@ type validatedChargeCredential struct {
 	// altFeeTokens are the other allowed tokens a local fee payer without a
 	// configured FeeToken may have paid gas in on an earlier attempt.
 	altFeeTokens []common.Address
-	// includedReceipt is the receipt of an unsponsored transaction credential
-	// that is already on chain, found before its simulation.
-	includedReceipt map[string]any
 	// challengeBound is set when the credential cannot pay any other
 	// challenge: a proof, or a payment carrying this challenge's attribution
 	// memo. Only then may its replay keys expire; see replayClaimExpiry.
 	challengeBound bool
-	// settling is set when the credential is validated by Broadcast, which
-	// rechecks a local fee payer's deadline itself so that it can first look
-	// up whether a late retry's transaction already landed.
-	settling bool
 }
 
 func hasReplayStore(store tempo.Store) bool {
@@ -299,7 +292,7 @@ func (i *Intent) Validate(
 	credential *mpp.Credential,
 	requestMap map[string]any,
 ) (*mppserver.Validation, error) {
-	validated, err := i.validateCredential(ctx, credential, requestMap, false)
+	validated, err := i.validateCredential(ctx, credential, requestMap)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +352,7 @@ func (i *Intent) Broadcast(
 	credential *mpp.Credential,
 	requestMap map[string]any,
 ) (*mpp.Receipt, error) {
-	validated, err := i.validateCredential(ctx, credential, requestMap, true)
+	validated, err := i.validateCredential(ctx, credential, requestMap)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +375,6 @@ func (i *Intent) validateCredential(
 	ctx context.Context,
 	credential *mpp.Credential,
 	requestMap map[string]any,
-	settling bool,
 ) (*validatedChargeCredential, error) {
 	if credential == nil {
 		return nil, mpp.ErrMalformedCredential("credential is required")
@@ -421,11 +413,10 @@ func (i *Intent) validateCredential(
 	}
 
 	validated := &validatedChargeCredential{
-		payload:  payload,
-		request:  request,
-		rpc:      rpc,
-		settling: settling,
-		source:   source,
+		payload: payload,
+		request: request,
+		rpc:     rpc,
+		source:  source,
 	}
 	switch payload.Type {
 	case tempo.CredentialTypeHash:
@@ -616,13 +607,8 @@ func (i *Intent) validateTransaction(
 		if !tx.AwaitingFeePayer {
 			return mpp.ErrInvalidPayload("fee payer transaction must be marked as awaiting a fee payer")
 		}
-		// Broadcast rechecks a local fee payer's deadline after it looks up
-		// whether a late retry already landed; Validate must not co-sign to
-		// do that lookup.
-		if !validated.settling || i.feePayerSigner == nil {
-			if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
-				return err
-			}
+		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
+			return err
 		}
 		if tx.NonceKey == nil || tx.NonceKey.Cmp(tempo.ExpiringNonceKey) != 0 {
 			return mpp.ErrInvalidPayload("fee payer transaction must use the expiring nonce key")
@@ -652,14 +638,14 @@ func (i *Intent) validateTransaction(
 		if err := i.rejectUsedCredential(ctx, tempo.ChargeStoreKey(hash.Hex()), "transaction hash already used"); err != nil {
 			return err
 		}
-		// A retry after an inconclusive settlement may find the transaction
-		// already included. Its nonce and funds are spent, so simulating it
-		// again would fail: settle from its receipt instead.
-		validated.includedReceipt = lookupIncludedReceipt(ctx, validated.rpc, hash.Hex())
-		if validated.includedReceipt == nil {
-			if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
-				return err
-			}
+		// A transaction already on chain never pays (see
+		// rejectIncludedTransaction). Answer it before the simulation, which
+		// would fail on its spent nonce with a less useful error.
+		if err := rejectIncludedTransaction(ctx, validated.rpc, hash.Hex()); err != nil {
+			return err
+		}
+		if err := simulateTransactionExecution(ctx, validated.rpc, tx); err != nil {
+			return err
 		}
 	}
 	validated.sender = sender
@@ -793,12 +779,7 @@ func (i *Intent) broadcastTransaction(
 		}
 		claimedKeys = append(claimedKeys, sponsoredClaimKey)
 		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
-			// A retry of a sponsored payment that already landed can arrive
-			// after its validity window: settle it from its receipt, which
-			// the lookup below finds.
-			if !i.sponsoredTransactionIncluded(ctx, validated, tx) {
-				return nil, err
-			}
+			return nil, err
 		}
 		feeToken := validated.feeToken
 		if i.feePayerSigner != nil {
@@ -876,74 +857,69 @@ func (i *Intent) broadcastTransaction(
 	}
 	signedHash := computedHash.Hex()
 
-	// A retry after an inconclusive settlement may find the transaction it
-	// would broadcast already included, with its nonce and funds spent:
-	// simulating it again would fail, so settle from its receipt instead. A
-	// local fee payer signs deterministically, so a sponsored retry rebuilds
-	// the same transaction for the same fee token. Without a configured
-	// FeeToken the fee token is picked by live balance and can differ from
-	// the earlier attempt's, so look up the envelope of every other allowed
-	// fee token too.
-	includedReceipt := validated.includedReceipt
-	if request.MethodDetails.FeePayer {
-		includedReceipt = lookupIncludedReceipt(ctx, rpc, signedHash)
+	// A transaction already on chain never pays this credential, even when
+	// this server holds no replay record for it (see
+	// rejectIncludedTransaction). A local fee payer signs deterministically,
+	// but without a configured FeeToken it picks the fee token by live
+	// balance, so an earlier attempt may have landed the sender's
+	// transaction under another allowed fee token: check those envelopes
+	// too.
+	if err := rejectIncludedTransaction(ctx, rpc, signedHash); err != nil {
+		return nil, err
 	}
-	if includedReceipt == nil && senderSigned != nil {
+	if senderSigned != nil {
 		for _, token := range validated.altFeeTokens {
-			altTx, altSerialized, altHash, err := i.coSignWithFeeToken(*senderSigned, token)
+			_, _, altHash, err := i.coSignWithFeeToken(*senderSigned, token)
 			if err != nil {
 				continue
 			}
-			if altReceipt := lookupIncludedReceipt(ctx, rpc, altHash); altReceipt != nil {
-				tx, serialized, signedHash, includedReceipt = altTx, altSerialized, altHash, altReceipt
-				break
+			if err := rejectIncludedTransaction(ctx, rpc, altHash); err != nil {
+				return nil, err
 			}
 		}
 	}
-	if includedReceipt == nil {
-		if request.MethodDetails.FeePayer {
-			if !senderSimulated {
-				if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
-					return nil, err
-				}
-			}
-			// The sender's simulation above is the gas-bounded check: it
-			// runs at the broadcast gas limit. The node recovers an
-			// eth_call's fee payer only from its feePayerSignature, so the
-			// final simulation carries one: the hosted sponsor's as it
-			// signed it, or for a local fee payer a simulation-only
-			// signature made now over a copy with more gas, within the
-			// sponsor policy. A sponsored eth_call charges more gas than
-			// the mined transaction uses, so when the final simulation
-			// could not get the full sponsoredSimulationGasBuffer (always
-			// for a hosted fee payer) it tolerates running out of gas.
-			simulated := tx
-			if i.feePayerSigner != nil {
-				policy, err := i.sponsorPolicyFor(tx.FeeToken)
-				if err != nil {
-					return nil, err
-				}
-				simulated, err = feePayerSimulationTransaction(tx, i.feePayerSigner, credential.Challenge.Expires, policy)
-				if err != nil {
-					return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer simulation")
-				}
-			}
-			tolerateOutOfGas := simulated.Gas-tx.Gas < sponsoredSimulationGasBuffer
-			if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, tx, sponsorAddress, tolerateOutOfGas); err != nil {
+	if request.MethodDetails.FeePayer {
+		if !senderSimulated {
+			if err := simulateSponsoredSenderExecution(ctx, rpc, tx); err != nil {
 				return nil, err
 			}
-		} else {
-			// Match mppx's final pre-broadcast simulation to narrow the window
-			// in which account or contract state can change after validation.
-			if err := simulateTransactionExecution(ctx, rpc, tx); err != nil {
+		}
+		// The sender's simulation above is the gas-bounded check: it
+		// runs at the broadcast gas limit. The node recovers an
+		// eth_call's fee payer only from its feePayerSignature, so the
+		// final simulation carries one: the hosted sponsor's as it
+		// signed it, or for a local fee payer a simulation-only
+		// signature made now over a copy with more gas, within the
+		// sponsor policy. A sponsored eth_call charges more gas than
+		// the mined transaction uses, so when the final simulation
+		// could not get the full sponsoredSimulationGasBuffer (always
+		// for a hosted fee payer) it tolerates running out of gas.
+		simulated := tx
+		if i.feePayerSigner != nil {
+			policy, err := i.sponsorPolicyFor(tx.FeeToken)
+			if err != nil {
 				return nil, err
 			}
+			simulated, err = feePayerSimulationTransaction(tx, i.feePayerSigner, credential.Challenge.Expires, policy)
+			if err != nil {
+				return nil, mpp.ErrVerificationFailed("failed to co-sign fee payer simulation")
+			}
+		}
+		tolerateOutOfGas := simulated.Gas-tx.Gas < sponsoredSimulationGasBuffer
+		if err := simulateSponsoredTransactionExecution(ctx, rpc, simulated, tx, sponsorAddress, tolerateOutOfGas); err != nil {
+			return nil, err
+		}
+	} else {
+		// Match mppx's final pre-broadcast simulation to narrow the window
+		// in which account or contract state can change after validation.
+		if err := simulateTransactionExecution(ctx, rpc, tx); err != nil {
+			return nil, err
 		}
 	}
 	if err := validateChallengeExpiry(credential); err != nil {
 		return nil, err
 	}
-	if request.MethodDetails.FeePayer && includedReceipt == nil {
+	if request.MethodDetails.FeePayer {
 		if err := validateFeePayerDeadline(tx.ValidBefore, i.clock()); err != nil {
 			return nil, err
 		}
@@ -966,14 +942,11 @@ func (i *Intent) broadcastTransaction(
 	// request context: abandoning them on a client disconnect would leave the
 	// payment's outcome unrecorded.
 	storeCtx := context.WithoutCancel(ctx)
-	if includedReceipt != nil {
-		included = true
-		if asString(includedReceipt["status"]) != "0x1" {
-			return nil, mpp.ErrVerificationFailed("transaction reverted")
-		}
-		txHash, receiptMap = signedHash, includedReceipt
-	} else if txHash, err = rpc.SendRawTransaction(ctx, serialized); err != nil {
-		// The node may have included the transaction before its RPC reply failed.
+	if txHash, err = rpc.SendRawTransaction(ctx, serialized); err != nil {
+		// The node may have included the transaction before its RPC reply
+		// failed, or hold it from a pending earlier broadcast. The check
+		// above saw it not yet on chain, so a receipt found now is for a
+		// transaction included after it.
 		recoveredHash, recoveredReceipt, ok := lookupConfirmedReceipt(ctx, rpc, serialized, err)
 		if !ok {
 			// A node that already holds the transaction, such as one an
@@ -1168,8 +1141,9 @@ func isTransactionReverted(err error) bool {
 
 // broadcastOutcomeUnknown reports a receipt wait that failed after the node
 // accepted the transaction without showing whether it was included. A retry
-// with the same credential re-broadcasts the transaction, which the node
-// accepts at most once, and recovers its receipt.
+// with the same credential re-broadcasts the transaction and recovers its
+// receipt while it is still pending; once it is on chain, the retry is
+// rejected (see rejectIncludedTransaction).
 func broadcastOutcomeUnknown(challengeID string) error {
 	unknown := mpp.ErrPaymentOutcomeUnknown(challengeID)
 	unknown.Detail += " Check the original transaction on chain before authorizing any further payment."
@@ -1361,16 +1335,21 @@ func isDuplicateSubmission(err error) bool {
 	return false
 }
 
-// lookupIncludedReceipt checks once, without polling, whether the transaction
-// with hash is already on chain, and returns its receipt, reverted or not. It
-// returns nil when the receipt is missing or cannot be read.
-func lookupIncludedReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) map[string]any {
+// rejectIncludedTransaction looks up, once and without polling, the receipt
+// of the transaction with hash before this server broadcasts it, and fails
+// with verification-failed when it is already on chain, reverted or not.
+// Another server, or an earlier settlement whose replay record expired or
+// is kept elsewhere, may already have counted that transaction, so it never
+// pays a credential, as in mppx. A failed lookup fails too: only a
+// transaction seen not yet on chain here may be recovered after its
+// broadcast returns an error.
+func rejectIncludedTransaction(ctx context.Context, rpc tempo.RPCClient, hash string) error {
 	response, err := rpc.SendRequest(ctx, "eth_getTransactionReceipt", hash)
 	if err != nil || response.CheckError() != nil {
-		return nil
+		return mpp.ErrVerificationFailed("failed to check whether the transaction is already on chain")
 	}
 	if receipt, ok := response.Result.(map[string]any); ok && len(receipt) > 0 {
-		return receipt
+		return mpp.ErrVerificationFailed("transaction is already on chain")
 	}
 	return nil
 }
@@ -1664,13 +1643,14 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 				continue
 			}
 			// A transfer without a configured memo accepts any memo except
-			// this realm's attribution memo for another challenge. Otherwise
+			// an attribution memo for another realm or challenge. Otherwise
 			// one payment could carry memos for two challenges and pay
-			// both once the first replay marker expires. Another realm's
-			// attribution memo is the client's own business and is accepted.
+			// both: here and, as a push credential, at the realm and
+			// challenge its memo names, which keeps its own replay
+			// records, or here again once the first replay marker expires.
 			// Memos the server configured are matched exactly above.
 			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
-				tempo.VerifyAttributionServer(got.memo, realm) && !tempo.VerifyAttributionChallenge(got.memo, challengeID) {
+				(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
 				continue
 			}
 			if want.allowAnyMemo || !got.hasMemo {
@@ -2376,24 +2356,6 @@ func (i *Intent) coSignWithFeeToken(senderSigned tempotx.Tx, feeToken common.Add
 		return nil, "", "", err
 	}
 	return tx, serialized, hash.Hex(), nil
-}
-
-// sponsoredTransactionIncluded reports whether a local fee payer's co-signed
-// envelope of the sender-signed tx, for the selected or any other allowed fee
-// token, is already on chain. A remote fee payer's envelope cannot be rebuilt
-// without asking it to sign, so it reports false.
-func (i *Intent) sponsoredTransactionIncluded(ctx context.Context, validated *validatedChargeCredential, tx *tempotx.Tx) bool {
-	if i.feePayerSigner == nil {
-		return false
-	}
-	tokens := append([]common.Address{validated.feeToken}, validated.altFeeTokens...)
-	for _, token := range tokens {
-		_, _, hash, err := i.coSignWithFeeToken(*tx, token)
-		if err == nil && lookupIncludedReceipt(ctx, validated.rpc, hash) != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // clock returns i.now() when set, else time.Now().
