@@ -234,6 +234,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
+		if sent && problem != nil && problem.Type == mpp.ErrorTypeInvalidChallenge {
+			// invalid-challenge answering a sent credential can mean it was
+			// already settled (a replay): paying the fresh Challenge would pay
+			// twice, so the 402 is final.
+			return resp, nil
+		}
 		if sent && sentCred != nil && sentCred.Payload["type"] == "hash" {
 			// A hash credential's transfer is already on chain: resending it
 			// is safe, but paying a new challenge would pay twice.
