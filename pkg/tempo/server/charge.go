@@ -135,7 +135,10 @@ type IntentConfig struct {
 	// Intent through server.Mpp, which verifies the challenge ID's HMAC,
 	// including its expiry, before settlement: Verify and Broadcast called
 	// directly trust the credential's echoed expiry, so an expired key would
-	// let the same hash, proof or transaction settle again.
+	// let the same hash, proof or transaction settle again. A hash or
+	// transaction whose transfers carry no attribution memo for the challenge
+	// (no memo, another memo or a server-set methodDetails.memo) is not bound
+	// to it, so its replay keys are still kept forever.
 	ExpireReplayKeys bool
 }
 
@@ -181,6 +184,10 @@ type validatedChargeCredential struct {
 	// includedReceipt is the receipt of an unsponsored transaction credential
 	// that is already on chain, found before its simulation.
 	includedReceipt map[string]any
+	// challengeBound is set when the credential cannot pay any other
+	// challenge: a proof, or a payment carrying this challenge's attribution
+	// memo. Only then may its replay keys expire; see replayClaimExpiry.
+	challengeBound bool
 	// settling is set when the credential is validated by Broadcast, which
 	// rechecks a local fee payer's deadline itself so that it can first look
 	// up whether a late retry's transaction already landed.
@@ -333,8 +340,6 @@ func validationTransferDetails(request tempo.ChargeRequest) []map[string]any {
 		}
 		if transfer.memo != "" {
 			detail["memo"] = transfer.memo
-		} else if transfer.requireAttribution {
-			detail["requireAttribution"] = true
 		} else if transfer.allowAnyMemo {
 			detail["allowAnyMemo"] = true
 		}
@@ -455,14 +460,20 @@ func (i *Intent) validateHash(
 	if source.chainID != chainID {
 		return mpp.ErrInvalidPayload("credential source chain id does not match the challenge")
 	}
+	// Replays are answered before the receipt lookup; Broadcast still claims
+	// the hash atomically.
+	if err := i.rejectUsedCredential(ctx, tempo.ChargeStoreKey(validated.payload.Hash), "transaction hash already used"); err != nil {
+		return err
+	}
 	receiptMap, err := fetchReceipt(ctx, validated.rpc, validated.payload.Hash)
 	if err != nil {
 		return err
 	}
-	// The primary transfer must carry a challenge-bound attribution memo.
-	if !receiptMatches(receiptMap, credential, request, source.address) {
+	transfers, ok := receiptTransfers(receiptMap, request, source.address)
+	if !ok || !matchTransfers(transfers, expectedTransfers(request), credential.Challenge.Realm, credential.Challenge.ID) {
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
+	validated.challengeBound = boundToChallenge(transfers, credential.Challenge.Realm, credential.Challenge.ID)
 	validated.sender = common.HexToAddress(source.address)
 	return nil
 }
@@ -476,6 +487,11 @@ func (i *Intent) validateProof(
 	source := validated.source
 	if request.Amount != "0" {
 		return mpp.ErrInvalidPayload("proof credentials are only valid for zero-amount challenges")
+	}
+	// Replays are answered before the signature is verified, as the
+	// specification orders it; Broadcast still claims the proof atomically.
+	if err := i.rejectUsedCredential(ctx, tempo.ChargeProofStoreKey(credential.Challenge.ID), "proof credential already used"); err != nil {
+		return err
 	}
 	if source == nil {
 		return mpp.ErrInvalidPayload("proof credential must include a source")
@@ -503,6 +519,8 @@ func (i *Intent) validateProof(
 			return mpp.ErrInvalidPayload("proof signature does not match source")
 		}
 	}
+	// A proof's replay key is its challenge ID.
+	validated.challengeBound = true
 	validated.sender = common.HexToAddress(source.address)
 	return nil
 }
@@ -517,9 +535,11 @@ func (i *Intent) validateTransaction(
 	if err != nil {
 		return mpp.ErrInvalidPayload("failed to deserialize transaction payload")
 	}
-	if !transactionMatches(tx, request, credential.Challenge.Realm, credential.Challenge.ID) {
+	transfers, ok := transactionTransfers(tx, request)
+	if !ok || !matchTransfers(transfers, expectedTransfers(request), credential.Challenge.Realm, credential.Challenge.ID) {
 		return mpp.ErrInvalidPayload("transaction does not contain a matching Tempo transfer")
 	}
+	validated.challengeBound = boundToChallenge(transfers, credential.Challenge.Realm, credential.Challenge.ID)
 
 	sender, err := verifyTransactionSender(tx)
 	if err != nil {
@@ -642,8 +662,8 @@ func (i *Intent) validateTransaction(
 	return nil
 }
 
-// rejectUsedCredential reads replay state without claiming it, so replays get
-// the terminal 403 before any check that depends on chain state.
+// rejectUsedCredential reads replay state without claiming it, so replays are
+// rejected before any check that depends on chain state or signatures.
 func (i *Intent) rejectUsedCredential(ctx context.Context, key, reason string) error {
 	_, exists, err := i.store.Get(ctx, key)
 	if err != nil {
@@ -669,7 +689,7 @@ func (i *Intent) broadcastCredential(
 		if hashPaymentFundedByCurrency(ctx, credential, validated) {
 			options = append(options, mpp.WithFundingCurrency(validated.request.Currency))
 		}
-		accepted, err := i.claimReplayKey(ctx, credential, tempo.ChargeStoreKey(hash), hash)
+		accepted, err := i.claimReplayKey(ctx, credential, validated, tempo.ChargeStoreKey(hash), hash)
 		if err != nil {
 			return nil, err
 		}
@@ -679,7 +699,7 @@ func (i *Intent) broadcastCredential(
 		return mpp.Success(tempo.MethodName, hash, options...), nil
 	case tempo.CredentialTypeProof:
 		challengeID := credential.Challenge.ID
-		accepted, err := i.claimReplayKey(ctx, credential, tempo.ChargeProofStoreKey(challengeID), challengeID)
+		accepted, err := i.claimReplayKey(ctx, credential, validated, tempo.ChargeProofStoreKey(challengeID), challengeID)
 		if err != nil {
 			return nil, err
 		}
@@ -759,7 +779,7 @@ func (i *Intent) broadcastTransaction(
 			}
 			senderSimulated = true
 		}
-		accepted, err := i.claimReplayKey(ctx, credential, sponsoredClaimKey, clientTxHash)
+		accepted, err := i.claimReplayKey(ctx, credential, validated, sponsoredClaimKey, clientTxHash)
 		if err != nil {
 			return nil, err
 		}
@@ -925,7 +945,7 @@ func (i *Intent) broadcastTransaction(
 	}
 
 	if !request.MethodDetails.FeePayer {
-		accepted, err := i.claimReplayKey(ctx, credential, tempo.ChargeStoreKey(signedHash), signedHash)
+		accepted, err := i.claimReplayKey(ctx, credential, validated, tempo.ChargeStoreKey(signedHash), signedHash)
 		if err != nil {
 			return nil, err
 		}
@@ -987,7 +1007,7 @@ func (i *Intent) broadcastTransaction(
 		return nil, mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	if request.MethodDetails.FeePayer {
-		accepted, err := i.claimReplayKey(storeCtx, credential, tempo.ChargeStoreKey(txHash), txHash)
+		accepted, err := i.claimReplayKey(storeCtx, credential, validated, tempo.ChargeStoreKey(txHash), txHash)
 		if err != nil {
 			// The payment is on chain but unrecorded: release the sponsored
 			// claim so a retry finds the included transaction and recovers
@@ -1152,10 +1172,11 @@ func broadcastOutcomeUnknown(challengeID string) error {
 }
 
 // claimReplayKey atomically records first use of a replay key. With
-// IntentConfig.ExpireReplayKeys, the key expires once the credential can no
-// longer be accepted; see replayClaimExpiry. Otherwise it is kept forever.
-func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential, key, value string) (bool, error) {
-	if store, ok := i.store.(tempo.ExpiringStore); ok && i.expireReplayKeys {
+// IntentConfig.ExpireReplayKeys, the key of a credential bound to its
+// challenge expires once the credential can no longer be accepted; see
+// replayClaimExpiry. Otherwise it is kept forever.
+func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential, validated *validatedChargeCredential, key, value string) (bool, error) {
+	if store, ok := i.store.(tempo.ExpiringStore); ok && i.expireReplayKeys && validated.challengeBound {
 		if expiresAt, ok := replayClaimExpiry(credential); ok {
 			return store.PutIfAbsentUntil(ctx, key, value, expiresAt)
 		}
@@ -1166,13 +1187,17 @@ func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential,
 // replayClaimExpiry returns when a replay key claimed for credential may
 // expire: its challenge's expiry plus replayClaimExpiryGrace.
 //
-// Every charge credential is bound to its challenge: a proof key is the
-// challenge ID, and the primary transfer of a hash or transaction credential
-// must carry an attribution memo naming the challenge ID. The challenge ID is
-// an HMAC over the challenge's expiry, which server.Mpp verifies before
-// settlement, and credentials are only accepted before that expiry, so after
-// it no challenge can accept the same proof, transaction or hash again. The
-// grace absorbs clock skew between verifier replicas and the store.
+// It applies only to credentials bound to their challenge
+// (validatedChargeCredential.challengeBound): a proof, whose key is the
+// challenge ID, or a hash or transaction credential with a transfer carrying
+// an attribution memo for the challenge's realm and ID, which every other
+// challenge rejects. The attribution memo is optional, so a payment without
+// one could pay a later challenge once its key expired: claimReplayKey keeps
+// those keys forever. The challenge ID is an HMAC over the challenge's
+// expiry, which server.Mpp verifies before settlement, and credentials are
+// only accepted before that expiry, so after it no challenge can accept the
+// same bound proof, transaction or hash again. The grace absorbs clock skew
+// between verifier replicas and the store.
 func replayClaimExpiry(credential *mpp.Credential) (time.Time, bool) {
 	if credential == nil || credential.Challenge.Expires == "" {
 		return time.Time{}, false
@@ -1232,25 +1257,43 @@ func sponsoredTransactionHash(tx *tempotx.Tx, sender common.Address) (string, er
 // TIP-20 charge flows.
 
 func transactionMatches(tx *tempotx.Tx, request tempo.ChargeRequest, realm, challengeID string) bool {
-	expected := expectedTransfers(request)
-	if len(tx.Calls) != len(expected) || len(tx.AccessList) != 0 {
-		return false
+	actual, ok := transactionTransfers(tx, request)
+	return ok && matchTransfers(actual, expectedTransfers(request), realm, challengeID)
+}
+
+// transactionTransfers decodes a transaction's calls, which must all be
+// plain TIP-20 transfers of the charge currency, one per expected transfer.
+func transactionTransfers(tx *tempotx.Tx, request tempo.ChargeRequest) ([]decodedTransfer, bool) {
+	if len(tx.Calls) != len(request.MethodDetails.Splits)+1 || len(tx.AccessList) != 0 {
+		return nil, false
 	}
 	actual := make([]decodedTransfer, 0, len(tx.Calls))
 	for _, call := range tx.Calls {
 		if call.To == nil || !strings.EqualFold(call.To.Hex(), request.Currency) {
-			return false
+			return nil, false
 		}
 		if call.Value != nil && call.Value.Sign() != 0 {
-			return false
+			return nil, false
 		}
 		decoded, ok := decodeCallTransfer(call.Data)
 		if !ok {
-			return false
+			return nil, false
 		}
 		actual = append(actual, decoded)
 	}
-	return matchTransfers(actual, expected, realm, challengeID)
+	return actual, true
+}
+
+// boundToChallenge reports whether a transfer carries an attribution memo
+// for this challenge's realm and ID. matchTransfers rejects such a memo on
+// every other challenge, so the payment can pay no other.
+func boundToChallenge(transfers []decodedTransfer, realm, challengeID string) bool {
+	for _, transfer := range transfers {
+		if transfer.hasMemo && tempo.VerifyAttributionServer(transfer.memo, realm) && tempo.VerifyAttributionChallenge(transfer.memo, challengeID) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupConfirmedReceipt checks once, without rebroadcasting, whether a
@@ -1363,9 +1406,17 @@ func fetchReceipt(ctx context.Context, rpc tempo.RPCClient, hash string) (map[st
 }
 
 func receiptMatches(receipt map[string]any, credential *mpp.Credential, request tempo.ChargeRequest, sourceAddress string) bool {
+	actual, ok := receiptTransfers(receipt, request, sourceAddress)
+	return ok && matchTransfers(actual, expectedTransfers(request), credential.Challenge.Realm, credential.Challenge.ID)
+}
+
+// receiptTransfers decodes a receipt's charge-currency transfers from
+// sourceAddress, skipping fee-controller transfers and collapsing each
+// TransferWithMemo with its paired Transfer log.
+func receiptTransfers(receipt map[string]any, request tempo.ChargeRequest, sourceAddress string) ([]decodedTransfer, bool) {
 	logs, ok := receipt["logs"].([]any)
 	if !ok {
-		return false
+		return nil, false
 	}
 	expected := expectedTransfers(request)
 	actual := make([]decodedTransfer, 0, len(logs))
@@ -1393,11 +1444,7 @@ func receiptMatches(receipt map[string]any, credential *mpp.Credential, request 
 		}
 		actual = append(actual, decoded)
 	}
-	actual, ok = canonicalReceiptTransfers(actual)
-	if !ok {
-		return false
-	}
-	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
+	return canonicalReceiptTransfers(actual)
 }
 
 func isFeeControllerTransfer(fromAddress, recipient, amount string, expected []expectedTransfer) bool {
@@ -1452,11 +1499,10 @@ func pairedTransferIndex(transfers []decodedTransfer, memoIndex int, skipped []b
 }
 
 type expectedTransfer struct {
-	amount             string
-	allowAnyMemo       bool
-	memo               string
-	recipient          string
-	requireAttribution bool
+	amount       string
+	allowAnyMemo bool
+	memo         string
+	recipient    string
 }
 
 type decodedTransfer struct {
@@ -1482,10 +1528,15 @@ func expectedTransfers(request tempo.ChargeRequest) []expectedTransfer {
 		}
 		transfers = append(transfers, splitTransfer)
 	}
+	// The primary transfer carries the server's methodDetails.memo exactly
+	// when one is set. Otherwise its attribution memo is optional, as for a
+	// split without a memo: it may carry none or any memo but an attribution
+	// memo for another challenge or realm.
 	primary := expectedTransfer{
-		amount:             primaryAmount.String(),
-		recipient:          request.Recipient,
-		requireAttribution: true,
+		amount:       primaryAmount.String(),
+		recipient:    request.Recipient,
+		allowAnyMemo: request.MethodDetails.Memo == "",
+		memo:         request.MethodDetails.Memo,
 	}
 	return append([]expectedTransfer{primary}, transfers...)
 }
@@ -1566,17 +1617,9 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 				}
 				continue
 			}
-			if want.requireAttribution {
-				if got.hasMemo && tempo.VerifyAttributionServer(got.memo, realm) && tempo.VerifyAttributionChallenge(got.memo, challengeID) {
-					used[index] = true
-					matched = true
-					break
-				}
-				continue
-			}
-			// A split without a configured memo accepts any memo except an
+			// A transfer without a configured memo accepts any memo except an
 			// attribution memo bound to another challenge or realm. Otherwise
-			// one split payment could carry memos for two challenges and pay
+			// one payment could carry memos for two challenges and pay
 			// both once the first replay marker expires. Memos the server
 			// configured are matched exactly above and are exempt.
 			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
@@ -1607,7 +1650,7 @@ func sortExpectedTransfers(transfers []expectedTransfer) {
 }
 
 func transferPriority(transfer expectedTransfer) int {
-	if transfer.memo != "" || transfer.requireAttribution {
+	if transfer.memo != "" {
 		return 0
 	}
 	if transfer.allowAnyMemo {
@@ -1691,8 +1734,10 @@ func isActiveAccessKey(ctx context.Context, rpc tempo.RPCClient, account, access
 	if len(resultBytes) < 160 {
 		return false, fmt.Errorf("getKey result too short")
 	}
+	// A key is active only when the keychain stores it under its own,
+	// non-zero key ID.
 	keyID := common.BytesToAddress(resultBytes[44:64])
-	if keyID != accessKey {
+	if keyID == (common.Address{}) || keyID != accessKey {
 		return false, nil
 	}
 	// As mppx (Actions.accessKey.getMetadata): a key is active while it is

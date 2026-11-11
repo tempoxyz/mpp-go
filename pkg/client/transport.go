@@ -75,10 +75,14 @@ type transportConfig struct {
 //   - return (nil, nil) to let the transport create the credential itself, or
 //     to use the one createCredential already made,
 //   - return a credential, from createCredential or built another way, to send it,
-//   - return an error to decline the payment: RoundTrip returns that error,
-//     wrapped, and does not pay. It matches ErrPaymentDeclined only when no
+//   - return an error wrapping ErrPaymentDeclined, without calling
+//     createCredential, to decline the payment: RoundTrip does not pay and
+//     returns the 402 response, body unread, with a nil error, as mppx does,
+//   - return any other error to stop: RoundTrip returns that error, wrapped,
+//     and does not pay. It matches ErrPaymentDeclined only when no
 //     credential was created: after createCredential succeeded the payment
-//     may already have been made, so the error is not reported as a decline.
+//     may already have been made, so the error is not reported as a decline,
+//     and an ErrPaymentDeclined returned then is an error, not a 402.
 //
 // It runs once per challenge: a credential the transport already created for
 // the same challenge is reused without calling it again.
@@ -241,13 +245,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload {
 			delete(credentials, sentCredential)
 		}
-		drainAndClose(resp.Body)
 
 		// Prepare the retry before paying for it. A credential created for a
 		// request that cannot be sent again is spent without ever reaching
 		// the server.
 		retry, err := t.cloneRequest(baseRequest)
 		if err != nil {
+			drainAndClose(resp.Body)
 			// The inner RoundTripper already received, and closed, the
 			// request body: closing it again here would double-close it.
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
@@ -267,10 +271,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				if retry.Body != nil {
 					_ = retry.Body.Close()
 				}
+				// The OnChallenge hook declined with ErrPaymentDeclined
+				// before any credential was created: nothing was paid, so
+				// the 402 is the answer, returned with its body unread.
+				if hookDeclined(err) {
+					return resp, nil
+				}
+				drainAndClose(resp.Body)
 				return nil, err
 			}
 			credentials[key] = cred
 		}
+		drainAndClose(resp.Body)
 
 		authorization, err := mpp.FormatCredential(cred)
 		if err != nil {
@@ -445,6 +457,14 @@ type declinedError struct {
 func (e *declinedError) Error() string { return "mpp: onChallenge: " + e.err.Error() }
 
 func (e *declinedError) Unwrap() []error { return []error{ErrPaymentDeclined, e.err} }
+
+// hookDeclined reports whether err is an OnChallengeFunc's decline, made
+// before any credential was created, whose own error matches
+// ErrPaymentDeclined.
+func hookDeclined(err error) bool {
+	var declined *declinedError
+	return errors.As(err, &declined) && errors.Is(declined.err, ErrPaymentDeclined)
+}
 
 // orderCandidates runs the OrderChallenges hook on the ranked candidates and
 // returns its order. Entries without a Challenge or a Method for its method

@@ -423,7 +423,12 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
 		return nil, fmt.Errorf("tempo client: payment rejected by policy: %w", err)
 	}
-	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
+	// A server-set methodDetails.memo must be carried exactly; otherwise the
+	// primary transfer carries an attribution memo binding it to the challenge.
+	memo := request.MethodDetails.Memo
+	if memo == "" {
+		memo = tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
+	}
 
 	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, chainID, challenge.Expires, sponsored)
 	if err != nil {

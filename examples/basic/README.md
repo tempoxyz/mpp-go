@@ -45,4 +45,4 @@ and prints the returned receipt.
 | `PRIVATE_KEY` | bundled devnet payer key | Client private key used to pay |
 | `BASE_URL` | `http://localhost:3000` | Base URL for the example server |
 | `TEMPO_RPC_URL` | `http://127.0.0.1:8545` | Tempo RPC endpoint |
-| `MPP_SECRET_KEY` | `basic-example-secret` | Secret key used to sign server challenges |
+| `MPP_SECRET_KEY` | `basic-example-secret-minimum-32-bytes` | Secret key used to sign server challenges (at least 32 bytes, e.g. `openssl rand -base64 32`) |

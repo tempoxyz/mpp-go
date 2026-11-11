@@ -123,3 +123,34 @@ func TestAccessKeyConfigIsValidated(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+func TestIsActiveAccessKeyStatus(t *testing.T) {
+	ctx := context.Background()
+	account := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	key := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	future := time.Now().Add(time.Hour).Unix()
+	revoked := func(info string) string {
+		raw := common.FromHex(info)
+		raw[159] = 1
+		return "0x" + common.Bytes2Hex(raw)
+	}
+	for name, tt := range map[string]struct {
+		key    common.Address
+		result string
+		active bool
+	}{
+		"active":          {key: key, result: encodeActiveKeyInfo(key, future), active: true},
+		"other key id":    {key: key, result: encodeActiveKeyInfo(account, future)},
+		"zero key id":     {key: common.Address{}, result: encodeActiveKeyInfo(common.Address{}, future)},
+		"expired":         {key: key, result: encodeActiveKeyInfo(key, time.Now().Add(-time.Minute).Unix())},
+		"unknown, expiry": {key: key, result: encodeActiveKeyInfo(key, 0)},
+		"revoked":         {key: key, result: revoked(encodeActiveKeyInfo(key, future))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rpc := &mockRPC{callResult: tt.result, receipts: map[string]map[string]any{}}
+			active, err := isActiveAccessKey(ctx, rpc, account, tt.key)
+			require.NoError(t, err)
+			assert.Equal(t, tt.active, active)
+		})
+	}
+}

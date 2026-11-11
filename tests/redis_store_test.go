@@ -80,7 +80,7 @@ func TestIntegrationRedisStoreReplayAcrossReplicas(t *testing.T) {
 		require.NoError(t, err)
 		body, _ := io.ReadAll(replayResponse.Body)
 		replayResponse.Body.Close()
-		require.Equal(t, http.StatusForbidden, replayResponse.StatusCode, "replay body: %s", body)
+		require.Equal(t, http.StatusPaymentRequired, replayResponse.StatusCode, "replay body: %s", body)
 		require.Contains(t, string(body), "already used")
 	}
 }

@@ -255,19 +255,26 @@ func TestIntentTransactionCredentialLifecycle(t *testing.T) {
 	assert.Equal(t, 1, store.putIfAbsentCalls)
 }
 
-func TestValidationTransferDetailsDistinguishesAttributionFromWildcardMemo(t *testing.T) {
+func TestValidationTransferDetailsDistinguishesConfiguredFromWildcardMemo(t *testing.T) {
 	request := buildRequest(t, false, []tempo.ChargeMode{tempo.ChargeModePull})
 	request.MethodDetails.Splits = []tempo.Split{{
 		Amount:    "100000",
 		Recipient: "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
 	}}
 
+	// Without methodDetails.memo, the primary's attribution memo is optional.
 	details := validationTransferDetails(request)
 	require.Len(t, details, 2)
-	assert.Equal(t, true, details[0]["requireAttribution"])
-	assert.NotContains(t, details[0], "allowAnyMemo")
+	assert.Equal(t, true, details[0]["allowAnyMemo"])
+	assert.NotContains(t, details[0], "memo")
 	assert.Equal(t, true, details[1]["allowAnyMemo"])
-	assert.NotContains(t, details[1], "requireAttribution")
+
+	memo := "0x" + strings.Repeat("ab", 32)
+	request.MethodDetails.Memo = memo
+	details = validationTransferDetails(request)
+	require.Len(t, details, 2)
+	assert.Equal(t, memo, details[0]["memo"])
+	assert.NotContains(t, details[0], "allowAnyMemo")
 }
 
 func TestIntentValidateTransactionRejectsFailedSimulationWithoutMutation(t *testing.T) {
@@ -396,15 +403,25 @@ func TestIntentValidatePushAndProofCredentialsDoesNotConsumeReplayState(t *testi
 			require.NoError(t, err)
 			assert.Equal(t, 1, store.putIfAbsentCalls)
 
-			_, err = intent.Validate(ctx, credential, request.Map())
-			require.NoError(t, err)
-			_, err = intent.Broadcast(ctx, credential, request.Map())
-			require.ErrorContains(t, err, "already used")
-			var replayed *mpp.PaymentError
-			require.ErrorAs(t, err, &replayed)
-			assert.Equal(t, http.StatusForbidden, replayed.Status)
-			assert.Equal(t, mpp.ErrorTypeVerificationFailed, replayed.Type)
-			assert.Equal(t, 2, store.putIfAbsentCalls)
+			// Replays are rejected before verification, by Validate too.
+			for _, call := range []func(context.Context, *mpp.Credential, map[string]any) error{
+				func(ctx context.Context, credential *mpp.Credential, request map[string]any) error {
+					_, err := intent.Validate(ctx, credential, request)
+					return err
+				},
+				func(ctx context.Context, credential *mpp.Credential, request map[string]any) error {
+					_, err := intent.Broadcast(ctx, credential, request)
+					return err
+				},
+			} {
+				err = call(ctx, credential, request.Map())
+				require.ErrorContains(t, err, "already used")
+				var replayed *mpp.PaymentError
+				require.ErrorAs(t, err, &replayed)
+				assert.Equal(t, http.StatusPaymentRequired, replayed.Status)
+				assert.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
+			}
+			assert.Equal(t, 1, store.putIfAbsentCalls)
 		})
 	}
 }
@@ -934,8 +951,11 @@ func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
 		{"other realm", "bound", false},
 		{"other challenge", "plain", false},
 		{"other realm", "plain", false},
-		{"plain", "plain", false},
-		{"custom", "plain", false},
+		// The primary's attribution memo is optional.
+		{"plain", "plain", true},
+		{"custom", "plain", true},
+		{"custom", "custom", true},
+		{"plain", "other challenge", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.primary+"/"+tt.split, func(t *testing.T) {
@@ -1752,7 +1772,8 @@ func TestChargeFlow_TransactionReplayAfterStateChangeIsTerminal(t *testing.T) {
 			_, err = intent.Verify(ctx, credential, request.Map())
 			var replayed *mpp.PaymentError
 			require.ErrorAs(t, err, &replayed)
-			assert.Equal(t, http.StatusForbidden, replayed.Status)
+			assert.Equal(t, http.StatusPaymentRequired, replayed.Status)
+			assert.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
 			assert.Equal(t, tt.reason, replayed.Detail)
 			assert.Empty(t, rpc.callRequests)
 			assert.Len(t, rpc.sentRawTxs, 1)

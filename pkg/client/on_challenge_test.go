@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,4 +240,105 @@ func TestTransport_OnChallenge_NilAfterFailedCreateReturnsThatError(t *testing.T
 	require.ErrorIs(t, err, boom)
 	assert.Equal(t, 1, method.calls)
 	assert.Equal(t, 1, *calls)
+}
+
+// declineServer answers every request with a 402 carrying a challenge and a
+// body, and counts the requests.
+func declineServer(t *testing.T) (*httptest.Server, *int) {
+	t.Helper()
+	calls := 0
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte("pay me"))
+	}))
+	t.Cleanup(srv.Close)
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+	return srv, &calls
+}
+
+func TestTransport_OnChallenge_ErrPaymentDeclinedReturns402(t *testing.T) {
+	srv, calls := declineServer(t)
+	method := &echoMethod{}
+	decline := func(context.Context, *mpp.Challenge, func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+		return nil, fmt.Errorf("over budget: %w", ErrPaymentDeclined)
+	}
+
+	check := func(t *testing.T, resp *http.Response, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer func() { _ = resp.Body.Close() }()
+		assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "pay me", string(body))
+		assert.NotEmpty(t, resp.Header.Get("WWW-Authenticate"))
+		assert.Zero(t, method.calls, "a declined payment must not create a credential")
+	}
+
+	t.Run("Transport", func(t *testing.T) {
+		*calls = 0
+		tr := newTestTransport([]Method{method}, nil, WithOnChallenge(decline))
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		resp, err := tr.RoundTrip(req)
+		check(t, resp, err)
+		assert.Equal(t, 1, *calls)
+	})
+	t.Run("Client", func(t *testing.T) {
+		*calls = 0
+		resp, err := New([]Method{method}, WithOnChallenge(decline)).Get(context.Background(), srv.URL)
+		check(t, resp, err)
+		assert.Equal(t, 1, *calls)
+	})
+	t.Run("HTTPClient", func(t *testing.T) {
+		*calls = 0
+		hc, err := NewHTTPClient([]Method{method}, WithOnChallenge(declineHook))
+		require.NoError(t, err)
+		resp, err := hc.Get(srv.URL)
+		check(t, resp, err)
+		assert.Equal(t, 1, *calls)
+	})
+}
+
+// declineHook declines every payment with bare ErrPaymentDeclined.
+func declineHook(context.Context, *mpp.Challenge, func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+	return nil, ErrPaymentDeclined
+}
+
+func TestTransport_OnChallenge_OtherErrorStillFails(t *testing.T) {
+	srv, calls := declineServer(t)
+	method := &echoMethod{}
+	reason := errors.New("amount too high")
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
+		func(context.Context, *mpp.Challenge, func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+			return nil, reason
+		}))
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, reason)
+	require.ErrorIs(t, err, ErrPaymentDeclined)
+	assert.Zero(t, method.calls)
+	assert.Equal(t, 1, *calls)
+}
+
+func TestTransport_OnChallenge_ErrPaymentDeclinedAfterCreateIsError(t *testing.T) {
+	srv, _ := declineServer(t)
+	method := &echoMethod{}
+	tr := newTestTransport([]Method{method}, nil, WithOnChallenge(
+		func(ctx context.Context, _ *mpp.Challenge, create func(context.Context) (*mpp.Credential, error)) (*mpp.Credential, error) {
+			if _, err := create(ctx); err != nil {
+				return nil, err
+			}
+			return nil, ErrPaymentDeclined
+		}))
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	assert.Nil(t, resp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "after creating credential")
+	assert.Equal(t, 1, method.calls)
 }

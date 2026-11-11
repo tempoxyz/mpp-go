@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -92,6 +93,20 @@ func (s credentialSource) accepts(m *Mpp) bool {
 	}
 }
 
+// selectedBy reports whether the Challenge cred echoes selected source, the
+// field the credential arrived in: Authorization unless the Challenge named
+// another header. A transport other than HTTP carries any credential.
+func (s credentialSource) selectedBy(cred *mpp.Credential) bool {
+	switch s {
+	case sourceAuthorization:
+		return cred.Challenge.Header == ""
+	case sourcePaymentAuthorization:
+		return strings.EqualFold(cred.Challenge.Header, mpp.HeaderPaymentAuthorization)
+	default:
+		return true
+	}
+}
+
 // run verifies credential, the Payment credential ("Payment <base64url>") or
 // empty when the client sent none, against the offer it echoes, binding scope
 // and body into every offer that sets no scope of its own. source is the
@@ -132,6 +147,11 @@ func (f paymentFlow) charge(ctx context.Context, credential string, source crede
 		f.paymentFailed(ctx, nil, err)
 		return composeRetryResult(ctx, f.entries, nil, body, scope, err)
 	}
+	if !source.selectedBy(cred) {
+		// The core specification ignores a credential in a field its
+		// Challenge did not select, as if absent.
+		return f.charge(ctx, "", source, scope, body)
+	}
 	entry, ok, err := findMatchingEntry(f.entries, cred, credential, source, scope, body)
 	if err != nil {
 		f.paymentFailed(ctx, cred, err)
@@ -143,11 +163,10 @@ func (f paymentFlow) charge(ctx context.Context, credential string, source crede
 	if !ok {
 		if offersMethod(f.entries, cred) {
 			// The offer for this method reads its credential from the other
-			// header: reject it with that offer's Challenges, which name the
-			// header to send it in.
-			err := mpp.ErrInvalidChallenge(cred.Challenge.ID, "Payment credential sent in a header this offer does not read")
-			f.paymentFailed(ctx, cred, err)
-			return composeRetryResult(ctx, f.entries, cred, body, scope, err)
+			// header. The core specification ignores a credential in a field
+			// the Challenge did not select, as if absent: answer with every
+			// offer's Challenges, which name the header to send it in.
+			return f.charge(ctx, "", source, scope, body)
 		}
 		err := mpp.ErrMethodUnsupported(cred.Challenge.Method + "/" + cred.Challenge.Intent)
 		f.paymentFailed(ctx, cred, err)

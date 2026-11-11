@@ -390,11 +390,11 @@ func TestIntegrationChargeFlow_LocalNodeHashReplayProtected(t *testing.T) {
 	}
 
 	defer replayResponse.Body.Close()
-	if !assert.Equalf(t, http.StatusForbidden, replayResponse.StatusCode,
-		"replay status = %d, want %d", replayResponse.StatusCode, http.StatusForbidden) {
+	if !assert.Equalf(t, http.StatusPaymentRequired, replayResponse.StatusCode,
+		"replay status = %d, want %d", replayResponse.StatusCode, http.StatusPaymentRequired) {
 		return
 	}
-	assert.Empty(t, replayResponse.Header.Get("WWW-Authenticate"), "replay response must not carry a retry challenge")
+	assert.NotEmpty(t, replayResponse.Header.Get("WWW-Authenticate"), "replay response must carry a fresh challenge")
 
 	body, err := io.ReadAll(replayResponse.Body)
 	if !assert.NoErrorf(t, err,
@@ -614,11 +614,11 @@ func TestIntegrationChargeFlow_ProofCredentialReplayProtected(t *testing.T) {
 	}
 
 	defer replayResponse.Body.Close()
-	if !assert.Equalf(t, http.StatusForbidden, replayResponse.StatusCode,
-		"replay status = %d, want %d", replayResponse.StatusCode, http.StatusForbidden) {
+	if !assert.Equalf(t, http.StatusPaymentRequired, replayResponse.StatusCode,
+		"replay status = %d, want %d", replayResponse.StatusCode, http.StatusPaymentRequired) {
 		return
 	}
-	assert.Empty(t, replayResponse.Header.Get("WWW-Authenticate"), "replay response must not carry a retry challenge")
+	assert.NotEmpty(t, replayResponse.Header.Get("WWW-Authenticate"), "replay response must carry a fresh challenge")
 
 	body, err := io.ReadAll(replayResponse.Body)
 	if !assert.NoErrorf(t, err,

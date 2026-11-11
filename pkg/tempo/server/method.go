@@ -158,6 +158,7 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		ExternalID:     params.ExternalID,
 		ChainID:        chainID,
 		FeePayer:       feePayer,
+		Memo:           params.Memo,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
 		SupportedModes: modes,
 	})

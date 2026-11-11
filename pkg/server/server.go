@@ -210,11 +210,11 @@ func WithRequiresAuth(enabled bool) Option {
 }
 
 // WithChallengeNonce sets whether every Challenge this handler issues is made
-// unique by a random _mppx_nonce bound into its opaque metadata, so identical
-// charges never share a Challenge ID. It is enabled by default, as in mppx;
-// pass false only while some replica still runs a verifier that rejects
-// _mppx_nonce. Verification accepts Challenges with and without a nonce
-// either way.
+// unique by a random _mpp_nonce (16 bytes, base64url without padding) bound
+// into its opaque metadata, so identical charges never share a Challenge ID.
+// It is enabled by default, as in every MPP SDK. Verification accepts
+// Challenges with and without a nonce either way, and ignores _mpp_nonce and
+// the legacy _mppx_nonce when it matches opaque metadata against the route's.
 func WithChallengeNonce(enabled bool) Option {
 	return func(m *Mpp) {
 		m.noChallengeNonce = !enabled
@@ -354,6 +354,10 @@ type ChargeParams struct {
 	Description string
 	// Splits adds Tempo split-payment transfers under methodDetails.splits.
 	Splits []tempoparams.SplitParams
+	// Memo is a 32-byte hex Tempo memo the primary transfer must carry,
+	// advertised as methodDetails.memo. Leave it empty to let clients attach
+	// their own attribution memo, which servers accept but never require.
+	Memo string
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
 	// A Tempo method with a fee payer sponsors every route without it.
 	FeePayer bool
