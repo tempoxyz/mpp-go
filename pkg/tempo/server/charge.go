@@ -1472,7 +1472,7 @@ func isDuplicateSubmission(err error) bool {
 // rejectIncludedTransaction looks up, once and without polling, the receipt
 // of the transaction with hash before this server broadcasts it. It returns
 // nil when the transaction is not on chain yet. One already on chain,
-// reverted or not, fails with verification-failed: another server, or an
+// reverted or not, fails as a replay (invalid-challenge): another server, or an
 // earlier settlement whose replay record expired or is kept elsewhere, may
 // already have counted it, so it never pays a credential, as in mppx. The
 // exception is a transaction this server broadcast itself for challengeID
@@ -1495,7 +1495,7 @@ func (i *Intent) rejectIncludedTransaction(ctx context.Context, rpc tempo.RPCCli
 		return nil, err
 	}
 	if !exists || recorded != challengeID {
-		return nil, mpp.ErrVerificationFailed("transaction is already on chain")
+		return nil, mpp.ErrCredentialReplayed("transaction is already on chain")
 	}
 	return receipt, nil
 }

@@ -1315,7 +1315,7 @@ func TestChargeFlow_IncludedBroadcastRejectedForAnotherChallenge(t *testing.T) {
 	other := *credential
 	other.Challenge.ID = "other-challenge"
 	_, err = intent.Verify(ctx, &other, request.Map())
-	require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+	require.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
 	require.ErrorContains(t, err, "transaction is already on chain")
 	assert.Len(t, rpc.sentRawTxs, 1)
 }
@@ -2726,7 +2726,7 @@ func TestChargeFlow_TransactionAlreadyIncludedRejected(t *testing.T) {
 			intent, err := NewIntent(config(rpc))
 			require.NoError(t, err)
 			_, err = intent.Verify(ctx, credential, request.Map())
-			require.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
+			require.ErrorIs(t, err, mpp.ErrorTypeInvalidChallenge)
 			require.ErrorContains(t, err, "transaction is already on chain")
 			assert.Len(t, rpc.sentRawTxs, 1)
 		})
