@@ -149,9 +149,14 @@ func TestChargeFlow_RejectsAttributionMemoForAnotherChallenge(t *testing.T) {
 				intent, err := NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
 				require.NoError(t, err)
 				_, err = intent.Verify(ctx, credential, request.Map())
-				if credentialType == tempo.CredentialTypeHash {
+				switch {
+				case credentialType == tempo.CredentialTypeHash:
 					assert.ErrorIs(t, err, mpp.ErrorTypeVerificationFailed)
-				} else {
+				case name == "other realm":
+					// A pull payment may carry another realm's
+					// attribution memo.
+					assert.NoError(t, err)
+				default:
 					assert.ErrorContains(t, err, "does not contain a matching Tempo transfer")
 				}
 			})
@@ -318,7 +323,7 @@ func TestMatchTransfers_PushRequiresAttribution(t *testing.T) {
 		"custom":          {serverMemo, true, false},
 		"bound":           {bound, true, true},
 		"other challenge": {tempo.EncodeAttribution(testRealm, "", "other"), false, false},
-		"other realm":     {tempo.EncodeAttribution("other.example.com", "", challengeID), false, false},
+		"other realm":     {tempo.EncodeAttribution("other.example.com", "", challengeID), true, false},
 	} {
 		assert.Equal(t, tt.pull, matchTransfers(transfer(tt.memo), expectedTransfers(request), testRealm, challengeID), "pull/%s", name)
 		assert.Equal(t, tt.push, matchTransfers(transfer(tt.memo), expectedPushTransfers(request), testRealm, challengeID), "push/%s", name)

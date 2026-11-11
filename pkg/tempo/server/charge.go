@@ -1663,13 +1663,14 @@ func matchTransfers(actual []decodedTransfer, expected []expectedTransfer, realm
 				}
 				continue
 			}
-			// A transfer without a configured memo accepts any memo except an
-			// attribution memo bound to another challenge or realm. Otherwise
+			// A transfer without a configured memo accepts any memo except
+			// this realm's attribution memo for another challenge. Otherwise
 			// one payment could carry memos for two challenges and pay
-			// both once the first replay marker expires. Memos the server
-			// configured are matched exactly above.
+			// both once the first replay marker expires. Another realm's
+			// attribution memo is the client's own business and is accepted.
+			// Memos the server configured are matched exactly above.
 			if want.allowAnyMemo && got.hasMemo && tempo.IsAttributionMemo(got.memo) &&
-				(!tempo.VerifyAttributionServer(got.memo, realm) || !tempo.VerifyAttributionChallenge(got.memo, challengeID)) {
+				tempo.VerifyAttributionServer(got.memo, realm) && !tempo.VerifyAttributionChallenge(got.memo, challengeID) {
 				continue
 			}
 			if want.allowAnyMemo || !got.hasMemo {

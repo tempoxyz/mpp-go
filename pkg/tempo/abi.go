@@ -42,8 +42,8 @@ func EncodeTransferWithMemo(recipient string, amount *big.Int, memo string) (str
 // Tempo charge transfer: a transfer of request.Amount to request.Recipient.
 // When request.MethodDetails.Memo is set, it must be a transferWithMemo
 // carrying exactly that memo. Otherwise the memo is optional: a plain
-// transfer or any memo is accepted, except an attribution memo for another
-// realm or challenge.
+// transfer or any memo is accepted, except this realm's attribution memo for
+// another challenge.
 func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challengeID string) bool {
 	dataHex = strings.TrimPrefix(strings.ToLower(dataHex), "0x")
 	if len(dataHex) < 8 {
@@ -75,8 +75,8 @@ func MatchTransferCalldata(dataHex string, request ChargeRequest, realm, challen
 	if request.MethodDetails.Memo != "" {
 		return strings.EqualFold(memo, request.MethodDetails.Memo)
 	}
-	if IsAttributionMemo(memo) {
-		return VerifyAttributionServer(memo, realm) && VerifyAttributionChallenge(memo, challengeID)
+	if IsAttributionMemo(memo) && VerifyAttributionServer(memo, realm) {
+		return VerifyAttributionChallenge(memo, challengeID)
 	}
 	return true
 }

@@ -336,8 +336,8 @@ func TestMatchTransferCalldata_Attribution(t *testing.T) {
 		"MatchTransferCalldata() = true, want false for padded attribution memo calldata") {
 		return
 	}
-	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "other.example.com", "challenge-1"),
-		"MatchTransferCalldata() = true, want false for wrong attribution realm") {
+	if !assert.True(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "other.example.com", "challenge-1"),
+		"MatchTransferCalldata() = false, want true for another realm's attribution memo") {
 		return
 	}
 	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-2"),

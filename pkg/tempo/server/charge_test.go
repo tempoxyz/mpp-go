@@ -957,10 +957,11 @@ func TestMatchTransfers_RejectsConflictingSplitAttributionMemos(t *testing.T) {
 		{"bound", "custom", true},
 		{"bound", "other challenge", false},
 		{"other challenge", "bound", false},
-		{"bound", "other realm", false},
-		{"other realm", "bound", false},
+		// Another realm's attribution memo is accepted.
+		{"bound", "other realm", true},
+		{"other realm", "bound", true},
 		{"other challenge", "plain", false},
-		{"other realm", "plain", false},
+		{"other realm", "plain", true},
 		// The primary's attribution memo is optional.
 		{"plain", "plain", true},
 		{"custom", "plain", true},
