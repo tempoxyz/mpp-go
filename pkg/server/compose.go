@@ -411,12 +411,20 @@ func paymentCredentialField(header http.Header, name string) (string, error) {
 	for _, value := range header.Values(name) {
 		credential := ""
 		if len(value) > maxCredentialBytes {
+			// Count every Payment credential first, so an oversized value
+			// carrying several still gets 400 rather than malformed-credential.
+			payments := 0
 			for _, part := range mpp.SplitAuthenticate(value) {
-				scheme, _, _ := strings.Cut(strings.TrimSpace(part), " ")
-				if strings.EqualFold(scheme, mpp.SchemePayment) {
-					credential = value
-					break
+				scheme, token, _ := strings.Cut(strings.TrimSpace(part), " ")
+				if strings.EqualFold(scheme, mpp.SchemePayment) && strings.TrimSpace(token) != "" {
+					payments++
 				}
+			}
+			if payments > 1 {
+				return "", errMultiplePaymentCredentials
+			}
+			if payments == 1 {
+				credential = value
 			}
 		} else {
 			var err error

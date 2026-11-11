@@ -69,6 +69,9 @@ func TestSpecMultiplePaymentCredentialsAreBadRequest(t *testing.T) {
 		"both fields":    {mpp.HeaderAuthorization: {credential}, mpp.HeaderPaymentAuthorization: {credential}},
 		"comma-joined":   {mpp.HeaderAuthorization: {credential + ", " + credential}},
 		"repeated field": {mpp.HeaderAuthorization: {credential, credential}},
+		"oversized comma-joined": {mpp.HeaderAuthorization: {
+			credential + ", Payment " + strings.Repeat("A", 70000),
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			recorder := specSend(handler, header)

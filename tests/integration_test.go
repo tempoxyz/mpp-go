@@ -1026,6 +1026,11 @@ func paidHandler(t *testing.T, payment *server.Mpp, feePayer bool) http.HandlerF
 			DisableFeePayer: !feePayer,
 		})
 		if err != nil {
+			if result != nil {
+				// The result carries the fresh Challenge a failed credential gets.
+				result.ServeHTTP(w, r)
+				return
+			}
 			writeIntegrationPaymentError(w, err)
 			return
 		}
@@ -1065,6 +1070,11 @@ func paidHandlerWithAmount(t *testing.T, payment *server.Mpp, amount string) htt
 			Amount:        amount,
 		})
 		if err != nil {
+			if result != nil {
+				// The result carries the fresh Challenge a failed credential gets.
+				result.ServeHTTP(w, r)
+				return
+			}
 			writeIntegrationPaymentError(w, err)
 			return
 		}
@@ -1108,6 +1118,11 @@ func paidHandlerWithSplitsAndExternalID(t *testing.T, payment *server.Mpp) http.
 			},
 		})
 		if err != nil {
+			if result != nil {
+				// The result carries the fresh Challenge a failed credential gets.
+				result.ServeHTTP(w, r)
+				return
+			}
 			writeIntegrationPaymentError(w, err)
 			return
 		}
@@ -1149,6 +1164,11 @@ func paidHandlerWithExternalID(t *testing.T, payment *server.Mpp, amount, extern
 			ExternalID:    externalID,
 		})
 		if err != nil {
+			if result != nil {
+				// The result carries the fresh Challenge a failed credential gets.
+				result.ServeHTTP(w, r)
+				return
+			}
 			writeIntegrationPaymentError(w, err)
 			return
 		}
