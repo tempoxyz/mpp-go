@@ -230,8 +230,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
-		if sent && sentCred != nil && sentCred.Payload["type"] == "hash" {
-			// A hash credential's transfer is already on chain: resending it
+		if sent && sentCred != nil && isPushCredential(sentCred) {
+			// A push credential's payment (a hash credential's transfer or a
+			// zone credential's withdrawal) is already on chain: resending it
 			// is safe, but paying a new challenge would pay twice.
 			key := credentialKey{id: selected.challenge.ID, method: methodKey{name: selected.challenge.Method, intent: selected.challenge.Intent}}
 			if credentials[key] == nil || (problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload) {
@@ -708,4 +709,14 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 // configuration order.
 func (t *Transport) configuredMethods() []Method {
 	return t.methodList
+}
+
+// isPushCredential reports whether a credential names a payment the client
+// already made on chain: a Tempo hash or zone credential.
+func isPushCredential(credential *mpp.Credential) bool {
+	switch credential.Payload["type"] {
+	case "hash", "zone":
+		return true
+	}
+	return false
 }
