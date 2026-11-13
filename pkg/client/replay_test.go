@@ -111,3 +111,36 @@ func TestTransport_RoundTrip_ClosesReplayBodyWhenCredentialFails(t *testing.T) {
 		assert.Truef(t, body.closed, "replay body %d was opened for a retry that was never sent and not closed", i)
 	}
 }
+
+func TestTransport_RoundTrip_DoesNotPayAgainAfterInvalidChallenge(t *testing.T) {
+	calls := 0
+	var challenge *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		if r.Header.Get("Authorization") != "" {
+			// A replayed credential: 402 invalid-challenge with a fresh challenge.
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = io.WriteString(w, `{"type":"https://paymentauth.org/problems/invalid-challenge","title":"Invalid Challenge","status":402}`)
+			return
+		}
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	tr := newTestTransport([]Method{method}, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+
+	resp, err := tr.RoundTrip(req)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Equalf(t, 1, method.calls, "CreateCredential() calls = %d, want 1: no second payment", method.calls)
+	assert.Equalf(t, 2, calls, "server calls = %d, want 2", calls)
+}

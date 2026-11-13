@@ -338,10 +338,11 @@ shall be dual licensed as above, without any additional terms or conditions.
 Hash-mode clients validate the credential header size before broadcasting. For custom clients,
 serialize with `mpp.FormatCredential(credential)` and handle its error.
 
-Every server-issued Challenge carries a random `_mppx_nonce` in its HMAC-bound
-opaque metadata by default, as in mppx, so identical charges never share a
-Challenge ID. `_mppx_nonce` and the legacy `_mpp_nonce` are reserved; do not set
-either in `ChargeParams.Meta`. Bind authenticated application context with
+Every server-issued Challenge carries a random `_mpp_nonce` (16 bytes,
+base64url without padding) in its HMAC-bound opaque metadata by default, the
+same key every MPP SDK uses, so identical charges never share a Challenge ID.
+`_mpp_nonce` and the legacy `_mppx_nonce` are reserved; do not set either in
+`ChargeParams.Meta`. Bind authenticated application context with
 `ChargeParams{Meta: map[string]string{"account": authenticatedAccountID}}` when
 a payment must authorize a specific caller. Derive this ID from trusted
 session authentication, never directly from request input. Nonces prevent
@@ -349,14 +350,8 @@ challenge collisions; they do not make leaked complete credentials safe.
 Low-level challenge constructors remain deterministic, so custom issuance must
 supply its own unique, authenticated context.
 
-Verification accepts Challenges with `_mppx_nonce`, with the legacy `_mpp_nonce`
-that earlier mpp-go releases issued, and with no nonce, so existing Challenges
-remain valid until their original expiry.
-
-**Rolling upgrades:** mpp-go 0.4.0 to 0.6.0 verifiers reject `_mppx_nonce`
-Challenges, possibly after a hash payment has settled. A fleet that mixes this
-release with those versions must opt out of nonce issuance until every replica
-is upgraded: create the server with `server.WithChallengeNonce(false)` (or set
-`VerifyParams.DisableChallengeNonce` when calling `VerifyOrChallenge`). Remove
-the opt-out once the upgrade is complete; until then identical charges share a
-Challenge ID.
+Verification accepts Challenges with `_mpp_nonce`, with the legacy
+`_mppx_nonce` that earlier mpp-go releases issued, and with no nonce, so
+existing Challenges remain valid until their original expiry. Turn issuance off
+with `server.WithChallengeNonce(false)` (or `VerifyParams.DisableChallengeNonce`
+when calling `VerifyOrChallenge`); identical charges then share a Challenge ID.

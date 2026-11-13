@@ -3,6 +3,8 @@ module github.com/tempoxyz/mpp-go
 
 go 1.26.10
 
+toolchain go1.26.11
+
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/ethereum/go-ethereum v1.17.5

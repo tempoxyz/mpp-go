@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -35,16 +37,45 @@ type composedEntry struct {
 }
 
 // withRequestHeaders returns a copy of entries whose params carry the raw
-// Authorization and Payment-Authorization values of header.
-func withRequestHeaders(entries []composedEntry, header http.Header) []composedEntry {
+// Authorization and Payment-Authorization values of header: the first field
+// line of each, except that the field credential arrived in (source) carries
+// the field line holding credential, so Charge verifies the credential
+// composePaymentCredential found even when it is in a later field line.
+func withRequestHeaders(entries []composedEntry, header http.Header, credential string, source credentialSource) []composedEntry {
+	authorization := header.Get(mpp.HeaderAuthorization)
+	paymentAuthorization := header.Get(mpp.HeaderPaymentAuthorization)
+	switch source {
+	case sourceAuthorization:
+		authorization = fieldLineWith(header, mpp.HeaderAuthorization, credential, authorization)
+	case sourcePaymentAuthorization:
+		paymentAuthorization = fieldLineWith(header, mpp.HeaderPaymentAuthorization, credential, paymentAuthorization)
+	}
 	bound := make([]composedEntry, len(entries))
 	for i, entry := range entries {
-		entry.params.Authorization = header.Get(mpp.HeaderAuthorization)
-		entry.params.PaymentAuthorization = header.Get(mpp.HeaderPaymentAuthorization)
+		entry.params.Authorization = authorization
+		entry.params.PaymentAuthorization = paymentAuthorization
 		entry.requestHeaders = true
 		bound[i] = entry
 	}
 	return bound
+}
+
+// fieldLineWith returns the field line of header field name that carries
+// credential, as paymentCredentialField found it, or first when credential is
+// empty or no line carries it.
+func fieldLineWith(header http.Header, name, credential, first string) string {
+	if credential == "" {
+		return first
+	}
+	for _, value := range header.Values(name) {
+		if value == credential {
+			return value
+		}
+		if found, err := mpp.FindPaymentAuthorizationStrict(value); err == nil && found == credential {
+			return value
+		}
+	}
+	return first
 }
 
 // ComposeMiddleware creates an http.Handler middleware that supports multiple
@@ -360,9 +391,11 @@ func offersMethod(entries []composedEntry, cred *mpp.Credential) bool {
 }
 
 // composePaymentCredential returns the one Payment credential header carries
-// in the fields the entries read it from: Authorization, and
-// Payment-Authorization for entries created WithRequiresAuth, and the field
-// it arrived in.
+// and the field it arrived in. Every Authorization and Payment-Authorization
+// value is checked: more than one Payment credential in a request is an error
+// (400 bad-request, as the core specification requires). A credential in a
+// field no entry reads (Authorization for entries created WithRequiresAuth,
+// Payment-Authorization for the others) is ignored, as if absent.
 func composePaymentCredential(entries []composedEntry, header http.Header) (string, credentialSource, error) {
 	needsDefault := false
 	needsAuth := false
@@ -374,25 +407,68 @@ func composePaymentCredential(entries []composedEntry, header http.Header) (stri
 		}
 	}
 
-	var authorization, paymentAuthorization string
-	var err error
-	if needsDefault {
-		authorization, err = mpp.FindPaymentAuthorizationStrict(header.Get(mpp.HeaderAuthorization))
-		if err != nil {
-			return "", sourceAny, err
-		}
+	authorization, err := paymentCredentialField(header, mpp.HeaderAuthorization)
+	if err != nil {
+		return "", sourceAny, err
 	}
-	if needsAuth {
-		paymentAuthorization, err = mpp.FindPaymentAuthorizationStrict(header.Get(mpp.HeaderPaymentAuthorization))
-		if err != nil {
-			return "", sourceAny, err
-		}
+	paymentAuthorization, err := paymentCredentialField(header, mpp.HeaderPaymentAuthorization)
+	if err != nil {
+		return "", sourceAny, err
 	}
 	if authorization != "" && paymentAuthorization != "" {
-		return "", sourceAny, fmt.Errorf("mpp: multiple Payment credentials")
+		return "", sourceAny, errMultiplePaymentCredentials
 	}
-	if paymentAuthorization != "" {
+	if paymentAuthorization != "" && needsAuth {
 		return paymentAuthorization, sourcePaymentAuthorization, nil
 	}
-	return authorization, sourceAuthorization, nil
+	if authorization != "" && needsDefault {
+		return authorization, sourceAuthorization, nil
+	}
+	return "", sourceAuthorization, nil
+}
+
+// errMultiplePaymentCredentials reports a request carrying more than one
+// Payment credential.
+var errMultiplePaymentCredentials = errors.New("mpp: multiple Payment credentials")
+
+// paymentCredentialField returns the Payment credential in the values of the
+// header field name, or an error when they carry more than one. A value over
+// the size servers must accept is returned as is when it uses the Payment
+// scheme, so parsing rejects it as a malformed credential.
+func paymentCredentialField(header http.Header, name string) (string, error) {
+	var found string
+	for _, value := range header.Values(name) {
+		credential := ""
+		if len(value) > maxCredentialBytes {
+			// Count every Payment credential first, so an oversized value
+			// carrying several still gets 400 rather than malformed-credential.
+			payments := 0
+			for _, part := range mpp.SplitAuthenticate(value) {
+				scheme, token, _ := strings.Cut(strings.TrimSpace(part), " ")
+				if strings.EqualFold(scheme, mpp.SchemePayment) && strings.TrimSpace(token) != "" {
+					payments++
+				}
+			}
+			if payments > 1 {
+				return "", errMultiplePaymentCredentials
+			}
+			if payments == 1 {
+				credential = value
+			}
+		} else {
+			var err error
+			credential, err = mpp.FindPaymentAuthorizationStrict(value)
+			if err != nil {
+				return "", errMultiplePaymentCredentials
+			}
+		}
+		if credential == "" {
+			continue
+		}
+		if found != "" {
+			return "", errMultiplePaymentCredentials
+		}
+		found = credential
+	}
+	return found, nil
 }

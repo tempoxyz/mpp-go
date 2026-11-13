@@ -105,6 +105,10 @@ func TestChargeFlow_ProofCredentialWithKeychainV1AccessKey(t *testing.T) {
 	copy(envelope[53:85], common.LeftPadBytes(inner.S.Bytes(), 32))
 	envelope[85] = inner.YParity
 	credential.Payload["signature"] = hexutil.Encode(envelope)
+	// A fresh store: the rebuilt challenge can share the first one's ID,
+	// whose proof is already used and would be rejected as a replay first.
+	intent, err = NewIntent(IntentConfig{Store: tempo.NewMemoryStore(), RPC: rpc})
+	require.NoError(t, err)
 	_, err = intent.Verify(context.Background(), credential, request.Map())
 	require.ErrorContains(t, err, "proof signature does not match source")
 }
