@@ -931,6 +931,37 @@ func TestZonePaysGasInConfiguredFeeToken(t *testing.T) {
 	assert.Equal(t, common.HexToAddress(testCurrency), *tx.Calls[0].To)
 }
 
+// A Zone withdrawal is valid only until the challenge expiry less the
+// settlement timeout: if the Zone includes it late, it cannot move funds once
+// its settlement could no longer finish before the challenge expires.
+func TestZoneWithdrawalExpiresBeforeChallengeSettlementDeadline(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Minute })
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	require.Len(t, zoneRPC.sent, 1)
+	tx, err := tempotx.Deserialize(zoneRPC.sent[0])
+	require.NoError(t, err)
+	expiry, err := mpp.ParseExpires(challenge.Expires)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(expiry.Add(-time.Minute).Unix()), tx.ValidBefore)
+	assert.Zero(t, tx.NonceKey.Sign(), "a Zone withdrawal keeps its sequential nonce")
+}
+
+func TestZoneValidBefore(t *testing.T) {
+	t.Parallel()
+	validBefore, err := zoneValidBefore("", time.Minute)
+	require.NoError(t, err)
+	assert.Zero(t, validBefore)
+	validBefore, err = zoneValidBefore("2026-01-01T00:01:00Z", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Unix()), validBefore)
+	_, err = zoneValidBefore("not a time", time.Minute)
+	assert.Error(t, err)
+}
+
 // A successful receipt that does not show the signed withdrawal (no
 // WithdrawalRequested event, one that does not decode or does not match the
 // signed sender, token, recipient, amount or memo, or a receipt of another

@@ -618,7 +618,12 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if m.feeToken != nil {
 		feeToken = *m.feeToken
 	}
+	validBefore, err := zoneValidBefore(challenge.Expires, m.zone.settlementTimeout)
+	if err != nil {
+		return common.Hash{}, "", false, err
+	}
 	tx, err := tempotx.NewBuilder(big.NewInt(m.zone.chainID)).
+		SetValidBefore(validBefore).
 		SetMaxFeePerGas(gasPrice).
 		SetMaxPriorityFeePerGas(new(big.Int).Set(gasPrice)).
 		SetGas(zoneWithdrawalGas).
@@ -686,6 +691,27 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 		}
 	}
 	return m.zoneWithdrawalOutcome(challenge, expected, receipt, hash)
+}
+
+// zoneValidBefore returns the valid_before of a Zone withdrawal paying a
+// challenge that expires at expires: the challenge expiry less the settlement
+// timeout, so a withdrawal the Zone includes late, after the method checked
+// the expiry and sent it, can no longer move funds once its settlement could
+// not finish before the challenge expires. A challenge without an expiry gets
+// none (zero).
+func zoneValidBefore(expires string, settlementTimeout time.Duration) (uint64, error) {
+	if expires == "" {
+		return 0, nil
+	}
+	expiry, err := mpp.ParseExpires(expires)
+	if err != nil {
+		return 0, fmt.Errorf("tempo client: invalid challenge expiry %q: %w", expires, err)
+	}
+	validBefore := expiry.Add(-settlementTimeout).Unix()
+	if validBefore <= 0 {
+		return 0, fmt.Errorf("%w: challenge expires at %s", ErrZoneChallengeExpiresTooSoon, expires)
+	}
+	return uint64(validBefore), nil
 }
 
 // resumeZoneWithdrawal looks up the receipt of a withdrawal an earlier call
