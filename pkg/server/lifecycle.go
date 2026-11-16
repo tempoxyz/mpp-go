@@ -86,7 +86,7 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 	if err != nil {
 		return nil, nil, mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format")
 	}
-	if challengeExpired(expires, time.Now()) {
+	if credentialExpired(intent, credential, expires, time.Now()) {
 		return nil, nil, mpp.ErrPaymentExpired(echoed.Expires)
 	}
 	return intent, echoedRequest, nil
@@ -97,4 +97,19 @@ func (m *Mpp) prepareCredential(credential *mpp.Credential) (Intent, map[string]
 // verifier and mppx.
 func challengeExpired(expires, now time.Time) bool {
 	return !now.Before(expires)
+}
+
+// credentialExpired reports whether intent no longer accepts credential at
+// now: its challenge has expired and, when intent is an ExpiryGraceIntent, the
+// grace it grants credential has passed too.
+func credentialExpired(intent Intent, credential *mpp.Credential, expires, now time.Time) bool {
+	if !challengeExpired(expires, now) {
+		return false
+	}
+	graced, ok := intent.(ExpiryGraceIntent)
+	if !ok {
+		return true
+	}
+	grace := graced.ExpiryGrace(credential)
+	return grace <= 0 || challengeExpired(expires.Add(grace), now)
 }

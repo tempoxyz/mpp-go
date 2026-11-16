@@ -224,7 +224,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
 		)
 	}
-	if challengeExpired(expiresTime, time.Now()) {
+	if credentialExpired(params.Intent, credential, expiresTime, time.Now()) {
 		return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 	}
 	// The nonce is authenticated by the echoed HMAC, not compared with the

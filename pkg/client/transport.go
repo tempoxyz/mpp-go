@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -230,8 +231,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
-		if sent && sentCred != nil && sentCred.Payload["type"] == "hash" {
-			// A hash credential's transfer is already on chain: resending it
+		if sent && sentCred != nil && isPushCredential(sentCred) {
+			// A push credential's payment (a hash credential's transfer or a
+			// zone credential's withdrawal) is already on chain: resending it
 			// is safe, but paying a new challenge would pay twice.
 			key := credentialKey{id: selected.challenge.ID, method: methodKey{name: selected.challenge.Method, intent: selected.challenge.Intent}}
 			if credentials[key] == nil || (problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload) {
@@ -262,7 +264,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		cred := credentials[key]
 		if cred == nil {
-			cred, err = t.createCredential(baseRequest.Context(), selected)
+			cred, err = t.createCredential(baseRequest.Context(), selected, challengeOrigin(request.URL))
 			if err != nil {
 				if retry.Body != nil {
 					_ = retry.Body.Close()
@@ -392,7 +394,11 @@ func closeRequestBody(req *http.Request) {
 
 // createCredential runs the OnChallenge hook, when set, and otherwise creates
 // the credential with the selected method.
-func (t *Transport) createCredential(ctx context.Context, selected challengeCandidate) (*mpp.Credential, error) {
+//
+// origin is the origin of the server that issued the challenge, or "" when
+// unknown. A method that fails with paymentctx.ErrSettlementPending is asked
+// again for the same challenge, up to the payment-retry limit.
+func (t *Transport) createCredential(ctx context.Context, selected challengeCandidate, origin string) (*mpp.Credential, error) {
 	// create runs the method at most once: a method may broadcast a payment on
 	// every call, so a hook that calls createCredential and then returns
 	// (nil, nil), or calls it twice, must not pay twice.
@@ -406,7 +412,13 @@ func (t *Transport) createCredential(ctx context.Context, selected challengeCand
 			return createdVal, createdErr
 		}
 		created = true
-		createdVal, createdErr = selected.method.CreateCredential(ctx, selected.challenge)
+		// The method learns which server issued the challenge, and a payment
+		// still settling is resumed for the same challenge rather than paid
+		// again under a new one.
+		ctx = paymentctx.WithOrigin(ctx, origin)
+		createdVal, createdErr = paymentctx.RetryPending(ctx, max(t.maxRetries, 1), func() (*mpp.Credential, error) {
+			return selected.method.CreateCredential(ctx, selected.challenge)
+		})
 		if createdErr != nil {
 			createdVal = nil
 			createdErr = fmt.Errorf("mpp: creating credential for method %q: %w", selected.challenge.Method, createdErr)
@@ -653,6 +665,15 @@ func requestOrigin(requestURL *url.URL) string {
 	return tempoproof.Origin(requestURL)
 }
 
+// challengeOrigin returns the origin of the server that answered requestURL
+// with a challenge, or "" when the URL names no host.
+func challengeOrigin(requestURL *url.URL) string {
+	if requestURL == nil || requestURL.Scheme == "" || requestURL.Host == "" {
+		return ""
+	}
+	return requestOrigin(requestURL)
+}
+
 func sameOriginURL(requestURL *url.URL, origin string) bool {
 	return requestOrigin(requestURL) == origin
 }
@@ -708,4 +729,14 @@ func (t *Transport) validatePaymentOrigin(req *http.Request, candidate challenge
 // configuration order.
 func (t *Transport) configuredMethods() []Method {
 	return t.methodList
+}
+
+// isPushCredential reports whether a credential names a payment the client
+// already made on chain: a Tempo hash or zone credential.
+func isPushCredential(credential *mpp.Credential) bool {
+	switch credential.Payload["type"] {
+	case "hash", "zone":
+		return true
+	}
+	return false
 }
