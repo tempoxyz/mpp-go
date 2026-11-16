@@ -35,12 +35,15 @@ const methodCallTool = "tools/call"
 // when an OnChallenge hook declines, so errors.Is matches either.
 var ErrPaymentDeclined = mppclient.ErrPaymentDeclined
 
-// ErrPaymentReconciliationRequired indicates a submitted transfer must be reconciled
-// before retrying a tool call. Use errors.As to obtain its ReconciliationError.
+// ErrPaymentReconciliationRequired indicates a submitted payment must be
+// reconciled before retrying a tool call: a hash Credential's transfer is
+// already on chain, and an invalid-challenge rejection of any sent Credential
+// can mean it already settled (a replay), so paying the fresh Challenge could
+// pay twice. Use errors.As to obtain its ReconciliationError.
 var ErrPaymentReconciliationRequired = errors.New("mpp: reconcile the sent payment before paying another challenge")
 
-// ReconciliationError preserves the submitted hash Credential and server failure.
-// A caller must reconcile Credential before attempting a new payment.
+// ReconciliationError preserves the submitted Credential and the server's
+// answer. A caller must reconcile Credential before attempting a new payment.
 type ReconciliationError struct {
 	Credential *mpp.Credential
 	Cause      error
@@ -160,7 +163,10 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		// twice. Only an invalid-payload rejection discards the Credential.
 		credentials := make(map[credentialKey]*mpp.Credential)
 		var sent credentialKey
-		var sentHash *mpp.Credential
+		// sentCredential is the Credential the last request carried, the
+		// caller's own or one created here; sentHash is the hash Credential
+		// sent during this call, if any.
+		var sentCredential, sentHash *mpp.Credential
 		authorization, parseErr := payment.Authorization(params.Meta)
 		if parseErr != nil {
 			return nil, parseErr
@@ -170,6 +176,7 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if parseErr != nil {
 				return nil, parseErr
 			}
+			sentCredential = credential
 			if credential.Payload["type"] == "hash" {
 				sentHash = credential
 			}
@@ -182,6 +189,17 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 					return result, &ReconciliationError{Credential: sentHash, Cause: err}
 				}
 				return result, err
+			}
+			if sentCredential != nil && data.Problem["type"] == string(mpp.ErrorTypeInvalidChallenge) {
+				// invalid-challenge answering a sent Credential can mean it
+				// was already settled (a replay): paying the fresh Challenge
+				// would pay twice, so the answer is final, as in the HTTP
+				// Transport.
+				cause := err
+				if cause == nil {
+					cause = errors.New("mpp: tool result rejected the sent credential as invalid-challenge")
+				}
+				return result, &ReconciliationError{Credential: sentCredential, Cause: cause}
 			}
 			if attempt == maxPaymentAttempts {
 				if sentHash != nil {
@@ -204,8 +222,9 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 				return nil, payErr
 			}
 			sent = key
-			if credential := credentials[key]; credential != nil && credential.Payload["type"] == "hash" {
-				sentHash = credential
+			sentCredential = credentials[key]
+			if sentCredential != nil && sentCredential.Payload["type"] == "hash" {
+				sentHash = sentCredential
 			}
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}

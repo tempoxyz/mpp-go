@@ -127,7 +127,7 @@ func TestChallengeCreatedReportsEachChallengeToItsIssuer(t *testing.T) {
 	assert.Equal(t, []string{"beta"}, betaSeen)
 }
 
-func TestComposeRequiresAuthOfferRejectsCredentialInAuthorization(t *testing.T) {
+func TestComposeRequiresAuthOfferIgnoresCredentialInAuthorization(t *testing.T) {
 	t.Parallel()
 
 	alpha := apiTestServer(t)
@@ -151,7 +151,8 @@ func TestComposeRequiresAuthOfferRejectsCredentialInAuthorization(t *testing.T) 
 	}
 	require.NotNil(t, betaChallenge)
 
-	// beta reads its Credential from Payment-Authorization only.
+	// beta reads its Credential from Payment-Authorization only: one sent in
+	// Authorization is ignored, as if absent, and every offer is reissued.
 	r := httptest.NewRequest(http.MethodGet, "/premium", nil)
 	r.Header.Set(mpp.HeaderAuthorization, paymentFor(betaChallenge))
 	rejected := httptest.NewRecorder()
@@ -160,8 +161,7 @@ func TestComposeRequiresAuthOfferRejectsCredentialInAuthorization(t *testing.T) 
 	assert.NotEqual(t, "ok", rejected.Body.String())
 	assert.Empty(t, rejected.Header().Get(mpp.HeaderPaymentReceipt))
 	retry := rejected.Header().Values(mpp.HeaderWWWAuthenticate)
-	require.Len(t, retry, 1)
-	assert.Contains(t, retry[0], mpp.HeaderPaymentAuthorization)
+	require.Len(t, retry, 2)
 
 	r = httptest.NewRequest(http.MethodGet, "/premium", nil)
 	r.Header.Set(mpp.HeaderPaymentAuthorization, paymentFor(betaChallenge))
@@ -171,7 +171,7 @@ func TestComposeRequiresAuthOfferRejectsCredentialInAuthorization(t *testing.T) 
 	assert.Equal(t, "ok", accepted.Body.String())
 }
 
-func TestComposeRequiresAuthOfferSameMethodRejectsCredentialInAuthorization(t *testing.T) {
+func TestComposeRequiresAuthOfferSameMethodIgnoresCredentialInAuthorization(t *testing.T) {
 	t.Parallel()
 
 	plain := apiTestServer(t)
@@ -187,8 +187,9 @@ func TestComposeRequiresAuthOfferSameMethodRejectsCredentialInAuthorization(t *t
 	r := httptest.NewRequest(http.MethodGet, "/premium", nil)
 	r.Header.Set(mpp.HeaderAuthorization, paymentFor(issued.Challenges[1]))
 	res, err := ComposeRequest(r, offers...)
-	require.Error(t, err)
+	require.NoError(t, err)
 	assert.Nil(t, res.Receipt)
+	assert.Len(t, res.Challenges, 2)
 
 	r = httptest.NewRequest(http.MethodGet, "/premium", nil)
 	r.Header.Set(mpp.HeaderPaymentAuthorization, paymentFor(issued.Challenges[1]))

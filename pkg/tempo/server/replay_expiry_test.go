@@ -2,6 +2,7 @@ package chargeserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,14 +13,24 @@ import (
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 )
 
-// expiringRecordingStore records the expiry the verifier asks for.
+// expiringRecordingStore records the expiry the verifier asks for replay
+// keys. Broadcast records, which always expire with their challenge and are
+// deleted once their transaction settles, are recorded separately.
 type expiringRecordingStore struct {
 	*tempo.MemoryStore
-	expiries map[string]time.Time
+	expiries          map[string]time.Time
+	broadcastExpiries map[string]time.Time
 }
 
 func (s *expiringRecordingStore) PutIfAbsentUntil(ctx context.Context, key, value string, expiresAt time.Time) (bool, error) {
-	s.expiries[key] = expiresAt
+	if strings.HasPrefix(key, tempo.ReplayKeyPrefix+"broadcast:") {
+		if s.broadcastExpiries == nil {
+			s.broadcastExpiries = map[string]time.Time{}
+		}
+		s.broadcastExpiries[key] = expiresAt
+	} else {
+		s.expiries[key] = expiresAt
+	}
 	return s.MemoryStore.PutIfAbsentUntil(ctx, key, value, expiresAt)
 }
 
@@ -54,6 +65,19 @@ func TestReplayClaimsExpireAfterChallengeWithExpiringStore(t *testing.T) {
 			}
 			for key, expiresAt := range store.expiries {
 				assert.Truef(t, expiresAt.Equal(want), "%s expires at %s, want %s", key, expiresAt, want)
+			}
+			// The broadcast records expire with the challenge and are
+			// removed once the payment settled.
+			if feePayer {
+				assert.Len(t, store.broadcastExpiries, 2, "broadcast and sponsored broadcast records")
+			} else {
+				assert.Len(t, store.broadcastExpiries, 1)
+			}
+			for key, expiresAt := range store.broadcastExpiries {
+				assert.Truef(t, expiresAt.Equal(want), "%s expires at %s, want %s", key, expiresAt, want)
+				_, exists, err := store.Get(ctx, key)
+				require.NoError(t, err)
+				assert.Falsef(t, exists, "%s is kept after settlement", key)
 			}
 
 			_, err = intent.Verify(ctx, credential, request.Map())

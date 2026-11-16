@@ -672,3 +672,59 @@ func TestHashPaymentPreservesReconciliationAfterFailure(t *testing.T) {
 		}
 	}
 }
+
+// A replay is answered with 402 invalid-challenge and a fresh Challenge. The
+// Credential the client sent may already have settled, so paying the fresh
+// Challenge would pay twice: the client stops for reconciliation instead.
+func TestReplayedCredentialNeverPaysFreshChallenge(t *testing.T) {
+	method := &testMethod{verificationErr: mpp.ErrCredentialReplayed("transaction hash already used")}
+	payer := &testClientMethod{token: "valid"}
+	approvals := 0
+	session := connect(t, newServer(chargeHandler(newPayment(t, method))), mcpclient.Wrap(newClient(), mcpclient.Config{
+		Methods:           []client.Method{payer},
+		OnPaymentRequired: func(context.Context, *mpp.Challenge) (bool, error) { approvals++; return true, nil },
+	}))
+	result, err := callPremium(context.Background(), session, nil)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, mcpclient.ErrPaymentReconciliationRequired)
+	var reconciliation *mcpclient.ReconciliationError
+	require.ErrorAs(t, err, &reconciliation)
+	assert.Equal(t, "valid", reconciliation.Credential.Payload["token"])
+	_, data := paymentData(t, err)
+	assert.Equal(t, string(mpp.ErrorTypeInvalidChallenge), data.Problem["type"])
+	assert.NotEmpty(t, data.Challenges, "the server offers a fresh Challenge")
+	assert.Len(t, payer.credentials(), 1, "the fresh Challenge must not be paid")
+	assert.Len(t, method.recorded(), 1)
+	assert.Equal(t, 1, approvals)
+}
+
+func TestCallerSuppliedTransactionReplayNeverPaysFreshChallenge(t *testing.T) {
+	payer := &testClientMethod{token: "valid"}
+	approvals := 0
+	challenge := &mpp.Challenge{ID: "original", Realm: realm, Method: "test", Intent: "charge", Request: map[string]any{"currency": "A", "amount": "1"}}
+	credential := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "transaction", "signature": "0x76settled"}}
+	srv := newServer(func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		fresh := *challenge
+		fresh.ID = "replacement"
+		data, err := json.Marshal(mpp.MCPPaymentRequiredData{
+			HTTPStatus: 402,
+			Challenges: []*mpp.Challenge{&fresh},
+			Problem:    map[string]any{"type": string(mpp.ErrorTypeInvalidChallenge)},
+		})
+		require.NoError(t, err)
+		return nil, &jsonrpc.Error{Code: mpp.MCPPaymentVerificationFailedCode, Message: "credential has already been used", Data: data}
+	})
+	session := connect(t, srv, mcpclient.Wrap(newClient(), mcpclient.Config{
+		Methods:           []client.Method{payer},
+		OnPaymentRequired: func(context.Context, *mpp.Challenge) (bool, error) { approvals++; return true, nil },
+	}))
+	_, err := callPremium(context.Background(), session, mcp.Meta{mpp.MCPCredentialMetaKey: credential})
+	require.ErrorIs(t, err, mcpclient.ErrPaymentReconciliationRequired)
+	var reconciliation *mcpclient.ReconciliationError
+	require.ErrorAs(t, err, &reconciliation)
+	assert.Equal(t, "0x76settled", reconciliation.Credential.Payload["signature"])
+	var serverErr *jsonrpc.Error
+	require.ErrorAs(t, err, &serverErr)
+	assert.Empty(t, payer.credentials())
+	assert.Zero(t, approvals)
+}

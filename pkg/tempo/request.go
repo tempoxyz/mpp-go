@@ -68,6 +68,12 @@ type MethodDetails struct {
 	// Deprecated: the fee payer is configured on the server (the Tempo
 	// method's Config.FeePayerURL or Config.HostedFeePayer), as in mppx.
 	FeePayerURL string
+	// Memo is the 32-byte hex Tempo memo the primary transfer must carry,
+	// set by the server. When empty, clients attach an attribution memo,
+	// which servers require of push (hash) credentials and accept but do
+	// not require of pull (transaction) credentials. Servers accept only
+	// pull credentials when it is set.
+	Memo string
 	// Splits lists any additional transfers included in the charge.
 	Splits []Split
 	// SupportedModes restricts which credential submission modes are allowed.
@@ -114,6 +120,9 @@ type ChargeRequestParams struct {
 	// Deprecated: the fee payer is configured on the server (the Tempo
 	// method's Config.FeePayerURL or Config.HostedFeePayer), as in mppx.
 	FeePayerURL string
+	// Memo is an optional 32-byte hex Tempo memo the primary transfer must
+	// carry, advertised as methodDetails.memo.
+	Memo string
 	// Splits lists any additional transfers included in the charge.
 	Splits []SplitParams
 	// SupportedModes restricts which credential submission modes are allowed.
@@ -160,6 +169,10 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 	if err := validateSupportedModes(params.SupportedModes); err != nil {
 		return ChargeRequest{}, err
 	}
+	memo, err := normalizeMemo(params.Memo)
+	if err != nil {
+		return ChargeRequest{}, err
+	}
 	splits, err := normalizeSplits(params.Splits, decimals, amount)
 	if err != nil {
 		return ChargeRequest{}, err
@@ -173,6 +186,7 @@ func NormalizeChargeRequest(params ChargeRequestParams) (ChargeRequest, error) {
 		MethodDetails: MethodDetails{
 			FeePayer:       params.FeePayer,
 			FeePayerURL:    params.FeePayerURL,
+			Memo:           memo,
 			Splits:         splits,
 			SupportedModes: append([]ChargeMode(nil), params.SupportedModes...),
 		},
@@ -217,6 +231,10 @@ func ParseChargeRequest(input map[string]any) (ChargeRequest, error) {
 		}
 		request.MethodDetails.FeePayer = asBool(raw["feePayer"])
 		request.MethodDetails.FeePayerURL = asString(raw["feePayerUrl"])
+		request.MethodDetails.Memo, err = normalizeMemo(asString(raw["memo"]))
+		if err != nil {
+			return ChargeRequest{}, err
+		}
 		request.MethodDetails.Splits, err = parseSplits(raw["splits"])
 		if err != nil {
 			return ChargeRequest{}, err
@@ -312,6 +330,9 @@ func (r ChargeRequest) Map() map[string]any {
 	}
 	if r.MethodDetails.FeePayerURL != "" {
 		methodDetails["feePayerUrl"] = r.MethodDetails.FeePayerURL
+	}
+	if r.MethodDetails.Memo != "" {
+		methodDetails["memo"] = r.MethodDetails.Memo
 	}
 	if len(r.MethodDetails.Splits) > 0 {
 		splits := make([]map[string]any, 0, len(r.MethodDetails.Splits))

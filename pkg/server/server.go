@@ -210,11 +210,11 @@ func WithRequiresAuth(enabled bool) Option {
 }
 
 // WithChallengeNonce sets whether every Challenge this handler issues is made
-// unique by a random _mppx_nonce bound into its opaque metadata, so identical
-// charges never share a Challenge ID. It is enabled by default, as in mppx;
-// pass false only while some replica still runs a verifier that rejects
-// _mppx_nonce. Verification accepts Challenges with and without a nonce
-// either way.
+// unique by a random _mpp_nonce (16 bytes, base64url without padding) bound
+// into its opaque metadata, so identical charges never share a Challenge ID.
+// It is enabled by default, as in every MPP SDK. Verification accepts
+// Challenges with and without a nonce either way, and ignores _mpp_nonce and
+// the legacy _mppx_nonce when it matches opaque metadata against the route's.
 func WithChallengeNonce(enabled bool) Option {
 	return func(m *Mpp) {
 		m.noChallengeNonce = !enabled
@@ -354,6 +354,17 @@ type ChargeParams struct {
 	Description string
 	// Splits adds Tempo split-payment transfers under methodDetails.splits.
 	Splits []tempoparams.SplitParams
+	// Memo is a 32-byte hex Tempo memo the primary transfer must carry,
+	// advertised as methodDetails.memo. Leave it empty to use the client's
+	// attribution memo instead: push (hash) credentials must carry the
+	// attribution memo for the Challenge, while pull (transaction)
+	// credentials may carry it, another memo or none. A route with Memo
+	// accepts only pull credentials: every payer on the route carries the
+	// same memo, so it cannot bind an unsigned hash credential to one
+	// Challenge. The Tempo method drops push from such a route's
+	// supportedModes, refuses hash credentials for it, and rejects Memo
+	// combined with push-only SupportedModes.
+	Memo string
 	// FeePayer requests the sponsored Tempo flow when the method supports it.
 	// A Tempo method with a fee payer sponsors every route without it.
 	FeePayer bool
