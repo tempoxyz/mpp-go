@@ -83,7 +83,7 @@ func WithMeta(meta map[string]string) ChallengeOption {
 // Payment-Authorization (any case) is advertised canonically. Any other value
 // makes NewChallengeWithError fail with ErrUnsupportedCredentialHeader.
 func WithHeader(header string) ChallengeOption {
-	return func(c *challengeConfig) { c.header = AdvertisedCredentialHeader(header) }
+	return func(c *challengeConfig) { c.header = canonicalCredentialHeader(header) }
 }
 
 // NewChallengeWithError creates a new Challenge with an HMAC-bound ID
@@ -168,7 +168,8 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON accepts the standard JSON challenge shape and computes the
 // cached RequestB64 field used by header serialization. As ParseChallenge,
 // it accepts a header member only when it is Payment-Authorization (compared
-// case-insensitively) and otherwise fails with ErrUnsupportedCredentialHeader.
+// case-insensitively, kept as received) or null (treated as absent), and
+// otherwise fails with ErrUnsupportedCredentialHeader.
 func (c *Challenge) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		ID          string          `json:"id"`
@@ -250,9 +251,10 @@ func (c *Challenge) verify(secretKey, realm string) bool {
 }
 
 // CredentialHeader returns the HTTP field a client must use for the payment
-// credential. Challenges that omit header default to Authorization.
+// credential. Challenges that omit header default to Authorization, and
+// Payment-Authorization is returned canonically in any case.
 func (c *Challenge) CredentialHeader() string {
-	header := AdvertisedCredentialHeader(c.Header)
+	header := canonicalCredentialHeader(c.Header)
 	if header == "" {
 		return HeaderAuthorization
 	}
@@ -260,10 +262,10 @@ func (c *Challenge) CredentialHeader() string {
 }
 
 // decodeJSONCredentialHeader validates the raw header member of a JSON
-// challenge: absent selects Authorization, and only a Payment-Authorization
-// string may be present.
+// challenge: absent or null selects Authorization, and only a
+// Payment-Authorization string may be present.
 func decodeJSONCredentialHeader(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 {
+	if len(raw) == 0 || string(raw) == "null" {
 		return parseReceivedCredentialHeader("", false)
 	}
 	var value string

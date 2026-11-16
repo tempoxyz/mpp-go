@@ -24,7 +24,7 @@ func TestParseChallengeValidatesRawCredentialHeader(t *testing.T) {
 	}{
 		{name: "absent", param: "", wantHeader: ""},
 		{name: "Payment-Authorization", param: `, header="Payment-Authorization"`, wantHeader: HeaderPaymentAuthorization},
-		{name: "lowercase payment-authorization", param: `, header="payment-authorization"`, wantHeader: HeaderPaymentAuthorization},
+		{name: "lowercase payment-authorization", param: `, header="payment-authorization"`, wantHeader: "payment-authorization"},
 		{name: "token form", param: `, header=Payment-Authorization`, wantHeader: HeaderPaymentAuthorization},
 		{name: "explicit Authorization", param: `, header="Authorization"`, wantErr: true},
 		{name: "empty", param: `, header=""`, wantErr: true},
@@ -49,9 +49,14 @@ func TestParseChallengeValidatesRawCredentialHeader(t *testing.T) {
 			}
 			assert.Equal(t, want, challenge.CredentialHeader())
 			if tt.wantHeader != "" {
-				// The credential echoes the canonical header.
+				// The credential echoes the header unchanged.
 				credential := challenge.NewCredential(map[string]any{})
-				assert.Equal(t, HeaderPaymentAuthorization, credential.Challenge.Header)
+				assert.Equal(t, tt.wantHeader, credential.Challenge.Header)
+				authorization, err := FormatCredential(credential)
+				require.NoError(t, err)
+				parsed, err := ParseCredential(authorization)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantHeader, parsed.Challenge.Header)
 			}
 		})
 	}
@@ -69,7 +74,8 @@ func TestChallengeUnmarshalJSONValidatesRawCredentialHeader(t *testing.T) {
 	}{
 		{name: "absent", member: ""},
 		{name: "Payment-Authorization", member: `,"header":"Payment-Authorization"`, wantHeader: HeaderPaymentAuthorization},
-		{name: "lowercase", member: `,"header":"payment-authorization"`, wantHeader: HeaderPaymentAuthorization},
+		{name: "lowercase", member: `,"header":"payment-authorization"`, wantHeader: "payment-authorization"},
+		{name: "null", member: `,"header":null`},
 		{name: "Authorization", member: `,"header":"Authorization"`, wantErr: true},
 		{name: "empty", member: `,"header":""`, wantErr: true},
 		{name: "X-Payment", member: `,"header":"X-Payment"`, wantErr: true},
@@ -116,8 +122,9 @@ func TestParseCredentialValidatesEchoedCredentialHeader(t *testing.T) {
 		wantErr    bool
 	}{
 		{name: "absent", header: nil},
+		{name: "null", header: json.RawMessage("null")},
 		{name: "Payment-Authorization", header: "Payment-Authorization", wantHeader: HeaderPaymentAuthorization},
-		{name: "lowercase", header: "payment-authorization", wantHeader: HeaderPaymentAuthorization},
+		{name: "lowercase", header: "payment-authorization", wantHeader: "payment-authorization"},
 		{name: "Authorization", header: "Authorization", wantErr: true},
 		{name: "empty", header: "", wantErr: true},
 		{name: "X-Payment", header: "X-Payment", wantErr: true},
@@ -136,6 +143,43 @@ func TestParseCredentialValidatesEchoedCredentialHeader(t *testing.T) {
 			assert.Equal(t, tt.wantHeader, parsed.Challenge.Header)
 		})
 	}
+}
+
+// TestReceivedCredentialHeaderSpellingKeepsChallengeID covers a server that
+// signs and sends a non-canonical spelling: the echo keeps it, so the ID the
+// server recomputes from the echo still matches.
+func TestReceivedCredentialHeaderSpellingKeepsChallengeID(t *testing.T) {
+	t.Parallel()
+
+	input := GenerateChallengeIDInput{
+		SecretKey: "secret",
+		Realm:     "api.example.com",
+		Method:    "tempo",
+		Intent:    "charge",
+		Request:   map[string]any{"amount": "1"},
+		Header:    "payment-authorization",
+	}
+	id, err := GenerateChallengeIDWithError(input)
+	require.NoError(t, err)
+	formatted, err := FormatChallenge(&Challenge{
+		ID: id, Realm: input.Realm, Method: input.Method, Intent: input.Intent,
+		Request: input.Request, Header: input.Header,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, formatted, `header="payment-authorization"`)
+
+	challenge, err := ParseChallenge(formatted)
+	require.NoError(t, err)
+	assert.Equal(t, HeaderPaymentAuthorization, challenge.CredentialHeader())
+	authorization, err := FormatCredential(challenge.NewCredential(map[string]any{}))
+	require.NoError(t, err)
+	credential, err := ParseCredential(authorization)
+	require.NoError(t, err)
+
+	input.Header = credential.Challenge.Header
+	recomputed, err := GenerateChallengeIDWithError(input)
+	require.NoError(t, err)
+	assert.Equal(t, id, recomputed)
 }
 
 func TestChallengeConstructionCredentialHeader(t *testing.T) {

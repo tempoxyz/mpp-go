@@ -269,6 +269,12 @@ func (config *Config) pay(
 			offered = append(offered, *challenge)
 		}
 	}
+	if len(offered) == 0 {
+		// Every offered Challenge selected an unsupported credential header
+		// and was dropped: none may be paid.
+		return nil, credentialKey{}, fmt.Errorf("%w: every offered challenge selects an unsupported credential header: %w: %w",
+			mppclient.ErrNoMethodFound, mpp.ErrUnsupportedCredentialHeader, cause)
+	}
 	candidates, err := mppclient.SelectChallengeCandidates(offered, config.Methods, config.PaymentPreferences)
 	if err != nil {
 		return nil, credentialKey{}, err
@@ -416,7 +422,9 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 }
 
 // IsPaymentRequiredError reports whether err is an MCP payment-required or
-// payment-verification-failed error that carries at least one Challenge.
+// payment-verification-failed error that offers at least one Challenge,
+// including one whose every Challenge selects an unsupported credential
+// header (mpp.ErrUnsupportedCredentialHeader), which no Method may pay.
 func IsPaymentRequiredError(err error) bool {
 	_, _, ok := paymentRequired(nil, err)
 	return ok
@@ -474,10 +482,21 @@ func decodePaymentRequired(raw json.RawMessage) (*mpp.MCPPaymentRequiredData, bo
 			return nil, false
 		}
 	}
-	if len(data.Challenges) == 0 {
+	if len(data.Challenges) == 0 && !offeredChallenges(raw) {
 		return nil, false
 	}
 	return &data, true
+}
+
+// offeredChallenges reports whether payment-required data lists any
+// Challenge, including ones MCPPaymentRequiredData dropped because they
+// select an unsupported credential header: such a response still requires
+// payment, but has no Challenge a Method may pay.
+func offeredChallenges(raw json.RawMessage) bool {
+	var offered struct {
+		Challenges []json.RawMessage `json:"challenges"`
+	}
+	return json.Unmarshal(raw, &offered) == nil && len(offered.Challenges) > 0
 }
 
 // Receipt returns the payment receipt in a tool result's

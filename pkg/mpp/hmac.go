@@ -103,33 +103,40 @@ func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (s
 // than Authorization or Payment-Authorization. Match it with errors.Is.
 var ErrUnsupportedCredentialHeader = errors.New("mpp: unsupported credential header: challenges may only select Payment-Authorization")
 
-// AdvertisedCredentialHeader returns the challenge header parameter value
-// for a configured credential header: empty for the implicit Authorization
-// default (empty, or Authorization in any case), HeaderPaymentAuthorization
-// for Payment-Authorization in any case, and header unchanged otherwise,
-// which challenge construction and formatting reject with
-// ErrUnsupportedCredentialHeader.
+// AdvertisedCredentialHeader returns a challenge header parameter value, or
+// empty for the implicit Authorization default (empty, or Authorization in
+// any case). Any other value is returned unchanged, so a received
+// Payment-Authorization keeps the spelling the challenge ID binds; challenge
+// construction and formatting reject values other than Payment-Authorization
+// with ErrUnsupportedCredentialHeader.
 func AdvertisedCredentialHeader(header string) string {
-	switch {
-	case isDefaultCredentialHeader(header):
+	if isDefaultCredentialHeader(header) {
 		return ""
-	case strings.EqualFold(header, HeaderPaymentAuthorization):
-		return HeaderPaymentAuthorization
 	}
 	return header
+}
+
+// canonicalCredentialHeader returns AdvertisedCredentialHeader(header), with
+// Payment-Authorization in any case spelled canonically.
+func canonicalCredentialHeader(header string) string {
+	if strings.EqualFold(header, HeaderPaymentAuthorization) {
+		return HeaderPaymentAuthorization
+	}
+	return AdvertisedCredentialHeader(header)
 }
 
 func isDefaultCredentialHeader(header string) bool {
 	return header == "" || strings.EqualFold(header, HeaderAuthorization)
 }
 
-// parseAdvertisedCredentialHeader validates a locally configured credential
-// header. Authorization is shorthand for the default and is never advertised;
-// Payment-Authorization is advertised canonically; anything else is
-// rejected, since servers must not emit it.
+// parseAdvertisedCredentialHeader validates a challenge's credential header
+// before it is bound or serialized. Authorization is shorthand for the
+// default and is never advertised; Payment-Authorization (compared
+// case-insensitively) is kept as given; anything else is rejected, since
+// servers must not emit it.
 func parseAdvertisedCredentialHeader(header string) (string, error) {
 	header = AdvertisedCredentialHeader(header)
-	if header != "" && header != HeaderPaymentAuthorization {
+	if header != "" && !strings.EqualFold(header, HeaderPaymentAuthorization) {
 		return "", ErrUnsupportedCredentialHeader
 	}
 	return header, nil
@@ -138,15 +145,16 @@ func parseAdvertisedCredentialHeader(header string) (string, error) {
 // parseReceivedCredentialHeader validates the raw header auth-param of a
 // received challenge, or of the challenge a received credential echoes,
 // before any normalization: an absent header selects Authorization, and only
-// Payment-Authorization (compared case-insensitively) may be present. Any
-// other value, including Authorization and the empty string, makes the
-// challenge unrecognized.
+// Payment-Authorization (compared case-insensitively) may be present, and is
+// kept as received so the credential echoes it unchanged. Any other value,
+// including Authorization and the empty string, makes the challenge
+// unrecognized.
 func parseReceivedCredentialHeader(value string, present bool) (string, error) {
 	if !present {
 		return "", nil
 	}
 	if strings.EqualFold(value, HeaderPaymentAuthorization) {
-		return HeaderPaymentAuthorization, nil
+		return value, nil
 	}
 	return "", ErrUnsupportedCredentialHeader
 }

@@ -520,7 +520,9 @@ func ParseCredential(header string) (*Credential, error) {
 		Expires: anyStr(challengeMap["expires"]),
 		Digest:  anyStr(challengeMap["digest"]),
 	}
+	// A null header is absent, as for JSON challenges.
 	rawHeader, hasHeader := challengeMap["header"]
+	hasHeader = hasHeader && rawHeader != nil
 	headerValue, isString := rawHeader.(string)
 	if hasHeader && !isString {
 		return nil, ErrUnsupportedCredentialHeader
