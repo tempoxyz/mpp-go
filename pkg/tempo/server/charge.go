@@ -25,6 +25,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/challengemeta"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -203,7 +204,7 @@ func (i *Intent) ExpiryGrace(credential *mpp.Credential) time.Duration {
 	// Only a challenge issued with the grace on carries the marker, bound by
 	// its HMAC: one issued without it, by an earlier release whose replay
 	// claims end at the expiry or with no grace, gets none.
-	if credential.Challenge.Opaque[expiryGraceKey] != "1" {
+	if credential.Challenge.Opaque[expiryGraceKey] != challengemeta.ExpiryGraceValue {
 		return 0
 	}
 	return i.zoneCredentialGrace
@@ -220,7 +221,7 @@ func (i *Intent) IssuesExpiryGrace() bool {
 // expiryGraceKey is the opaque metadata key of the expiry grace marker that
 // server.Mpp sets on challenges issued for an intent whose IssuesExpiryGrace
 // reports true, as mppx's _mppx_expiry_grace.
-const expiryGraceKey = "_mppx_expiry_grace"
+const expiryGraceKey = challengemeta.ExpiryGraceKey
 
 // isZoneCredential reports whether credential pays with a Zone withdrawal.
 func isZoneCredential(credential *mpp.Credential) bool {

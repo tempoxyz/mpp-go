@@ -20,6 +20,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/challengemeta"
 	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
 	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -1383,6 +1384,22 @@ func TestZoneNewChallengeWithSameTermsResumesWithdrawal(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 2)
 }
 
+// A new challenge that differs from the first only by the expiry grace
+// marker, which servers ignore when comparing terms, resumes the outstanding
+// withdrawal rather than withdrawing again.
+func TestZoneNewChallengeWithExpiryGraceMarkerResumesWithdrawal(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	second := zoneTermsChallenge(t, time.Now().Add(6*time.Minute), "second", nil)
+	second.Opaque[challengemeta.ExpiryGraceKey] = challengemeta.ExpiryGraceValue
+	require.Equal(t, zoneWithdrawalTerms(first, 3), zoneWithdrawalTerms(second, 3))
+
+	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
 // A new challenge for those terms from another origin, or one the caller did
 // not verify, fails closed with no network call, naming the first challenge.
 func TestZoneNewChallengeWithSameTermsFromOtherOriginFailsClosed(t *testing.T) {
@@ -1491,6 +1508,11 @@ func TestZoneWithdrawalTerms(t *testing.T) {
 	assert.NotEqual(t, zoneWithdrawalTerms(first, 3), zoneWithdrawalTerms(scoped, 3))
 	assert.Contains(t, zoneWithdrawalTerms(first, 3), "_mppx_scope")
 	assert.NotContains(t, zoneWithdrawalTerms(first, 3), "_mppx_nonce")
+
+	marked := zoneTermsChallenge(t, expires, "c", nil)
+	marked.Opaque[challengemeta.ExpiryGraceKey] = challengemeta.ExpiryGraceValue
+	marked.Opaque[challengemeta.LegacyNonceKey] = "d"
+	assert.Equal(t, zoneWithdrawalTerms(first, 3), zoneWithdrawalTerms(marked, 3))
 }
 
 // The policy sees the amount plus the withdrawal fee, so its caps include

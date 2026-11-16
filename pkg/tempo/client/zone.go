@@ -19,6 +19,7 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/challengemeta"
 	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -354,16 +355,16 @@ func zoneWithdrawalKey(challenge *mpp.Challenge) string {
 
 // zoneWithdrawalTerms keys what challenge asks a Zone withdrawal to pay: its
 // realm, method, intent, request, digest and route metadata (its opaque
-// metadata without the issuance nonces), everything a server compares when
-// it accepts another challenge's credential, but not its ID or expiry, as
-// mppx's zone terms. It is "" when they can't be encoded, which matches no
+// metadata without challengemeta.ReservedKeys: the issuance nonces and the
+// expiry grace marker), everything a server compares when it accepts another
+// challenge's credential, but not its ID or expiry, as mppx's zone terms. It is "" when they can't be encoded, which matches no
 // other challenge.
 func zoneWithdrawalTerms(challenge *mpp.Challenge, zoneID uint32) string {
 	var meta map[string]string
 	if challenge.Opaque != nil {
 		meta = make(map[string]string, len(challenge.Opaque))
 		for key, value := range challenge.Opaque {
-			if key != "_mppx_nonce" && key != "_mpp_nonce" {
+			if !challengemeta.IsReserved(key) {
 				meta[key] = value
 			}
 		}

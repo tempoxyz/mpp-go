@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/challengemeta"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
@@ -94,7 +95,7 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
-	for _, key := range append(challengeNonceKeys[:], expiryGraceKey) {
+	for _, key := range challengemeta.ReservedKeys {
 		if _, reserved := params.Meta[key]; reserved {
 			// Meta is server configuration: a reserved key is a server bug.
 			return nil, fmt.Errorf("server: %s is reserved for challenge issuance", key)
@@ -335,21 +336,16 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 
 // challengeNonceKey is the opaque metadata key of the issuance nonce, as in
 // mppx (ChallengeMeta.withNonce).
-const challengeNonceKey = "_mppx_nonce"
-
-// challengeNonceKeys are the reserved issuance nonce keys: mppx's and the
-// _mpp_nonce that earlier mpp-go releases issued, still accepted on
-// verification until those Challenges expire.
-var challengeNonceKeys = [...]string{challengeNonceKey, "_mpp_nonce"}
+const challengeNonceKey = challengemeta.NonceKey
 
 // expiryGraceKey is the reserved opaque metadata key marking a Challenge
 // whose intent accepts some of its Credentials for a while after it expires,
 // as mppx's ChallengeMeta.withExpiryGrace. The Challenge HMAC binds it, so a
 // Challenge issued without it never gets that grace.
-const expiryGraceKey = "_mppx_expiry_grace"
+const expiryGraceKey = challengemeta.ExpiryGraceKey
 
 // expiryGraceValue is the value of expiryGraceKey on a marked Challenge.
-const expiryGraceValue = "1"
+const expiryGraceValue = challengemeta.ExpiryGraceValue
 
 // hasExpiryGrace reports whether opaque carries the expiry grace marker.
 func hasExpiryGrace(opaque map[string]string) bool {
@@ -358,9 +354,8 @@ func hasExpiryGrace(opaque map[string]string) bool {
 
 func applicationMeta(meta map[string]string) map[string]string {
 	result := maps.Clone(meta)
-	for _, key := range challengeNonceKeys {
+	for _, key := range challengemeta.ReservedKeys {
 		delete(result, key)
 	}
-	delete(result, expiryGraceKey)
 	return result
 }
