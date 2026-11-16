@@ -86,6 +86,17 @@ func WithHeader(header string) ChallengeOption {
 	return func(c *challengeConfig) { c.header = canonicalCredentialHeader(header) }
 }
 
+// WithEchoedHeader sets the credential header a received credential's
+// challenge echo carries, keeping its spelling, so a server rebuilding the
+// challenge to check its ID binds the same value it issued (such as a
+// lowercase payment-authorization). Use WithHeader for challenges you issue.
+// As with WithHeader, Authorization is the implicit default and any value
+// other than Payment-Authorization (compared case-insensitively) makes
+// NewChallengeWithError fail with ErrUnsupportedCredentialHeader.
+func WithEchoedHeader(header string) ChallengeOption {
+	return func(c *challengeConfig) { c.header = AdvertisedCredentialHeader(header) }
+}
+
 // NewChallengeWithError creates a new Challenge with an HMAC-bound ID
 // computed from secretKey over realm and the other challenge parameters (see
 // GenerateChallengeIDWithError). It rejects invalid advertised credential

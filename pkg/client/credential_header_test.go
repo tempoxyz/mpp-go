@@ -107,3 +107,36 @@ func TestTransportDoesNotRepayAfterCallerPushCredentialWithUnsupportedHeader(t *
 	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
 	assert.Empty(t, method.ids)
 }
+
+// A lowercase payment-authorization challenge gets its credential in the
+// Payment-Authorization field, echoing the spelling the server sent.
+func TestTransportSendsLowercaseHeaderChallengeInPaymentAuthorization(t *testing.T) {
+	var challenge *mpp.Challenge
+	var sentIn, echoed string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if value := r.Header.Get(mpp.HeaderPaymentAuthorization); value != "" {
+			assert.Empty(t, r.Header.Get("Authorization"))
+			credential, err := mpp.ParseCredential(value)
+			require.NoError(t, err)
+			sentIn, echoed = mpp.HeaderPaymentAuthorization, credential.Challenge.Header
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		formatted, err := mpp.FormatChallenge(challenge)
+		require.NoError(t, err)
+		w.Header().Set("WWW-Authenticate", formatted)
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	challenge = challengeForURL(t, srv.URL, "tempo", nil)
+	challenge.Header = "payment-authorization"
+
+	method := &recordingMethod{}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := newTestTransport([]Method{method}, nil).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, mpp.HeaderPaymentAuthorization, sentIn)
+	assert.Equal(t, "payment-authorization", echoed)
+}
