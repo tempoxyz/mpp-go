@@ -79,7 +79,9 @@ func WithMeta(meta map[string]string) ChallengeOption {
 }
 
 // WithHeader sets the HTTP field that must carry the Payment credential.
-// Authorization is the implicit default and is not advertised on the wire.
+// Authorization is the implicit default and is not advertised on the wire;
+// Payment-Authorization (any case) is advertised canonically. Any other value
+// makes NewChallengeWithError fail with ErrUnsupportedCredentialHeader.
 func WithHeader(header string) ChallengeOption {
 	return func(c *challengeConfig) { c.header = AdvertisedCredentialHeader(header) }
 }
@@ -164,7 +166,9 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON accepts the standard JSON challenge shape and computes the
-// cached RequestB64 field used by header serialization.
+// cached RequestB64 field used by header serialization. As ParseChallenge,
+// it accepts a header member only when it is Payment-Authorization (compared
+// case-insensitively) and otherwise fails with ErrUnsupportedCredentialHeader.
 func (c *Challenge) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		ID          string          `json:"id"`
@@ -177,7 +181,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		Expires     string          `json:"expires,omitempty"`
 		Description string          `json:"description,omitempty"`
 		Opaque      json.RawMessage `json:"opaque,omitempty"`
-		Header      string          `json:"header,omitempty"`
+		Header      json.RawMessage `json:"header,omitempty"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
@@ -191,7 +195,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	header, err := parseAdvertisedCredentialHeader(decoded.Header)
+	header, err := decodeJSONCredentialHeader(decoded.Header)
 	if err != nil {
 		return err
 	}
@@ -248,10 +252,25 @@ func (c *Challenge) verify(secretKey, realm string) bool {
 // CredentialHeader returns the HTTP field a client must use for the payment
 // credential. Challenges that omit header default to Authorization.
 func (c *Challenge) CredentialHeader() string {
-	if AdvertisedCredentialHeader(c.Header) == "" {
+	header := AdvertisedCredentialHeader(c.Header)
+	if header == "" {
 		return HeaderAuthorization
 	}
-	return c.Header
+	return header
+}
+
+// decodeJSONCredentialHeader validates the raw header member of a JSON
+// challenge: absent selects Authorization, and only a Payment-Authorization
+// string may be present.
+func decodeJSONCredentialHeader(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return parseReceivedCredentialHeader("", false)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", ErrUnsupportedCredentialHeader
+	}
+	return parseReceivedCredentialHeader(value, true)
 }
 
 // ToEcho returns the ChallengeEcho representation suitable for inclusion

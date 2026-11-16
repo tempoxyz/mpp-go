@@ -616,7 +616,9 @@ func (t *Transport) cloneRequest(req *http.Request) (*http.Request, error) {
 }
 
 // parseChallenges extracts Payment challenges from WWW-Authenticate headers.
-// Returns successfully parsed challenges and any parse errors.
+// Returns successfully parsed challenges and any parse errors. A challenge
+// that fails to parse, including one that selects an unsupported credential
+// header (mpp.ErrUnsupportedCredentialHeader), gets no credential.
 func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []error) {
 	var challenges []mpp.Challenge
 	var errs []error

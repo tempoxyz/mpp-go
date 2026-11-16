@@ -65,6 +65,41 @@ type MCPPaymentRequiredData struct {
 	Problem map[string]any `json:"problem,omitempty"`
 }
 
+// UnmarshalJSON decodes the payment data and drops offered Challenges that
+// select an unsupported credential header (ErrUnsupportedCredentialHeader):
+// a client sends no credential for them, but may still pay another Challenge
+// of the same response. Any other invalid Challenge fails the whole decode.
+func (d *MCPPaymentRequiredData) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		HTTPStatus int               `json:"httpStatus"`
+		Challenges []json.RawMessage `json:"challenges"`
+		Problem    map[string]any    `json:"problem,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var challenges []*Challenge
+	if decoded.Challenges != nil {
+		challenges = make([]*Challenge, 0, len(decoded.Challenges))
+	}
+	for _, raw := range decoded.Challenges {
+		var challenge *Challenge
+		if err := json.Unmarshal(raw, &challenge); err != nil {
+			if errors.Is(err, ErrUnsupportedCredentialHeader) {
+				continue
+			}
+			return err
+		}
+		challenges = append(challenges, challenge)
+	}
+	*d = MCPPaymentRequiredData{
+		HTTPStatus: decoded.HTTPStatus,
+		Challenges: challenges,
+		Problem:    decoded.Problem,
+	}
+	return nil
+}
+
 // MCPReceipt is a Receipt carried in MCP tool result metadata, bound to the
 // Challenge it settles.
 type MCPReceipt struct {

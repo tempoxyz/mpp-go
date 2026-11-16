@@ -47,8 +47,10 @@ type VerifyParams struct {
 	Meta map[string]string
 	// Expires overrides the default Challenge expiry.
 	Expires string
-	// Header selects the HTTP field for the Payment credential. Empty defaults
-	// to Authorization. Payment-Authorization is advertised when set.
+	// Header selects the HTTP field for the Payment credential. Empty or
+	// Authorization selects the default, Authorization, which is not
+	// advertised; Payment-Authorization is advertised when set. Any other
+	// value fails Challenge creation with mpp.ErrUnsupportedCredentialHeader.
 	Header string
 }
 

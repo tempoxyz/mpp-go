@@ -94,7 +94,7 @@ func TestFormatCredentialRejectsWhatParseCredentialRejects(t *testing.T) {
 		"invalid credential challenge method": func(c *Credential) { c.Challenge.Method = "Tempo" },
 		"missing required field: intent":      func(c *Credential) { c.Challenge.Intent = "" },
 		"missing required field: request":     func(c *Credential) { c.Challenge.Request = "" },
-		"invalid HTTP header name":            func(c *Credential) { c.Challenge.Header = "Bad Header" },
+		"unsupported credential header":       func(c *Credential) { c.Challenge.Header = "Bad Header" },
 		"payload must be an object":           func(c *Credential) { c.Payload = nil },
 	}
 	for want, mutate := range cases {

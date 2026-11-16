@@ -271,7 +271,8 @@ func ParseChallenge(header string) (*Challenge, error) {
 	expires := params["expires"]
 	digest := params["digest"]
 	description := params["description"]
-	credentialHeader, err := parseAdvertisedCredentialHeader(params["header"])
+	rawHeader, hasHeader := params["header"]
+	credentialHeader, err := parseReceivedCredentialHeader(rawHeader, hasHeader)
 	if err != nil {
 		return nil, err
 	}
@@ -314,9 +315,10 @@ func ParseChallenge(header string) (*Challenge, error) {
 //
 // It writes c.Realm, the realm the challenge ID binds. It rejects a nil
 // challenge, values that cannot be safely represented in quoted auth-params,
-// an invalid advertised credential header, empty required auth-params (id,
-// realm, method, intent, request), which would otherwise be omitted and yield
-// a challenge ParseChallenge rejects, a method that is not a valid method name
+// a credential header other than Authorization (never advertised) or
+// Payment-Authorization (ErrUnsupportedCredentialHeader), empty required
+// auth-params (id, realm, method, intent, request), which would otherwise be
+// omitted and yield a challenge ParseChallenge rejects, a method that is not a valid method name
 // (lowercase ASCII letters), a RequestB64 that is not base64url-encoded JSON,
 // and a header over the size limit.
 func FormatChallenge(c *Challenge) (string, error) {
@@ -518,7 +520,12 @@ func ParseCredential(header string) (*Credential, error) {
 		Expires: anyStr(challengeMap["expires"]),
 		Digest:  anyStr(challengeMap["digest"]),
 	}
-	credentialHeader, err := parseAdvertisedCredentialHeader(anyStr(challengeMap["header"]))
+	rawHeader, hasHeader := challengeMap["header"]
+	headerValue, isString := rawHeader.(string)
+	if hasHeader && !isString {
+		return nil, ErrUnsupportedCredentialHeader
+	}
+	credentialHeader, err := parseReceivedCredentialHeader(headerValue, hasHeader)
 	if err != nil {
 		return nil, err
 	}
@@ -891,18 +898,6 @@ func isMethodName(value string) bool {
 		}
 	}
 	return value != ""
-}
-
-func isHTTPHeaderName(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := 0; i < len(value); i++ {
-		if !isTokenChar(value[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // B64Decode decodes a base64url (no padding) string into a map.
