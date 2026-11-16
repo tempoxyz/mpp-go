@@ -57,6 +57,12 @@ type zoneRPC struct {
 	// rpcError, when set, has method answer with a JSON-RPC error carrying
 	// this message.
 	rpcError map[string]string
+	// transfers adds the portal's TIP-20 Transfer of each withdrawal to the
+	// receipt; onlyTransfers leaves out its WithdrawalProcessed events.
+	transfers     bool
+	onlyTransfers bool
+	// settledAt is the timestamp of the settlement's block (now when zero).
+	settledAt time.Time
 }
 
 func (r *zoneRPC) GetChainID(context.Context) (uint64, error) { return 42431, nil }
@@ -74,9 +80,21 @@ func (r *zoneRPC) SendRequest(_ context.Context, method string, _ ...interface{}
 	}
 	portal := zone.PortalAddress(zoneTestID)
 	switch method {
+	case "eth_getBlockByNumber":
+		settledAt := r.settledAt
+		if settledAt.IsZero() {
+			settledAt = time.Now()
+		}
+		return &temporpc.JSONRPCResponse{Result: map[string]any{"number": "0x10", "timestamp": hexutil.EncodeUint64(uint64(settledAt.Unix()))}}, nil
 	case "eth_getTransactionReceipt":
 		logs := make([]any, 0, len(r.withdrawals))
 		for _, w := range r.withdrawals {
+			if r.transfers {
+				logs = append(logs, zoneTransferLogs(portal, common.HexToAddress(w.toOr(zoneTestMerchant)), w.amountOr(), w.memo)...)
+			}
+			if r.onlyTransfers {
+				continue
+			}
 			address := portal
 			if w.eventPortal != nil {
 				address = *w.eventPortal
@@ -102,6 +120,7 @@ func (r *zoneRPC) SendRequest(_ context.Context, method string, _ ...interface{}
 		}
 		return &temporpc.JSONRPCResponse{Result: map[string]any{
 			"transactionHash": zoneSettlementHash,
+			"blockNumber":     "0x10",
 			"status":          status,
 			"logs":            logs,
 		}}, nil
@@ -457,6 +476,264 @@ func TestZoneHidesUpstreamRPCErrors(t *testing.T) {
 			var paymentErr *mpp.PaymentError
 			require.ErrorAs(t, err, &paymentErr)
 			assert.NotContains(t, paymentErr.Detail, "node-7.internal")
+		})
+	}
+}
+
+func newZoneGraceSetup(t *testing.T, grace time.Duration) zoneSetup {
+	t.Helper()
+	rpc := &zoneRPC{}
+	method, err := New(Config{
+		RPC:                 rpc,
+		Store:               tempo.NewMemoryStore(),
+		Currencies:          []string{testCurrency},
+		Recipient:           zoneTestMerchant,
+		ChainID:             tempo.ChainIDModerato,
+		Zones:               &tempo.Zones{IDs: []uint32{zoneTestID}},
+		ZoneCredentialGrace: grace,
+	})
+	require.NoError(t, err)
+	return zoneSetup{rpc: rpc, method: method}
+}
+
+// expiredChallenge issues a challenge for 1 unit that expired ago, and
+// returns its attribution memo.
+func (s zoneSetup) expiredChallenge(t *testing.T, ago time.Duration) (*mpp.Challenge, string) {
+	t.Helper()
+	request, err := s.method.BuildChargeRequest(server.ChargeParams{Amount: "1"})
+	require.NoError(t, err)
+	challenge := mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request,
+		mpp.WithExpires(time.Now().Add(-ago).UTC().Format(time.RFC3339Nano)))
+	return challenge, tempo.EncodeAttribution(challenge.Realm, "", challenge.ID)
+}
+
+func requirePaymentExpired(t *testing.T, err error) {
+	t.Helper()
+	var paymentErr *mpp.PaymentError
+	require.ErrorAs(t, err, &paymentErr)
+	assert.Equal(t, mpp.ErrorTypePaymentExpired, paymentErr.Type)
+}
+
+// A zone credential presented within the grace after its challenge expired
+// is accepted for a withdrawal that settled before the expiry, once.
+func TestZoneCredentialGraceAcceptsSettlementBeforeExpiry(t *testing.T) {
+	t.Parallel()
+	s := newZoneGraceSetup(t, time.Minute)
+	challenge, memo := s.expiredChallenge(t, time.Second)
+	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+	s.rpc.settledAt = time.Now().Add(-31 * time.Second)
+
+	receipt, err := s.verify(challenge, zoneTagA, zoneTestID)
+	require.NoError(t, err)
+	assert.Equal(t, zoneSettlementHash, receipt.Reference)
+	assert.Contains(t, s.rpc.methods, "eth_getBlockByNumber")
+
+	_, err = s.verify(challenge, zoneTagA, zoneTestID)
+	assert.ErrorContains(t, err, "zone withdrawal has already been used")
+}
+
+// A withdrawal that settled at or after the expiry is refused as expired.
+func TestZoneCredentialGraceRejectsSettlementAfterExpiry(t *testing.T) {
+	t.Parallel()
+	s := newZoneGraceSetup(t, time.Minute)
+	challenge, memo := s.expiredChallenge(t, time.Second)
+	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+	s.rpc.settledAt = time.Now()
+
+	_, err := s.verify(challenge, zoneTagA, zoneTestID)
+	requirePaymentExpired(t, err)
+
+	// The refusal claimed nothing: the payment can't be redeemed later
+	// either, but a fresh look sees the same answer.
+	_, err = s.verify(challenge, zoneTagA, zoneTestID)
+	requirePaymentExpired(t, err)
+}
+
+// After the grace, or with the default of none, an expired zone credential
+// is refused before any RPC.
+func TestZoneCredentialGraceEnds(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		grace, ago time.Duration
+	}{
+		"after the grace": {grace: time.Minute, ago: time.Minute + time.Second},
+		"default grace":   {grace: 0, ago: time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newZoneGraceSetup(t, tc.grace)
+			challenge, memo := s.expiredChallenge(t, tc.ago)
+			s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+			s.rpc.settledAt = time.Now().Add(-time.Hour)
+			_, err := s.verify(challenge, zoneTagA, zoneTestID)
+			requirePaymentExpired(t, err)
+			assert.NotContains(t, s.rpc.methods, "eth_getTransactionReceipt")
+		})
+	}
+}
+
+// Only zone credentials get the grace.
+func TestZoneCredentialGraceOnlyForZoneCredentials(t *testing.T) {
+	t.Parallel()
+	s := newZoneGraceSetup(t, time.Minute)
+	intent := s.method.intent.(*Intent)
+	challenge, _ := s.expiredChallenge(t, time.Second)
+	zoneCredential := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "zone"}}
+	assert.Equal(t, time.Minute, intent.ExpiryGrace(zoneCredential))
+	for _, kind := range []string{"hash", "transaction", "proof"} {
+		credential := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": kind}}
+		assert.Zero(t, intent.ExpiryGrace(credential), kind)
+	}
+
+	hashCredential := &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": zoneSettlementHash},
+		Source:    fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zoneTestOther),
+	}
+	assert.ErrorIs(t, validateChallengeExpiry(hashCredential, intent.ExpiryGrace(hashCredential)), mpp.ErrorTypePaymentExpired)
+	assert.NoError(t, validateChallengeExpiry(zoneCredential, intent.ExpiryGrace(zoneCredential)))
+}
+
+func TestZoneCredentialGraceValidation(t *testing.T) {
+	t.Parallel()
+	for _, grace := range []time.Duration{-time.Millisecond, MaxZoneCredentialGrace + time.Millisecond} {
+		_, err := New(Config{
+			RPC:                 &zoneRPC{},
+			Store:               tempo.NewMemoryStore(),
+			Currencies:          []string{testCurrency},
+			Recipient:           zoneTestMerchant,
+			ChainID:             tempo.ChainIDModerato,
+			ZoneCredentialGrace: grace,
+		})
+		assert.ErrorContains(t, err, "ZoneCredentialGrace", grace)
+	}
+	assert.NotNil(t, newZoneGraceSetup(t, MaxZoneCredentialGrace).method)
+}
+
+// A settlement redeemed by its zone credential is then refused as a hash
+// credential.
+func TestZoneSettlementRedeemedThenRefusedAsHashCredential(t *testing.T) {
+	t.Parallel()
+	s := newZoneSetup(t, nil)
+	challenge, memo := s.challenge(t, server.ChargeParams{})
+	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+	s.rpc.transfers = true
+	_, err := s.verify(challenge, zoneTagA, zoneTestID)
+	require.NoError(t, err)
+
+	_, err = s.method.intent.Verify(context.Background(), &mpp.Credential{
+		Challenge: challenge.ToEcho(),
+		Payload:   map[string]any{"type": "hash", "hash": zoneSettlementHash},
+		Source:    fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zone.PortalAddress(zoneTestID).Hex()),
+	}, challenge.Request)
+	require.Error(t, err)
+}
+
+// A portal's transfer never redeems a hash credential, whatever its source,
+// and its zone credential still redeems once.
+func TestZonePortalTransferRefusedAsHashCredential(t *testing.T) {
+	t.Parallel()
+	s := newZoneSetup(t, nil)
+	challenge, memo := s.challenge(t, server.ChargeParams{})
+	s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+	s.rpc.transfers = true
+	s.rpc.onlyTransfers = true
+	for source, want := range map[string]string{
+		fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zone.PortalAddress(zoneTestID).Hex()): "receipt does not satisfy the charge request",
+		"": "must include a source",
+	} {
+		_, err := s.method.intent.Verify(context.Background(), &mpp.Credential{
+			Challenge: challenge.ToEcho(),
+			Payload:   map[string]any{"type": "hash", "hash": zoneSettlementHash},
+			Source:    source,
+		}, challenge.Request)
+		require.ErrorContains(t, err, want, source)
+	}
+
+	s.rpc.onlyTransfers = false
+	_, err := s.verify(challenge, zoneTagA, zoneTestID)
+	require.NoError(t, err)
+	_, err = s.verify(challenge, zoneTagA, zoneTestID)
+	assert.ErrorContains(t, err, "zone withdrawal has already been used")
+}
+
+// Transfer matching skips a portal's transfers even with no source to
+// check, while the same transfer from another sender matches.
+func TestReceiptMatchesSkipsPortalTransfers(t *testing.T) {
+	t.Parallel()
+	s := newZoneSetup(t, nil)
+	challenge, memo := s.challenge(t, server.ChargeParams{})
+	request, err := tempo.ParseChargeRequest(challenge.Request)
+	require.NoError(t, err)
+	credential := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": zoneSettlementHash}}
+	receipt := func(from common.Address) map[string]any {
+		return map[string]any{"logs": zoneTransferLogs(from, common.HexToAddress(zoneTestMerchant), big.NewInt(1_000_000), memo)}
+	}
+	payer := common.HexToAddress(zoneTestOther)
+	assert.True(t, receiptMatches(receipt(payer), credential, request, ""))
+	assert.True(t, receiptMatches(receipt(payer), credential, request, payer.Hex()))
+	for _, portal := range []common.Address{zone.PortalAddress(zoneTestID), zone.PortalAddress(6), zone.PortalAddress(7)} {
+		assert.False(t, receiptMatches(receipt(portal), credential, request, ""), portal.Hex())
+		assert.False(t, receiptMatches(receipt(portal), credential, request, portal.Hex()), portal.Hex())
+	}
+}
+
+// zoneTransferLogs returns the TIP-20 Transfer and TransferWithMemo logs of a
+// transfer of amount from from to to with memo.
+func zoneTransferLogs(from, to common.Address, amount *big.Int, memo string) []any {
+	data := hexutil.Encode(common.BigToHash(amount).Bytes())
+	fromTopic := common.BytesToHash(from.Bytes()).Hex()
+	toTopic := common.BytesToHash(to.Bytes()).Hex()
+	return []any{
+		map[string]any{"address": testCurrency, "topics": []any{tempo.TransferTopic.Hex(), fromTopic, toTopic}, "data": data},
+		map[string]any{"address": testCurrency, "topics": []any{tempo.TransferWithMemoTopic.Hex(), fromTopic, toTopic, common.HexToHash(memo).Hex()}, "data": data},
+	}
+}
+
+// Through server.Mpp, whose expiry check runs before the intent's, an
+// expired zone credential is accepted only within the grace, and a hash
+// credential of an expired challenge is refused.
+func TestZoneCredentialGraceThroughMpp(t *testing.T) {
+	t.Parallel()
+	const secret = "a-32-byte-or-longer-server-secret"
+	for name, tc := range map[string]struct {
+		grace   time.Duration
+		kind    string
+		expired bool
+	}{
+		"zone within grace":  {grace: time.Minute, kind: "zone"},
+		"zone without grace": {grace: 0, kind: "zone", expired: true},
+		"hash within grace":  {grace: time.Minute, kind: "hash", expired: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newZoneGraceSetup(t, tc.grace)
+			payment, err := server.New(s.method, testRealm, secret)
+			require.NoError(t, err)
+			request, err := s.method.BuildChargeRequest(server.ChargeParams{Amount: "1"})
+			require.NoError(t, err)
+			challenge := mpptest.NewChallenge(secret, testRealm, tempo.MethodName, tempo.IntentCharge, request,
+				mpp.WithExpires(time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)))
+			memo := tempo.EncodeAttribution(challenge.Realm, "", challenge.ID)
+			s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+			s.rpc.settledAt = time.Now().Add(-30 * time.Second)
+			payload := map[string]any{"type": "zone", "hash": zoneSettlementHash, "senderTag": zoneTagA, "zoneId": int64(zoneTestID)}
+			credential := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: payload}
+			if tc.kind == "hash" {
+				credential.Payload = map[string]any{"type": "hash", "hash": zoneSettlementHash}
+				credential.Source = fmt.Sprintf("did:pkh:eip155:%d:%s", tempo.ChainIDModerato, zoneTestOther)
+			}
+			authorization, err := mpp.FormatCredential(credential)
+			require.NoError(t, err)
+
+			result, err := payment.Charge(context.Background(), server.ChargeParams{Amount: "1", Authorization: authorization})
+			if tc.expired {
+				requirePaymentExpired(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result.Receipt)
+			assert.Equal(t, zoneSettlementHash, result.Receipt.Reference)
 		})
 	}
 }

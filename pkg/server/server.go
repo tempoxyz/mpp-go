@@ -43,6 +43,17 @@ type BroadcastingIntent interface {
 	Broadcast(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
 }
 
+// ExpiryGraceIntent may be implemented by an Intent that keeps accepting some
+// Credentials for a bounded time after their Challenge expires: payments the
+// intent can prove completed before the expiry, but whose Credential arrived
+// later. The intent enforces that proof itself. ExpiryGrace returns how long
+// after the expiry it still accepts credential; zero or less gives none. A
+// well-formed expires is still required.
+type ExpiryGraceIntent interface {
+	Intent
+	ExpiryGrace(credential *mpp.Credential) time.Duration
+}
+
 // Validation describes a credential accepted without consuming or broadcasting it.
 type Validation struct {
 	// Challenge is the server-issued challenge echoed by the credential.

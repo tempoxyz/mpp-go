@@ -291,3 +291,20 @@ func TestWaitForSettlementBoundsStalledRPCCalls(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Less(t, time.Since(start), rpcGrace+5*time.Second)
 }
+
+func TestIsPortalAddress(t *testing.T) {
+	t.Parallel()
+	for address, want := range map[string]bool{
+		"0x5ad0000000000000000000000000000000000003": true,
+		"0x5AD0000000000000000000000000000000000003": true,
+		"0x5ad00000000000000000000000000000ffffffff": true,
+		"0x7069DeC4E64Fd07334A0933eDe836C17259c9B23": true,
+		"0x7069dec4e64fd07334a0933ede836c17259c9b23": true,
+		"0x3F5296303400B56271b476F5A0B9cBF74350D6Ac": true,
+		"0x5ad0000000000000000000010000000000000003": false,
+		"0x5ad1000000000000000000000000000000000003": false,
+		"0x70997970C51812dc3A010C7d01b50e0d17dc79C8": false,
+	} {
+		assert.Equal(t, want, IsPortalAddress(common.HexToAddress(address)), address)
+	}
+}

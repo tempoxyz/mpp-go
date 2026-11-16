@@ -5,6 +5,7 @@
 package zone
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -24,6 +25,12 @@ import (
 // DefaultSettlementTimeout is how long a payer waits by default for a Zone
 // withdrawal to settle on Tempo.
 const DefaultSettlementTimeout = 60 * time.Second
+
+// RedemptionGrace is the longest a server accepts a zone credential after its
+// challenge expires (its ZoneCredentialGrace), and so how long after the
+// expiry a client still resumes the challenge's withdrawal, as mppx's
+// Zone.redemptionGraceMs.
+const RedemptionGrace = 5 * time.Minute
 
 // lookbackBlocks is how many Tempo blocks before the current head
 // SettlementStartBlock starts the search for a settled withdrawal.
@@ -159,6 +166,17 @@ func PortalAddress(zoneID uint32) common.Address {
 		return common.HexToAddress("0x3F5296303400B56271b476F5A0B9cBF74350D6Ac")
 	}
 	return common.HexToAddress(fmt.Sprintf("0x5ad000000000000000000000%016x", id))
+}
+
+// portalPrefix is what every Zone portal address but the legacy ones starts
+// with: PortalAddress(0) without its last 8 bytes, which hold the Zone ID.
+var portalPrefix = PortalAddress(0).Bytes()[:common.AddressLength-8]
+
+// IsPortalAddress reports whether address is a Zone portal: it has the portal
+// prefix, or is the legacy portal of Zone 6 or 7.
+func IsPortalAddress(address common.Address) bool {
+	return bytes.HasPrefix(address.Bytes(), portalPrefix) ||
+		address == PortalAddress(6) || address == PortalAddress(7)
 }
 
 // IDFromChainID derives a Zone ID from a Zone chain ID. Zones on Tempo

@@ -139,7 +139,22 @@ type IntentConfig struct {
 	// directly trust the credential's echoed expiry, so an expired key would
 	// let the same hash, proof or transaction settle again.
 	ExpireReplayKeys bool
+	// ZoneCredentialGrace is how long after its challenge expires a zone
+	// credential is still accepted, for a withdrawal that settled on Tempo
+	// before the challenge expired, as mppx's zoneCredentialGraceMs. It lets a
+	// payer whose withdrawal settled late in the challenge's lifetime redeem
+	// it on retry. Other credential types get no grace. It must be between
+	// zero (the default) and MaxZoneCredentialGrace (5 minutes).
+	//
+	// Replay keys outlast it: they are kept forever, or with ExpireReplayKeys
+	// until ten minutes after the grace ends.
+	ZoneCredentialGrace time.Duration
 }
+
+// MaxZoneCredentialGrace is the longest ZoneCredentialGrace a verifier
+// accepts, and how long after a challenge's expiry a Zone client stops
+// resuming its withdrawal.
+const MaxZoneCredentialGrace = zone.RedemptionGrace
 
 // Intent verifies Tempo charge Credentials and returns Receipts.
 type Intent struct {
@@ -159,6 +174,8 @@ type Intent struct {
 	// expireReplayKeys claims replay keys with tempo.ExpiringStore; see
 	// IntentConfig.ExpireReplayKeys.
 	expireReplayKeys bool
+	// zoneCredentialGrace is IntentConfig.ZoneCredentialGrace.
+	zoneCredentialGrace time.Duration
 	// rpcClients holds the RPC clients built from URLs, so each is built
 	// once rather than per credential.
 	rpcClients *rpccache.Cache
@@ -166,7 +183,24 @@ type Intent struct {
 	now func() time.Time
 }
 
-var _ mppserver.BroadcastingIntent = (*Intent)(nil)
+var (
+	_ mppserver.BroadcastingIntent = (*Intent)(nil)
+	_ mppserver.ExpiryGraceIntent  = (*Intent)(nil)
+)
+
+// ExpiryGrace returns how long after its challenge expires credential is
+// still accepted: IntentConfig.ZoneCredentialGrace for a zone credential,
+// whose settlement validateZone then requires to predate the expiry, and
+// none for every other credential type.
+func (i *Intent) ExpiryGrace(credential *mpp.Credential) time.Duration {
+	if credential == nil || i.zoneCredentialGrace <= 0 {
+		return 0
+	}
+	if kind, _ := credential.Payload["type"].(string); kind != string(tempo.CredentialTypeZone) {
+		return 0
+	}
+	return i.zoneCredentialGrace
+}
 
 type validatedChargeCredential struct {
 	payload tempo.ChargeCredentialPayload
@@ -221,6 +255,9 @@ func newIntent(config IntentConfig) (*Intent, error) {
 		}
 		feePayerSigner = resolved
 	}
+	if config.ZoneCredentialGrace < 0 || config.ZoneCredentialGrace > MaxZoneCredentialGrace {
+		return nil, fmt.Errorf("tempo server: ZoneCredentialGrace must be between 0 and %s", MaxZoneCredentialGrace)
+	}
 	store := config.Store
 	if config.ExpireReplayKeys {
 		if _, ok := store.(tempo.ExpiringStore); !ok {
@@ -268,17 +305,18 @@ func newIntent(config IntentConfig) (*Intent, error) {
 		}
 	}
 	return &Intent{
-		rpc:              config.RPC,
-		rpcURL:           config.RPCURL,
-		rpcClients:       new(rpccache.Cache),
-		feePayerSigner:   feePayerSigner,
-		feePayerPolicy:   feePayerPolicy,
-		feeTokens:        feeTokens,
-		feeToken:         feeToken,
-		hostedFeePayer:   hosted,
-		sponsorPolicy:    resolveSponsorPolicy(config),
-		store:            store,
-		expireReplayKeys: config.ExpireReplayKeys,
+		rpc:                 config.RPC,
+		rpcURL:              config.RPCURL,
+		rpcClients:          new(rpccache.Cache),
+		feePayerSigner:      feePayerSigner,
+		feePayerPolicy:      feePayerPolicy,
+		feeTokens:           feeTokens,
+		feeToken:            feeToken,
+		hostedFeePayer:      hosted,
+		sponsorPolicy:       resolveSponsorPolicy(config),
+		store:               store,
+		expireReplayKeys:    config.ExpireReplayKeys,
+		zoneCredentialGrace: config.ZoneCredentialGrace,
 	}, nil
 }
 
@@ -357,7 +395,7 @@ func (i *Intent) Broadcast(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateChallengeExpiry(credential); err != nil {
+	if err := validateChallengeExpiry(credential, i.ExpiryGrace(credential)); err != nil {
 		return nil, err
 	}
 	return i.broadcastCredential(ctx, credential, validated)
@@ -536,6 +574,10 @@ func (i *Intent) validateZone(
 	payload := validated.payload
 	portal := zone.PortalAddress(payload.ZoneID)
 	senderTag := common.HexToHash(payload.SenderTag)
+	// Refuse a credential past its grace before any RPC.
+	if err := validateChallengeExpiry(credential, i.ExpiryGrace(credential)); err != nil {
+		return err
+	}
 	receipt, err := fetchReceipt(ctx, validated.rpc, payload.Hash)
 	if err != nil {
 		if isTransactionReverted(err) {
@@ -577,6 +619,41 @@ func (i *Intent) validateZone(
 	memo := hexutil.Encode(withdrawal.Memo[:])
 	if !tempo.VerifyAttributionServer(memo, credential.Challenge.Realm) || !tempo.VerifyAttributionChallenge(memo, credential.Challenge.ID) {
 		return mpp.ErrCredentialReplayed("memo is not bound to this challenge")
+	}
+	// A credential presented after its challenge expired is accepted only for
+	// a withdrawal that settled before then; see
+	// IntentConfig.ZoneCredentialGrace.
+	return validateZoneSettledBeforeExpiry(ctx, validated.rpc, credential, receipt, i.clock())
+}
+
+// validateZoneSettledBeforeExpiry rejects a zone credential presented after
+// its challenge expired unless the block of its settlement receipt was
+// produced before the expiry. A credential presented before the expiry needs
+// no lookup.
+func validateZoneSettledBeforeExpiry(ctx context.Context, rpc tempo.RPCClient, credential *mpp.Credential, receipt map[string]any, now time.Time) error {
+	expiresValue := credential.Challenge.Expires
+	expires, err := parseExpires(expiresValue)
+	if err != nil || now.Before(expires) {
+		return nil
+	}
+	blockNumber := asString(receipt["blockNumber"])
+	if blockNumber == "" {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	response, err := rpc.SendRequest(ctx, "eth_getBlockByNumber", blockNumber, false)
+	if err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	if err := response.CheckError(); err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	block, _ := response.Result.(map[string]any)
+	timestamp, err := hexutil.DecodeUint64(asString(block["timestamp"]))
+	if err != nil || timestamp > math.MaxInt64 {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	if !time.Unix(int64(timestamp), 0).Before(expires) {
+		return mpp.ErrPaymentExpired(expiresValue)
 	}
 	return nil
 }
@@ -1046,7 +1123,7 @@ func (i *Intent) broadcastTransaction(
 			}
 		}
 	}
-	if err := validateChallengeExpiry(credential); err != nil {
+	if err := validateChallengeExpiry(credential, 0); err != nil {
 		return nil, err
 	}
 	if request.MethodDetails.FeePayer && includedReceipt == nil {
@@ -1193,7 +1270,9 @@ func hashPaymentFundedByCurrency(ctx context.Context, credential *mpp.Credential
 	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
 }
 
-func validateChallengeExpiry(credential *mpp.Credential) error {
+// validateChallengeExpiry requires credential's challenge to carry a
+// well-formed expiry that has not passed, or that passed less than grace ago.
+func validateChallengeExpiry(credential *mpp.Credential, grace time.Duration) error {
 	if credential == nil {
 		return mpp.ErrMalformedCredential("credential is required")
 	}
@@ -1205,7 +1284,7 @@ func validateChallengeExpiry(credential *mpp.Credential) error {
 	if err != nil {
 		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "invalid expires format")
 	}
-	if !time.Now().UTC().Before(expires) {
+	if !time.Now().UTC().Before(expires.Add(max(grace, 0))) {
 		return mpp.ErrPaymentExpired(expiresValue)
 	}
 	return nil
@@ -1288,7 +1367,9 @@ func broadcastOutcomeUnknown(challengeID string) error {
 func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential, key, value string) (bool, error) {
 	if store, ok := i.store.(tempo.ExpiringStore); ok && i.expireReplayKeys {
 		if expiresAt, ok := replayClaimExpiry(credential); ok {
-			return store.PutIfAbsentUntil(ctx, key, value, expiresAt)
+			// Held through the grace too, while the credential can still be
+			// presented.
+			return store.PutIfAbsentUntil(ctx, key, value, expiresAt.Add(i.ExpiryGrace(credential)))
 		}
 	}
 	return i.store.PutIfAbsent(ctx, key, value)
@@ -1302,8 +1383,10 @@ func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential,
 // the withdrawal of a zone credential must carry an attribution memo naming
 // the challenge ID. The challenge ID is
 // an HMAC over the challenge's expiry, which server.Mpp verifies before
-// settlement, and credentials are only accepted before that expiry, so after
-// it no challenge can accept the same proof, transaction or hash again. The
+// settlement, and credentials are only accepted before that expiry (a zone
+// credential until IntentConfig.ZoneCredentialGrace after it, which
+// claimReplayKey adds), so after it no challenge can accept the same proof,
+// transaction or hash again. The
 // grace absorbs clock skew between verifier replicas and the store.
 func replayClaimExpiry(credential *mpp.Credential) (time.Time, bool) {
 	if credential == nil || credential.Challenge.Expires == "" {
@@ -1493,6 +1576,13 @@ func receiptMatches(receipt map[string]any, credential *mpp.Credential, request 
 		}
 		fromAddress := tempo.ParseTopicAddress(asString(topics[1]))
 		toAddress := tempo.ParseTopicAddress(asString(topics[2]))
+		// A Zone portal's payout pays a withdrawal, which only its zone
+		// credential redeems; a settlement transaction batches many, so its
+		// hash can't be claimed for one. Skip portal transfers whatever the
+		// source, so a hash credential never redeems them.
+		if zone.IsPortalAddress(common.HexToAddress(fromAddress)) {
+			continue
+		}
 		if sourceAddress != "" && !strings.EqualFold(fromAddress, sourceAddress) {
 			continue
 		}

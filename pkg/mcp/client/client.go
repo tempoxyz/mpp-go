@@ -20,6 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mcp/internal/payment"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -335,7 +336,11 @@ func (config *Config) pay(
 		}
 	}
 
-	credential, err := selected.Method.CreateCredential(ctx, selected.Challenge)
+	// A payment still settling is resumed for the same challenge, not paid
+	// again under a new one. MCP carries no origin for the method to check.
+	credential, err := paymentctx.RetryPending(ctx, maxPaymentAttempts, func() (*mpp.Credential, error) {
+		return selected.Method.CreateCredential(ctx, selected.Challenge)
+	})
 	if err != nil {
 		return nil, credentialKey{}, fmt.Errorf("mpp: creating credential for method %q: %w", selected.Challenge.Method, err)
 	}

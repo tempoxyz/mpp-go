@@ -60,6 +60,9 @@ type Config struct {
 	// currency or recipient allowlist applies to them too. Check the normalized amount (including splits),
 	// currency, recipient, and verified RPC chain; enforce cumulative budgets atomically if needed.
 	// The callback may run concurrently and must not mutate the request.
+	// For a payment from a Zone balance (Config.Zone), it runs once the
+	// withdrawal fee is known, with the amount plus that fee, the total the
+	// withdrawal debits, so MaxAmount and MaxAtomicAmount cap the fee too.
 	//
 	// Build it from the PaymentPolicy helpers, for example at most 0.50 OUSD
 	// per payment on mainnet:
@@ -117,8 +120,8 @@ type Zone struct {
 	SettlementTimeout time.Duration
 	// MaxWithdrawalFee, when set, caps the Zone outbox fee a withdrawal may
 	// pay on top of the charge amount, in base units of the charge currency.
-	// PaymentPolicy authorizes only the amount, so without a cap a fee spike
-	// debits more than it allowed. A higher fee fails with
+	// PaymentPolicy also sees the amount plus the fee; this caps the fee on
+	// its own. A higher fee fails with
 	// ErrZoneWithdrawalFeeTooHigh before anything is signed. It must not be
 	// negative.
 	MaxWithdrawalFee *big.Int
@@ -468,8 +471,16 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	if m.paysFromZone(challenge, request, chainID) {
 		// The policy authorizes only a withdrawal about to be sent, under the
 		// claim on the challenge: a resumed payment does not reserve the same
-		// charge again, and no new withdrawal is sent without it.
-		authorize := func(ctx context.Context) error { return m.authorizePayment(ctx, request, chainID) }
+		// charge again, and no new withdrawal is sent without it. It sees the
+		// amount plus the withdrawal fee, the total the withdrawal debits.
+		authorize := func(ctx context.Context, total *big.Int) error {
+			charged := request
+			charged.Amount = total.String()
+			if err := m.authorizePayment(ctx, charged, chainID); err != nil {
+				return fmt.Errorf("tempo client: charge amount plus Zone withdrawal fee (%s): %w", total, err)
+			}
+			return nil
+		}
 		return m.createZoneCredential(ctx, rpc, challenge, request, authorize)
 	}
 	if !request.Allows(credentialType) {

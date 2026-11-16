@@ -20,6 +20,8 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/mpptest"
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
@@ -1316,4 +1318,202 @@ func TestZoneRefusesWithdrawalFeeAboveMax(t *testing.T) {
 	_, err = New(Config{PrivateKey: testPrivateKey, RPC: &zoneTestTempoRPC{}, PaymentPolicy: allowAll,
 		Zone: &Zone{RPC: &zoneTestRPC{}, ChainID: zoneTestChainID, MaxWithdrawalFee: big.NewInt(-1)}})
 	assert.ErrorContains(t, err, "MaxWithdrawalFee must not be negative")
+}
+
+// zoneTermsChallenge returns a challenge for the zone payment of
+// zoneChallenge, with its own expiry and issuance nonce: a new challenge for
+// the same terms.
+func zoneTermsChallenge(t *testing.T, expires time.Time, nonce string, configure func(*tempo.ChargeRequestParams)) *mpp.Challenge {
+	t.Helper()
+	params := tempo.ChargeRequestParams{
+		Amount:    "1",
+		Currency:  testCurrency,
+		Recipient: testRecipient,
+		ChainID:   42431,
+		Zones:     &tempo.Zones{IDs: []uint32{3}},
+	}
+	if configure != nil {
+		configure(&params)
+	}
+	request, err := tempo.NormalizeChargeRequest(params)
+	require.NoError(t, err)
+	return mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request.Map(),
+		mpp.WithExpires(expires.UTC().Format(time.RFC3339Nano)),
+		mpp.WithMeta(map[string]string{"_mppx_nonce": nonce, "_mppx_scope": "GET /paid"}))
+}
+
+// zonePendingFirst sends a withdrawal for a first challenge from origin that
+// does not settle in time, leaving it outstanding.
+func zonePendingFirst(t *testing.T, origin string) (*Method, *zoneTestRPC, *zoneTestTempoRPC, *mpp.Challenge) {
+	t.Helper()
+	zoneRPC := &zoneTestRPC{mode: "ok"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	first := zoneTermsChallenge(t, time.Now().Add(5*time.Minute), "first", nil)
+	_, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), origin), first)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+	require.ErrorIs(t, err, paymentctx.ErrSettlementPending)
+	require.Len(t, zoneRPC.sent, 1)
+	tempoRPC.mu.Lock()
+	tempoRPC.settled = true
+	tempoRPC.mu.Unlock()
+	return method, zoneRPC, tempoRPC, first
+}
+
+// A new challenge for the terms an outstanding withdrawal pays, from the
+// origin that issued its challenge, resumes it: the credential pays the
+// first challenge, and nothing is sent again.
+func TestZoneNewChallengeWithSameTermsResumesWithdrawal(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	second := zoneTermsChallenge(t, time.Now().Add(6*time.Minute), "second", nil)
+	require.NotEqual(t, first.ID, second.ID)
+
+	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 1)
+
+	// The credential paid the terms once: the next challenge pays again.
+	third := zoneTermsChallenge(t, time.Now().Add(7*time.Minute), "third", nil)
+	credential, err = method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), third)
+	require.NoError(t, err)
+	assert.Equal(t, third.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 2)
+}
+
+// A new challenge for those terms from another origin, or one the caller did
+// not verify, fails closed with no network call, naming the first challenge.
+func TestZoneNewChallengeWithSameTermsFromOtherOriginFailsClosed(t *testing.T) {
+	t.Parallel()
+	for name, origin := range map[string]string{"other origin": "https://evil.example", "unknown origin": ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+			calls := zoneRPC.callCount()
+			second := zoneTermsChallenge(t, time.Now().Add(6*time.Minute), "second", nil)
+
+			_, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), origin), second)
+			var pending *ZoneSettlementPendingError
+			require.ErrorAs(t, err, &pending)
+			assert.Equal(t, first.ID, pending.ChallengeID)
+			assert.Empty(t, pending.SenderTag)
+			assert.NotContains(t, pending.Error(), "withdrawal 0x")
+			assert.Equal(t, calls, zoneRPC.callCount())
+			assert.Len(t, zoneRPC.sent, 1)
+		})
+	}
+}
+
+// The first challenge itself is refused from a known origin other than the
+// one that issued it, but resumes from an unknown one.
+func TestZoneOwnChallengeFromOtherKnownOriginFailsClosed(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	_, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://evil.example"), first)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+	assert.Equal(t, first.ID, pending.ChallengeID)
+
+	credential, err := method.CreateCredential(context.Background(), first)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// Five minutes after the first challenge expires, no server accepts its
+// credential: a new challenge for its terms fails closed and sends nothing.
+func TestZoneWithdrawalPastRedemptionWindowFailsClosed(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	method.now = func() time.Time { return expires.Add(zone.RedemptionGrace) }
+	calls := zoneRPC.callCount()
+
+	second := zoneTermsChallenge(t, expires.Add(10*time.Minute), "second", nil)
+	_, err = method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+	assert.Equal(t, first.ID, pending.ChallengeID)
+	assert.Equal(t, calls, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A credential made after its challenge expired keeps the withdrawal
+// outstanding, so the next challenge for its terms resumes it rather than
+// paying again.
+func TestZoneCredentialAfterExpiryKeepsWithdrawalOutstanding(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	method.now = func() time.Time { return expires.Add(time.Minute) }
+
+	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), first)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, credential.Challenge.ID)
+	assert.NotNil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A challenge for other terms is a new payment.
+func TestZoneChallengeWithOtherAmountWithdraws(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, _ := zonePendingFirst(t, "https://api.example.com")
+	other := zoneTermsChallenge(t, time.Now().Add(6*time.Minute), "second", func(p *tempo.ChargeRequestParams) { p.Amount = "2" })
+	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), other)
+	require.NoError(t, err)
+	assert.Equal(t, other.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 2)
+}
+
+func TestZoneWithdrawalTerms(t *testing.T) {
+	t.Parallel()
+	expires := time.Now().Add(5 * time.Minute)
+	first := zoneTermsChallenge(t, expires, "a", nil)
+	second := zoneTermsChallenge(t, expires.Add(time.Minute), "b", nil)
+	assert.Equal(t, zoneWithdrawalTerms(first, 3), zoneWithdrawalTerms(second, 3))
+	assert.NotEqual(t, zoneWithdrawalTerms(first, 3), zoneWithdrawalTerms(first, 4))
+
+	scoped := zoneTermsChallenge(t, expires, "a", nil)
+	scoped.Opaque = map[string]string{"_mppx_nonce": "a", "_mppx_scope": "GET /other"}
+	assert.NotEqual(t, zoneWithdrawalTerms(first, 3), zoneWithdrawalTerms(scoped, 3))
+	assert.Contains(t, zoneWithdrawalTerms(first, 3), "_mppx_scope")
+	assert.NotContains(t, zoneWithdrawalTerms(first, 3), "_mppx_nonce")
+}
+
+// The policy sees the amount plus the withdrawal fee, so its caps include
+// the fee; a refusal sends nothing and leaves the challenge payable.
+func TestZoneWithdrawalFeeCountsAgainstPolicyCaps(t *testing.T) {
+	t.Parallel()
+	const amount, decimals = 1_000_000, 6
+	cases := []struct {
+		name    string
+		policy  PaymentPolicy
+		allowed bool
+	}{
+		{"atomic below total", MaxAtomicAmount(testCurrency, big.NewInt(amount+zoneTestFee-1)), false},
+		{"amount below total", MaxAmount(testCurrency, "1.000999", decimals), false},
+		{"atomic equals total", MaxAtomicAmount(testCurrency, big.NewInt(amount+zoneTestFee)), true},
+		{"amount equals total", MaxAmount(testCurrency, "1.001", decimals), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			zoneRPC := &zoneTestRPC{mode: "ok"}
+			method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.PaymentPolicy = tc.policy })
+			challenge := zoneChallenge(t, func(p *tempo.ChargeRequestParams) { p.Decimals = decimals })
+			_, err := method.CreateCredential(context.Background(), challenge)
+			if tc.allowed {
+				require.NoError(t, err)
+				assert.Len(t, zoneRPC.sent, 1)
+				return
+			}
+			require.ErrorContains(t, err, "charge amount plus Zone withdrawal fee")
+			assert.Empty(t, zoneRPC.sent)
+			assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)))
+		})
+	}
 }

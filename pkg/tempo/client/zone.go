@@ -14,9 +14,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/gowebpki/jcs"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
@@ -48,8 +50,16 @@ const approveSelector = "095ea7b3"
 // but did not settle on Tempo before the method stopped waiting. The
 // withdrawal cannot be undone and may still settle: pass Challenge to the same
 // Method's CreateCredential to resume waiting without withdrawing again, or
-// find the settlement by SenderTag on the Zone's portal. A new request gets a
-// new challenge, which the method would pay with a new withdrawal.
+// find the settlement by SenderTag on the Zone's portal. A new challenge with
+// the same terms from the same origin resumes it too; the method never pays
+// those terms again while the withdrawal is outstanding.
+//
+// It is also returned, with no SenderTag and without any network call, for a
+// challenge whose terms an outstanding withdrawal already pays when the
+// challenge came from another origin, or one the caller did not verify, and
+// for a withdrawal whose challenge is past its redemption window (five
+// minutes after it expires): the method fails closed rather than withdraw
+// again.
 type ZoneSettlementPendingError struct {
 	// Challenge is the challenge the withdrawal pays.
 	Challenge *mpp.Challenge
@@ -66,8 +76,19 @@ type ZoneSettlementPendingError struct {
 
 // Error implements error.
 func (e *ZoneSettlementPendingError) Error() string {
-	return fmt.Sprintf("tempo client: Zone %d withdrawal %s for challenge %q has not settled on Tempo yet; retry the challenge to resume waiting instead of paying again",
-		e.ZoneID, e.SenderTag, e.ChallengeID)
+	withdrawal := "withdrawal"
+	if e.SenderTag != "" {
+		withdrawal += " " + e.SenderTag
+	}
+	return fmt.Sprintf("tempo client: Zone %d %s for challenge %q has not settled on Tempo yet; retry the challenge to resume waiting instead of paying again",
+		e.ZoneID, withdrawal, e.ChallengeID)
+}
+
+// Is makes the error match the settlement-pending sentinel the HTTP Transport
+// and the MCP client retry on: they create the Credential again for the same
+// challenge, which resumes waiting.
+func (e *ZoneSettlementPendingError) Is(target error) bool {
+	return target == paymentctx.ErrSettlementPending
 }
 
 // Unwrap returns the error that ended the wait.
@@ -156,7 +177,14 @@ var ErrZoneDeadlineTooSoon = errors.New("tempo client: request deadline too soon
 // transaction's hash, kept so a retry can look for a receipt that was missing.
 // settlementStart, guarded by Method.zoneMu, is the Tempo block the first
 // settlement wait searched from, so a resumed wait searches from it too.
+//
+// challenge is the challenge the withdrawal pays, bound to it by its memo;
+// origin the origin that issued it ("" when unknown); terms what another
+// challenge must ask for to be paid by this withdrawal ("" never matches).
 type zoneWithdrawal struct {
+	challenge       *mpp.Challenge
+	origin          string
+	terms           string
 	done            chan struct{}
 	sent            bool
 	hash            string
@@ -245,8 +273,8 @@ func resolveZone(config *Zone, signer *temposigner.Signer, accessKey bool) (*zon
 // Zone: the challenge is on the Zone's parent chain, allows push payments,
 // accepts the Zone and has no splits; Config.CredentialType asks for no other
 // mode; and a new withdrawal can settle before the challenge expires, since an
-// expired challenge would invite another payment. A challenge with a
-// withdrawal already sent always resumes it.
+// expired challenge would invite another payment. A challenge whose terms an
+// outstanding withdrawal pays always resumes it.
 func (m *Method) paysFromZone(challenge *mpp.Challenge, request tempo.ChargeRequest, chainID int64) bool {
 	if m.zone == nil || request.Amount == "0" || m.zone.parentChainID != chainID {
 		return false
@@ -259,7 +287,7 @@ func (m *Method) paysFromZone(challenge *mpp.Challenge, request tempo.ChargeRequ
 		len(request.MethodDetails.Splits) > 0 {
 		return false
 	}
-	if m.pendingZoneWithdrawal(zoneWithdrawalKey(challenge)) != nil {
+	if _, withdrawal := m.findZoneWithdrawal(challenge); withdrawal != nil {
 		return true
 	}
 	return m.settlesBeforeExpiry(challenge.Expires)
@@ -279,7 +307,8 @@ func (m *Method) settlesBeforeExpiry(expires string) bool {
 }
 
 // settlementTimeout returns how long to wait for settlement: the configured
-// timeout, cut short at expires.
+// timeout, cut short at expires. After expires it is zero, a single look:
+// only a settlement from before then can still be redeemed.
 func (m *Method) settlementTimeout(expires string) time.Duration {
 	timeout := m.zone.settlementTimeout
 	if expires == "" {
@@ -305,50 +334,179 @@ func zoneWithdrawalKey(challenge *mpp.Challenge) string {
 	return string(encoded)
 }
 
+// zoneWithdrawalTerms keys what challenge asks a Zone withdrawal to pay: its
+// realm, method, intent, request, digest and route metadata (its opaque
+// metadata without the issuance nonces), everything a server compares when
+// it accepts another challenge's credential, but not its ID or expiry, as
+// mppx's zone terms. It is "" when they can't be encoded, which matches no
+// other challenge.
+func zoneWithdrawalTerms(challenge *mpp.Challenge, zoneID uint32) string {
+	var meta map[string]string
+	if challenge.Opaque != nil {
+		meta = make(map[string]string, len(challenge.Opaque))
+		for key, value := range challenge.Opaque {
+			if key != "_mppx_nonce" && key != "_mpp_nonce" {
+				meta[key] = value
+			}
+		}
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"digest":  challenge.Digest,
+		"intent":  challenge.Intent,
+		"meta":    meta,
+		"method":  challenge.Method,
+		"realm":   challenge.Realm,
+		"request": challenge.Request,
+		"zoneId":  zoneID,
+	})
+	if err != nil {
+		return ""
+	}
+	canonical, err := jcs.Transform(encoded)
+	if err != nil {
+		return ""
+	}
+	return string(canonical)
+}
+
+// pendingZoneWithdrawal returns the withdrawal stored under key, if any.
 func (m *Method) pendingZoneWithdrawal(key string) *zoneWithdrawal {
 	m.zoneMu.Lock()
 	defer m.zoneMu.Unlock()
 	return m.zoneWithdrawals[key]
 }
 
-// claimZoneWithdrawal returns the withdrawal for key, or claims it: under one
-// lock, it either finds the withdrawal or records a new one being sent, so
-// concurrent calls for challenges with one withdrawal key, such as ones that
-// differ only in their description, never both send. A call that finds a
-// withdrawal being sent waits for its send; if that sent nothing, the call
-// claims the withdrawal itself. A call that finds a sent withdrawal whose
-// receipt was missing claims it to look for the receipt again: the claimed
-// withdrawal then carries the earlier one's hash, and concurrent calls wait
-// on that one lookup. claimed reports that the caller must send the
-// withdrawal, or look up its receipt when it has a hash, and then call
-// finishZoneWithdrawal.
-func (m *Method) claimZoneWithdrawal(ctx context.Context, key string) (withdrawal *zoneWithdrawal, claimed bool, err error) {
+// findZoneWithdrawal returns the outstanding withdrawal that pays challenge,
+// and its key: its own, or, for a new challenge with the same terms, one an
+// earlier challenge started.
+func (m *Method) findZoneWithdrawal(challenge *mpp.Challenge) (string, *zoneWithdrawal) {
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	return m.findZoneWithdrawalLocked(zoneWithdrawalKey(challenge), zoneWithdrawalTerms(challenge, m.zone.id))
+}
+
+// findZoneWithdrawalLocked is findZoneWithdrawal with Method.zoneMu held.
+func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithdrawal) {
+	if withdrawal := m.zoneWithdrawals[key]; withdrawal != nil {
+		return key, withdrawal
+	}
+	if terms == "" {
+		return "", nil
+	}
+	for other, withdrawal := range m.zoneWithdrawals {
+		if withdrawal.terms == terms {
+			return other, withdrawal
+		}
+	}
+	return "", nil
+}
+
+// resumable refuses to resume withdrawal for a call made for a challenge from
+// origin. A withdrawal started for an earlier challenge (foreign) pays only
+// that challenge, so its credential goes only back to the origin that issued
+// it, which the caller must have verified; its own challenge is refused only
+// from a known origin other than the one that issued it. Past its redemption
+// window no server accepts the withdrawal's credential, but it may still have
+// paid, so the call fails closed rather than withdraw again.
+func (m *Method) resumable(withdrawal *zoneWithdrawal, foreign bool, origin string) error {
+	refused := origin != "" && withdrawal.origin != "" && origin != withdrawal.origin
+	if foreign {
+		refused = origin == "" || origin != withdrawal.origin
+	}
+	if refused || !m.redeemable(withdrawal.challenge.Expires) {
+		return &ZoneSettlementPendingError{
+			Challenge:   withdrawal.challenge,
+			ChallengeID: withdrawal.challenge.ID,
+			ZoneID:      m.zone.id,
+		}
+	}
+	return nil
+}
+
+// redeemable reports whether a credential for a challenge expiring at expires
+// may still be redeemed: until zone.RedemptionGrace, the longest grace a
+// server allows, after it expires.
+func (m *Method) redeemable(expires string) bool {
+	if expires == "" {
+		return true
+	}
+	expiry, err := mpp.ParseExpires(expires)
+	return err != nil || m.clock().Before(expiry.Add(zone.RedemptionGrace))
+}
+
+// expired reports whether a challenge expiring at expires has expired.
+func (m *Method) expired(expires string) bool {
+	if expires == "" {
+		return false
+	}
+	expiry, err := mpp.ParseExpires(expires)
+	return err == nil && !m.clock().Before(expiry)
+}
+
+// claimZoneWithdrawal returns the outstanding withdrawal that pays challenge,
+// its own or one with the same terms (see findZoneWithdrawal), or claims a
+// new one for challenge: under one lock, it either finds the withdrawal or
+// records a new one being sent, so concurrent calls for challenges with one
+// withdrawal key or the same terms never both send. A withdrawal that
+// resumable refuses fails the call before any network call. A call that
+// finds a withdrawal being sent waits for its send; if that sent nothing,
+// the call looks again and may claim a new one. A new withdrawal is claimed
+// only when it can settle before challenge expires. A call that finds a sent
+// withdrawal whose receipt was missing claims it to look for the receipt
+// again: the claimed withdrawal then carries the earlier one's hash, and
+// concurrent calls wait on that one lookup. claimed reports that the caller
+// must send the withdrawal, or look up its receipt when it has a hash, and
+// then call finishZoneWithdrawal with key.
+func (m *Method) claimZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, origin string) (withdrawal *zoneWithdrawal, key string, claimed bool, err error) {
+	own := zoneWithdrawalKey(challenge)
+	terms := zoneWithdrawalTerms(challenge, m.zone.id)
 	for {
 		m.zoneMu.Lock()
-		withdrawal = m.zoneWithdrawals[key]
-		if withdrawal != nil && finished(withdrawal) && withdrawal.unknown() {
-			withdrawal = &zoneWithdrawal{done: make(chan struct{}), hash: withdrawal.hash, err: withdrawal.err, settlementStart: withdrawal.settlementStart}
-			m.zoneWithdrawals[key] = withdrawal
-			m.zoneMu.Unlock()
-			return withdrawal, true, nil
+		key, withdrawal = m.findZoneWithdrawalLocked(own, terms)
+		if withdrawal != nil {
+			if err := m.resumable(withdrawal, key != own, origin); err != nil {
+				m.zoneMu.Unlock()
+				return nil, "", false, err
+			}
 		}
-		if withdrawal == nil {
-			withdrawal = &zoneWithdrawal{done: make(chan struct{})}
-			if m.zoneWithdrawals == nil {
-				m.zoneWithdrawals = map[string]*zoneWithdrawal{}
+		if withdrawal != nil && finished(withdrawal) && withdrawal.unknown() {
+			withdrawal = &zoneWithdrawal{
+				challenge:       withdrawal.challenge,
+				origin:          withdrawal.origin,
+				terms:           withdrawal.terms,
+				done:            make(chan struct{}),
+				hash:            withdrawal.hash,
+				err:             withdrawal.err,
+				settlementStart: withdrawal.settlementStart,
 			}
 			m.zoneWithdrawals[key] = withdrawal
 			m.zoneMu.Unlock()
-			return withdrawal, true, nil
+			return withdrawal, key, true, nil
+		}
+		if withdrawal == nil {
+			if !m.settlesBeforeExpiry(challenge.Expires) {
+				m.zoneMu.Unlock()
+				return nil, "", false, fmt.Errorf("%w: challenge %q expires at %s, and a withdrawal needs more than %s",
+					ErrZoneChallengeExpiresTooSoon, challenge.ID, challenge.Expires, m.zone.settlementTimeout+zoneSubmissionMargin)
+			}
+			// Stored before it is sent, so concurrent and later calls for
+			// the challenge or its terms share it.
+			withdrawal = &zoneWithdrawal{challenge: challenge, origin: origin, terms: terms, done: make(chan struct{})}
+			if m.zoneWithdrawals == nil {
+				m.zoneWithdrawals = map[string]*zoneWithdrawal{}
+			}
+			m.zoneWithdrawals[own] = withdrawal
+			m.zoneMu.Unlock()
+			return withdrawal, own, true, nil
 		}
 		m.zoneMu.Unlock()
 		select {
 		case <-withdrawal.done:
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			return nil, "", false, ctx.Err()
 		}
 		if withdrawal.sent {
-			return withdrawal, false, nil
+			return withdrawal, key, false, nil
 		}
 	}
 }
@@ -389,11 +547,15 @@ func (m *Method) forgetZoneWithdrawal(key string, withdrawal *zoneWithdrawal) {
 // one already sent for the challenge, waits for it to settle on Tempo, and
 // returns a zone credential naming it by sender tag and the Tempo
 // transaction that settled it. Calls for challenges with one withdrawal key
-// share one withdrawal, so they never send two for one challenge.
+// share one withdrawal, so they never send two for one challenge, and a
+// challenge with the same terms as an outstanding withdrawal resumes it
+// (see claimZoneWithdrawal): the credential then pays the challenge that
+// withdrawal was sent for.
 //
 // authorize runs only before a new withdrawal is sent, while this call holds
-// the challenge's claim; its error refuses the payment and sends nothing.
-func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, challenge *mpp.Challenge, request tempo.ChargeRequest, authorize func(context.Context) error) (*mpp.Credential, error) {
+// the challenge's claim, with the amount plus the withdrawal fee; its error
+// refuses the payment and sends nothing.
+func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, challenge *mpp.Challenge, request tempo.ChargeRequest, authorize func(context.Context, *big.Int) error) (*mpp.Credential, error) {
 	// Refuse a credential too large to send before withdrawing: the
 	// settlement hash and sender tag are 32 bytes each.
 	placeholder := "0x" + strings.Repeat("0", 64)
@@ -404,10 +566,15 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	if err != nil {
 		return nil, err
 	}
-	key := zoneWithdrawalKey(challenge)
-	pending, claimed, err := m.claimZoneWithdrawal(ctx, key)
+	pending, key, claimed, err := m.claimZoneWithdrawal(ctx, challenge, paymentctx.Origin(ctx))
 	if err != nil {
 		return nil, err
+	}
+	// The withdrawal pays the challenge it was sent for: this one, or an
+	// earlier one with the same terms, whose memo names that challenge.
+	paid := pending.challenge
+	if paid != challenge {
+		expected.memo = common.HexToHash(tempo.EncodeAttribution(paid.Realm, m.clientID, paid.ID))
 	}
 	if claimed {
 		finished := false
@@ -430,8 +597,8 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 		if pending.hash != "" {
 			// An earlier call sent this withdrawal but found no receipt:
 			// look for it again instead of sending another.
-			senderTag, hash, sent, sendErr = m.resumeZoneWithdrawal(ctx, challenge, expected, pending.hash, pending.err)
-		} else if sendErr = authorize(ctx); sendErr == nil {
+			senderTag, hash, sent, sendErr = m.resumeZoneWithdrawal(ctx, paid, expected, pending.hash, pending.err)
+		} else {
 			// Settlement is searched for from the Tempo head before the
 			// send, so a retry long after it still finds the settlement.
 			var start uint64
@@ -439,8 +606,16 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 				m.zoneMu.Lock()
 				pending.settlementStart = &start
 				m.zoneMu.Unlock()
-				sending = true
-				senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, challenge, expected)
+				// Nothing is sent before the policy allows it, so a panic up
+				// to then leaves the challenge payable.
+				authorized := func(ctx context.Context, total *big.Int) error {
+					if err := authorize(ctx, total); err != nil {
+						return err
+					}
+					sending = true
+					return nil
+				}
+				senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, paid, expected, authorized)
 			}
 		}
 		// Only a failure before the transaction was sent, or a revert, is
@@ -461,7 +636,7 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	start, err := m.zoneSettlementStart(ctx, rpc, pending)
 	if err == nil {
 		var settlement zone.Settlement
-		settlement, err = zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(challenge.Expires))
+		settlement, err = zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(paid.Expires))
 		if err == nil && settlement.Bounced {
 			// The payout bounced back to the payer's Zone balance and paid
 			// nothing, so the server would reject its credential: fail
@@ -469,23 +644,31 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			// again withdraws again.
 			m.forgetZoneWithdrawal(key, pending)
 			return nil, &ZoneWithdrawalBouncedError{
-				ChallengeID: challenge.ID,
+				ChallengeID: paid.ID,
 				SenderTag:   pending.senderTag.Hex(),
 				ZoneID:      m.zone.id,
 			}
 		}
 		if err == nil {
-			credential := zoneCredential(challenge, common.HexToHash(settlement.Hash).Hex(), pending.senderTag.Hex(), m.zone.id)
+			credential := zoneCredential(paid, common.HexToHash(settlement.Hash).Hex(), pending.senderTag.Hex(), m.zone.id)
 			if _, err := mpp.FormatCredential(credential); err != nil {
 				return nil, err
 			}
-			m.forgetZoneWithdrawal(key, pending)
+			// The credential pays once: a later challenge with the same
+			// terms is a new payment. One made after its challenge expired
+			// is accepted only by a server that grants a grace period
+			// (ZoneCredentialGrace), so the withdrawal stays outstanding and
+			// a later challenge for its terms fails closed instead of paying
+			// again.
+			if !m.expired(paid.Expires) {
+				m.forgetZoneWithdrawal(key, pending)
+			}
 			return credential, nil
 		}
 	}
 	return nil, &ZoneSettlementPendingError{
-		Challenge:   challenge,
-		ChallengeID: challenge.ID,
+		Challenge:   paid,
+		ChallengeID: paid.ID,
 		SenderTag:   pending.senderTag.Hex(),
 		ZoneID:      m.zone.id,
 		Err:         err,
@@ -568,7 +751,10 @@ func (w zoneWithdrawalRequest) matches(event zone.Requested) bool {
 // whether the transaction may have reached the Zone: a failure after that
 // leaves the withdrawal's outcome unknown, except a revert, which moved
 // nothing.
-func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, expected zoneWithdrawalRequest) (common.Hash, string, bool, error) {
+//
+// authorize, called with the amount plus the withdrawal fee once the fee is
+// read, must allow the payment before anything is prepared or signed.
+func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, expected zoneWithdrawalRequest, authorize func(context.Context, *big.Int) error) (common.Hash, string, bool, error) {
 	rpc := m.zone.rpc
 	signer := m.zone.signer
 	amount := expected.amount
@@ -581,12 +767,19 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 	if err != nil {
 		return common.Hash{}, "", false, err
 	}
-	// PaymentPolicy authorized only the amount: refuse a fee above the
-	// configured ceiling before signing, so nothing is sent.
+	// Refuse a fee above the configured ceiling before signing, so nothing
+	// is sent.
 	if m.zone.maxWithdrawalFee != nil && fee.Cmp(m.zone.maxWithdrawalFee) > 0 {
 		return common.Hash{}, "", false, fmt.Errorf("%w: fee %s exceeds Zone.MaxWithdrawalFee %s", ErrZoneWithdrawalFeeTooHigh, fee, m.zone.maxWithdrawalFee)
 	}
-	approve := fmt.Sprintf("0x%s%064x%064x", approveSelector, zone.OutboxAddress.Big(), new(big.Int).Add(amount, fee))
+	// The payment debits the amount plus the fee, so that total is what the
+	// payment policy's limits must allow, as mppx checks it against
+	// maxAmount and maxAtomicAmount.
+	total := new(big.Int).Add(amount, fee)
+	if err := authorize(ctx, total); err != nil {
+		return common.Hash{}, "", false, err
+	}
+	approve := fmt.Sprintf("0x%s%064x%064x", approveSelector, zone.OutboxAddress.Big(), total)
 	// A bounced payout refunds the payer, not the payee's Zone address.
 	withdrawal, err := zone.OutboxABI.Pack("requestWithdrawal", currency, recipient, amount, [32]byte(memo), uint64(0), signer.Address(), []byte{}, []byte{})
 	if err != nil {
