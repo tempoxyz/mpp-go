@@ -97,6 +97,11 @@ func New(config Config) (*Method, error) {
 	if config.Intent != nil && config.Relay != nil {
 		return nil, fmt.Errorf("tempo server: Config.Intent cannot be combined with Relay; the relay verifies credentials")
 	}
+	// A relay verifies credentials itself, without the check that a late
+	// zone credential settled before its challenge expired.
+	if config.Relay != nil && config.ZoneCredentialGrace != 0 {
+		return nil, fmt.Errorf("tempo server: ZoneCredentialGrace is not supported with Relay")
+	}
 	if _, err := resolveCurrencies(config.Currencies, config.ChainID); err != nil {
 		return nil, err
 	}

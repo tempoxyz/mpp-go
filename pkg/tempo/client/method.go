@@ -468,7 +468,11 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 			Source: tempo.ProofSource(chainID, m.account()),
 		}, nil
 	}
-	if m.paysFromZone(challenge, request, chainID) {
+	fromZone, err := m.paysFromZone(challenge, request, chainID)
+	if err != nil {
+		return nil, err
+	}
+	if fromZone {
 		// The policy authorizes only a withdrawal about to be sent, under the
 		// claim on the challenge: a resumed payment does not reserve the same
 		// charge again, and no new withdrawal is sent without it. It sees the

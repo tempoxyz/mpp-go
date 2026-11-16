@@ -496,14 +496,20 @@ func newZoneGraceSetup(t *testing.T, grace time.Duration) zoneSetup {
 	return zoneSetup{rpc: rpc, method: method}
 }
 
-// expiredChallenge issues a challenge for 1 unit that expired ago, and
-// returns its attribution memo.
+// expiredChallenge issues a challenge for 1 unit that expired ago, carrying
+// the expiry grace marker, and returns its attribution memo.
 func (s zoneSetup) expiredChallenge(t *testing.T, ago time.Duration) (*mpp.Challenge, string) {
+	t.Helper()
+	return s.expiredChallengeWithMeta(t, ago, map[string]string{expiryGraceKey: "1"})
+}
+
+// expiredChallengeWithMeta is expiredChallenge with the given opaque meta.
+func (s zoneSetup) expiredChallengeWithMeta(t *testing.T, ago time.Duration, meta map[string]string) (*mpp.Challenge, string) {
 	t.Helper()
 	request, err := s.method.BuildChargeRequest(server.ChargeParams{Amount: "1"})
 	require.NoError(t, err)
 	challenge := mpptest.NewChallenge("secret-key", testRealm, tempo.MethodName, tempo.IntentCharge, request,
-		mpp.WithExpires(time.Now().Add(-ago).UTC().Format(time.RFC3339Nano)))
+		mpp.WithExpires(time.Now().Add(-ago).UTC().Format(time.RFC3339Nano)), mpp.WithMeta(meta))
 	return challenge, tempo.EncodeAttribution(challenge.Realm, "", challenge.ID)
 }
 
@@ -569,6 +575,95 @@ func TestZoneCredentialGraceEnds(t *testing.T) {
 			requirePaymentExpired(t, err)
 			assert.NotContains(t, s.rpc.methods, "eth_getTransactionReceipt")
 		})
+	}
+}
+
+// A challenge issued without the expiry grace marker, by an earlier release
+// or by a server with no grace, gets no grace: its zone credential is
+// refused at the expiry, before any RPC.
+func TestZoneCredentialGraceRequiresMarker(t *testing.T) {
+	t.Parallel()
+	for name, meta := range map[string]map[string]string{
+		"no marker":   nil,
+		"other value": {expiryGraceKey: "true"},
+		"other meta":  {"plan": "pro"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newZoneGraceSetup(t, time.Minute)
+			challenge, memo := s.expiredChallengeWithMeta(t, time.Second, meta)
+			s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+			s.rpc.settledAt = time.Now().Add(-time.Hour)
+			_, err := s.verify(challenge, zoneTagA, zoneTestID)
+			requirePaymentExpired(t, err)
+			assert.NotContains(t, s.rpc.methods, "eth_getTransactionReceipt")
+		})
+	}
+}
+
+// Challenges carry the expiry grace marker exactly when a grace is
+// configured.
+func TestZoneCredentialGraceMarksIssuedChallenges(t *testing.T) {
+	t.Parallel()
+	const secret = "a-32-byte-or-longer-server-secret"
+	for grace, want := range map[time.Duration]bool{0: false, time.Minute: true} {
+		s := newZoneGraceSetup(t, grace)
+		payment, err := server.New(s.method, testRealm, secret)
+		require.NoError(t, err)
+		result, err := payment.Charge(context.Background(), server.ChargeParams{Amount: "1"})
+		require.NoError(t, err)
+		require.True(t, result.IsChallenge())
+		value, ok := result.Challenge.Opaque[expiryGraceKey]
+		assert.Equal(t, want, ok, grace)
+		if want {
+			assert.Equal(t, "1", value)
+		}
+	}
+}
+
+// A relay verifies credentials itself, so it can't honor the grace.
+func TestZoneCredentialGraceRejectedWithRelay(t *testing.T) {
+	t.Parallel()
+	_, err := New(Config{
+		Currencies:          []string{testCurrency},
+		Recipient:           zoneTestMerchant,
+		ChainID:             tempo.ChainIDModerato,
+		Relay:               &RelayConfig{APIBaseURL: "https://relay.example.com", APIKey: "key"},
+		ZoneCredentialGrace: time.Minute,
+	})
+	assert.ErrorContains(t, err, "ZoneCredentialGrace is not supported with Relay")
+}
+
+// With expiring replay keys, a zone withdrawal's claim is held through the
+// longest grace any verifier may grant, whatever this one's grace.
+func TestZoneReplayClaimCoversFullGrace(t *testing.T) {
+	t.Parallel()
+	for _, grace := range []time.Duration{0, time.Minute} {
+		rpc := &zoneRPC{}
+		store := &expiringRecordingStore{MemoryStore: tempo.NewMemoryStore(), expiries: map[string]time.Time{}}
+		method, err := New(Config{
+			RPC:                 rpc,
+			Store:               store,
+			ExpireReplayKeys:    true,
+			Currencies:          []string{testCurrency},
+			Recipient:           zoneTestMerchant,
+			ChainID:             tempo.ChainIDModerato,
+			Zones:               &tempo.Zones{IDs: []uint32{zoneTestID}},
+			ZoneCredentialGrace: grace,
+		})
+		require.NoError(t, err)
+		s := zoneSetup{rpc: rpc, method: method}
+		challenge, memo := s.challenge(t, server.ChargeParams{})
+		s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
+		_, err = s.verify(challenge, zoneTagA, zoneTestID)
+		require.NoError(t, err, grace)
+		expires, err := parseExpires(challenge.Expires)
+		require.NoError(t, err)
+		want := expires.Add(replayClaimExpiryGrace + MaxZoneCredentialGrace)
+		require.NotEmpty(t, store.expiries, grace)
+		for key, expiresAt := range store.expiries {
+			assert.Truef(t, expiresAt.Equal(want), "%s expires at %s, want %s", key, expiresAt, want)
+		}
 	}
 }
 
@@ -697,13 +792,15 @@ func TestZoneCredentialGraceThroughMpp(t *testing.T) {
 	t.Parallel()
 	const secret = "a-32-byte-or-longer-server-secret"
 	for name, tc := range map[string]struct {
-		grace   time.Duration
-		kind    string
-		expired bool
+		grace    time.Duration
+		kind     string
+		expired  bool
+		unmarked bool
 	}{
 		"zone within grace":  {grace: time.Minute, kind: "zone"},
 		"zone without grace": {grace: 0, kind: "zone", expired: true},
 		"hash within grace":  {grace: time.Minute, kind: "hash", expired: true},
+		"zone, no marker":    {grace: time.Minute, kind: "zone", expired: true, unmarked: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -712,8 +809,11 @@ func TestZoneCredentialGraceThroughMpp(t *testing.T) {
 			require.NoError(t, err)
 			request, err := s.method.BuildChargeRequest(server.ChargeParams{Amount: "1"})
 			require.NoError(t, err)
-			challenge := mpptest.NewChallenge(secret, testRealm, tempo.MethodName, tempo.IntentCharge, request,
-				mpp.WithExpires(time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)))
+			opts := []mpp.ChallengeOption{mpp.WithExpires(time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano))}
+			if !tc.unmarked {
+				opts = append(opts, mpp.WithMeta(map[string]string{expiryGraceKey: "1"}))
+			}
+			challenge := mpptest.NewChallenge(secret, testRealm, tempo.MethodName, tempo.IntentCharge, request, opts...)
 			memo := tempo.EncodeAttribution(challenge.Realm, "", challenge.ID)
 			s.rpc.withdrawals = []zoneWithdrawalFixture{{senderTag: zoneTagA, memo: memo}}
 			s.rpc.settledAt = time.Now().Add(-30 * time.Second)
