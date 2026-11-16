@@ -100,14 +100,16 @@ func challengeExpired(expires, now time.Time) bool {
 }
 
 // credentialExpired reports whether intent no longer accepts credential at
-// now: its challenge has expired and, when intent is an ExpiryGraceIntent, the
-// grace it grants credential has passed too.
+// now: its challenge has expired and, when intent is an ExpiryGraceIntent and
+// the challenge carries the expiry grace marker, the grace it grants
+// credential has passed too. Callers authenticate the echoed challenge, and
+// with it the marker, before calling it.
 func credentialExpired(intent Intent, credential *mpp.Credential, expires, now time.Time) bool {
 	if !challengeExpired(expires, now) {
 		return false
 	}
 	graced, ok := intent.(ExpiryGraceIntent)
-	if !ok {
+	if !ok || !hasExpiryGrace(credential.Challenge.Opaque) {
 		return true
 	}
 	grace := graced.ExpiryGrace(credential)

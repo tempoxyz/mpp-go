@@ -49,9 +49,23 @@ type BroadcastingIntent interface {
 // later. The intent enforces that proof itself. ExpiryGrace returns how long
 // after the expiry it still accepts credential; zero or less gives none. A
 // well-formed expires is still required.
+//
+// The grace applies only to a Challenge that carries the expiry grace marker
+// (_mppx_expiry_grace) in its HMAC-bound opaque metadata, as in mppx. Server
+// issuance sets it when the intent is an ExpiryGraceIssuer that reports
+// IssuesExpiryGrace, so a Challenge issued without it, by an earlier release
+// or with no grace configured, is rejected at its expiry.
 type ExpiryGraceIntent interface {
 	Intent
 	ExpiryGrace(credential *mpp.Credential) time.Duration
+}
+
+// ExpiryGraceIssuer may be implemented by an ExpiryGraceIntent whose grace
+// is configured: when IssuesExpiryGrace reports true, the Challenges issued
+// for it carry the expiry grace marker that the grace requires.
+type ExpiryGraceIssuer interface {
+	ExpiryGraceIntent
+	IssuesExpiryGrace() bool
 }
 
 // Validation describes a credential accepted without consuming or broadcasting it.

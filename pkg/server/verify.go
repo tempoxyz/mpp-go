@@ -94,13 +94,19 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
-	for _, key := range challengeNonceKeys {
+	for _, key := range append(challengeNonceKeys[:], expiryGraceKey) {
 		if _, reserved := params.Meta[key]; reserved {
 			// Meta is server configuration: a reserved key is a server bug.
 			return nil, fmt.Errorf("server: %s is reserved for challenge issuance", key)
 		}
 	}
 	meta := maps.Clone(params.Meta)
+	if issuer, ok := params.Intent.(ExpiryGraceIssuer); ok && issuer.IssuesExpiryGrace() {
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta[expiryGraceKey] = expiryGraceValue
+	}
 	if !params.DisableChallengeNonce {
 		if meta == nil {
 			meta = make(map[string]string)
@@ -336,10 +342,25 @@ const challengeNonceKey = "_mppx_nonce"
 // verification until those Challenges expire.
 var challengeNonceKeys = [...]string{challengeNonceKey, "_mpp_nonce"}
 
+// expiryGraceKey is the reserved opaque metadata key marking a Challenge
+// whose intent accepts some of its Credentials for a while after it expires,
+// as mppx's ChallengeMeta.withExpiryGrace. The Challenge HMAC binds it, so a
+// Challenge issued without it never gets that grace.
+const expiryGraceKey = "_mppx_expiry_grace"
+
+// expiryGraceValue is the value of expiryGraceKey on a marked Challenge.
+const expiryGraceValue = "1"
+
+// hasExpiryGrace reports whether opaque carries the expiry grace marker.
+func hasExpiryGrace(opaque map[string]string) bool {
+	return opaque[expiryGraceKey] == expiryGraceValue
+}
+
 func applicationMeta(meta map[string]string) map[string]string {
 	result := maps.Clone(meta)
 	for _, key := range challengeNonceKeys {
 		delete(result, key)
 	}
+	delete(result, expiryGraceKey)
 	return result
 }

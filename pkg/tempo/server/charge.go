@@ -144,7 +144,10 @@ type IntentConfig struct {
 	// before the challenge expired, as mppx's zoneCredentialGraceMs. It lets a
 	// payer whose withdrawal settled late in the challenge's lifetime redeem
 	// it on retry. Other credential types get no grace. It must be between
-	// zero (the default) and MaxZoneCredentialGrace (5 minutes).
+	// zero (the default) and MaxZoneCredentialGrace (5 minutes). With it set,
+	// issued challenges carry the HMAC-bound _mppx_expiry_grace marker, and
+	// only a challenge carrying it gets the grace. It can't be combined with
+	// a Relay.
 	//
 	// Replay keys outlast it: they are kept forever, or with ExpireReplayKeys
 	// until ten minutes after the grace ends.
@@ -186,6 +189,7 @@ type Intent struct {
 var (
 	_ mppserver.BroadcastingIntent = (*Intent)(nil)
 	_ mppserver.ExpiryGraceIntent  = (*Intent)(nil)
+	_ mppserver.ExpiryGraceIssuer  = (*Intent)(nil)
 )
 
 // ExpiryGrace returns how long after its challenge expires credential is
@@ -193,13 +197,35 @@ var (
 // whose settlement validateZone then requires to predate the expiry, and
 // none for every other credential type.
 func (i *Intent) ExpiryGrace(credential *mpp.Credential) time.Duration {
-	if credential == nil || i.zoneCredentialGrace <= 0 {
+	if credential == nil || i.zoneCredentialGrace <= 0 || !isZoneCredential(credential) {
 		return 0
 	}
-	if kind, _ := credential.Payload["type"].(string); kind != string(tempo.CredentialTypeZone) {
+	// Only a challenge issued with the grace on carries the marker, bound by
+	// its HMAC: one issued without it, by an earlier release whose replay
+	// claims end at the expiry or with no grace, gets none.
+	if credential.Challenge.Opaque[expiryGraceKey] != "1" {
 		return 0
 	}
 	return i.zoneCredentialGrace
+}
+
+// IssuesExpiryGrace reports whether the challenges issued for this intent
+// carry the expiry grace marker (_mppx_expiry_grace) that ExpiryGrace
+// requires: whenever IntentConfig.ZoneCredentialGrace is set. It implements
+// server.ExpiryGraceIssuer.
+func (i *Intent) IssuesExpiryGrace() bool {
+	return i.zoneCredentialGrace > 0
+}
+
+// expiryGraceKey is the opaque metadata key of the expiry grace marker that
+// server.Mpp sets on challenges issued for an intent whose IssuesExpiryGrace
+// reports true, as mppx's _mppx_expiry_grace.
+const expiryGraceKey = "_mppx_expiry_grace"
+
+// isZoneCredential reports whether credential pays with a Zone withdrawal.
+func isZoneCredential(credential *mpp.Credential) bool {
+	kind, _ := credential.Payload["type"].(string)
+	return kind == string(tempo.CredentialTypeZone)
 }
 
 type validatedChargeCredential struct {
@@ -1368,8 +1394,14 @@ func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential,
 	if store, ok := i.store.(tempo.ExpiringStore); ok && i.expireReplayKeys {
 		if expiresAt, ok := replayClaimExpiry(credential); ok {
 			// Held through the grace too, while the credential can still be
-			// presented.
-			return store.PutIfAbsentUntil(ctx, key, value, expiresAt.Add(i.ExpiryGrace(credential)))
+			// presented. A zone withdrawal is held through the longest grace
+			// any verifier may grant, not only this one's, so a verifier with
+			// a longer grace on the same store can't accept it again.
+			grace := i.ExpiryGrace(credential)
+			if isZoneCredential(credential) {
+				grace = MaxZoneCredentialGrace
+			}
+			return store.PutIfAbsentUntil(ctx, key, value, expiresAt.Add(grace))
 		}
 	}
 	return i.store.PutIfAbsent(ctx, key, value)
