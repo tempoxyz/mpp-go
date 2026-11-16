@@ -725,8 +725,13 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 	}
 
 	var externalID string
+	var emptyExternalID bool
 	if v, ok := data["externalId"]; ok {
 		externalID = anyStr(v)
+		// An explicitly empty externalId differs from an absent one: keep
+		// it so formatting the receipt preserves the field, as mppx does.
+		s, isString := v.(string)
+		emptyExternalID = isString && s == ""
 	}
 
 	var subscriptionID string
@@ -763,6 +768,7 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 		SubscriptionID:  subscriptionID,
 		FundingCurrency: fundingCurrency,
 		Extensions:      extensions,
+		emptyExternalID: emptyExternalID,
 	}, nil
 }
 
@@ -852,7 +858,7 @@ func receiptFields(r *Receipt) map[string]any {
 	if r.Method != "" {
 		data["method"] = r.Method
 	}
-	if r.ExternalID != "" {
+	if r.ExternalID != "" || r.emptyExternalID {
 		data["externalId"] = r.ExternalID
 	}
 	if r.SubscriptionID != "" {

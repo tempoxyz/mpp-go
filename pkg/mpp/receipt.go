@@ -26,6 +26,11 @@ type Receipt struct {
 	// serialization is handled explicitly by FormatReceiptWithError, not via
 	// struct marshaling. Set it with WithExtensions.
 	Extensions map[string]any `json:"-"`
+
+	// emptyExternalID records that a parsed receipt carried an explicitly
+	// empty "externalId", so formatting it keeps the field, as mppx does.
+	// It only applies while ExternalID is empty.
+	emptyExternalID bool
 }
 
 // ReceiptOption configures optional fields when creating a Receipt.
