@@ -23,7 +23,8 @@ import (
 // nothing) offered before the real charge, then, when the payer has no credit,
 // a credit_insufficient 402 that offers only the real charge under a new ID.
 // As in mppx's client Fetch retry rounds, the Transport pays the new
-// Challenge, never pays one Challenge twice and stops at its retry limit.
+// Challenge, resends the same Credential when the Challenge it answered is
+// offered again and stops at its retry limit.
 
 const (
 	roundRealm = "api.example.com"
@@ -562,6 +563,125 @@ func TestNewChallengeRound_RetriesPreserveRequest(t *testing.T) {
 			assert.Equal(t, proof.ID, requests[1].credential.Challenge.ID)
 			assert.Equal(t, next.ID, requests[2].credential.Challenge.ID)
 			assert.Empty(t, req.Header.Get("Authorization"), "the caller's request is not modified")
+		})
+	}
+}
+
+// A 402 that offers again the Challenge just answered gets the same
+// Credential again, as in mppx: exactly one signing, whatever the problem
+// type, and display fields such as the description do not make it a new
+// Challenge. Sends stop at the retry limit.
+func TestNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
+	charge := roundChallenge("10000", "1")
+	reoffered := *charge
+	reoffered.Description = "Pay again"
+	for name, problem := range map[string]string{
+		"invalid-payload":     `{"type":"https://paymentauth.org/problems/invalid-payload","status":402}`,
+		"verification-failed": verificationFailedProblem,
+		"no problem":          "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, entry := range roundEntryPoints {
+				t.Run(entry, func(t *testing.T) {
+					server := &roundServer{handle: func(_ int, credential *mpp.Credential, w http.ResponseWriter) {
+						if credential == nil {
+							writeChallenges(w, "", charge)
+							return
+						}
+						writeChallenges(w, problem, &reoffered)
+					}}
+					method := &roundMethod{}
+
+					resp, err := roundClient(t, entry, server, []Method{method})(newRoundRequest(t))
+					require.NoError(t, err)
+					assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode, "the last 402 is the result")
+					_ = readBody(t, resp)
+					assert.Equal(t, []string{charge.ID}, method.paidIDs(), "exactly one signing")
+
+					requests := server.requests()
+					require.Len(t, requests, 1+defaultMaxPaymentRetries, "at most three Credentials are sent")
+					sent := requests[1].header.Get("Authorization")
+					require.NotEmpty(t, sent)
+					for _, request := range requests[1:] {
+						assert.Equal(t, sent, request.header.Get("Authorization"), "the same Credential is resent")
+					}
+				})
+			}
+		})
+	}
+
+	t.Run("accepted on resend", func(t *testing.T) {
+		server := &roundServer{handle: func(n int, credential *mpp.Credential, w http.ResponseWriter) {
+			switch {
+			case credential == nil:
+				writeChallenges(w, "", charge)
+			case n == 1:
+				writeChallenges(w, verificationFailedProblem, charge)
+			default:
+				writePaid(w)
+			}
+		}}
+		method := &roundMethod{}
+		resp, err := newTestTransport([]Method{method}, server).RoundTrip(newRoundRequest(t))
+		require.NoError(t, err)
+		assert.Equal(t, "paid", readBody(t, resp))
+		assert.Equal(t, []string{charge.ID}, method.paidIDs())
+		requests := server.requests()
+		require.Len(t, requests, 3)
+		assert.Equal(t, requests[1].header.Get("Authorization"), requests[2].header.Get("Authorization"))
+	})
+}
+
+// Only the Challenge the last request answered is resent: a Challenge
+// answered in an earlier round and offered again gets a new Credential, as
+// in mppx.
+func TestNewChallengeRound_EarlierChallengeGetsNewCredential(t *testing.T) {
+	first, second := roundChallenge("10000", "1"), roundChallenge("10000", "2")
+	server := &roundServer{handle: func(n int, credential *mpp.Credential, w http.ResponseWriter) {
+		switch n {
+		case 0:
+			writeChallenges(w, "", first)
+		case 1:
+			writeChallenges(w, verificationFailedProblem, second)
+		case 2:
+			writeChallenges(w, verificationFailedProblem, first)
+		default:
+			writePaid(w)
+		}
+	}}
+	method := &roundMethod{}
+	resp, err := newTestTransport([]Method{method}, server).RoundTrip(newRoundRequest(t))
+	require.NoError(t, err)
+	assert.Equal(t, "paid", readBody(t, resp))
+	assert.Equal(t, []string{first.ID, second.ID, first.ID}, method.paidIDs())
+	assert.Len(t, server.requests(), 4)
+}
+
+// Only a 402 starts a new round: any other answer to a Credential is the
+// final result, even when it carries a new Challenge.
+func TestNewChallengeRound_NonPaymentRequiredIsFinal(t *testing.T) {
+	charge, next := roundChallenge("10000", "1"), roundChallenge("10000", "2")
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusGone, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			for _, entry := range roundEntryPoints {
+				t.Run(entry, func(t *testing.T) {
+					server := &roundServer{handle: func(_ int, credential *mpp.Credential, w http.ResponseWriter) {
+						if credential == nil {
+							writeChallenges(w, "", charge)
+							return
+						}
+						w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(next))
+						w.WriteHeader(status)
+					}}
+					method := &roundMethod{}
+					resp, err := roundClient(t, entry, server, []Method{method})(newRoundRequest(t))
+					require.NoError(t, err)
+					assert.Equal(t, status, resp.StatusCode)
+					_ = readBody(t, resp)
+					assert.Equal(t, []string{charge.ID}, method.paidIDs())
+					assert.Len(t, server.requests(), 2)
+				})
+			}
 		})
 	}
 }

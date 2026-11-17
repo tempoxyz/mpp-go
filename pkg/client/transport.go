@@ -41,9 +41,23 @@ type Transport struct {
 
 const defaultMaxPaymentRetries = 3
 
+// credentialKey identifies a Challenge by its ID and the fields a Credential
+// echoes, which the ID binds for a native MPP server, leaving out display
+// fields such as the description.
 type credentialKey struct {
 	id     string
 	method methodKey
+	echo   string
+}
+
+func newCredentialKey(echo mpp.ChallengeEcho) credentialKey {
+	echo.Header = mpp.AdvertisedCredentialHeader(echo.Header)
+	encoded, _ := json.Marshal(echo)
+	return credentialKey{
+		id:     echo.ID,
+		method: methodKey{name: echo.Method, intent: echo.Intent},
+		echo:   string(encoded),
+	}
 }
 
 type paymentStateContextKey struct{}
@@ -82,8 +96,8 @@ type transportConfig struct {
 //     credential was created: after createCredential succeeded the payment
 //     may already have been made, so the error is not reported as a decline.
 //
-// It runs once per challenge: a credential the transport already created for
-// the same challenge is reused without calling it again.
+// It is not called when a 402 offers again the challenge the last request
+// answered: the transport resends that request's credential instead.
 type OnChallengeFunc func(
 	ctx context.Context,
 	challenge *mpp.Challenge,
@@ -128,19 +142,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	baseRequest, preferences := t.prepareRequest(req)
-	credentials := make(map[credentialKey]*mpp.Credential)
 	request := baseRequest
+	// sentCredential identifies the Challenge sentCred answers: the
+	// Credential the last request carried, which is the only one a later
+	// round may send again, as in mppx's client Fetch.
 	var sentCredential credentialKey
 	// A credential the caller set on the request is sent with the first
 	// round, so its outcome is as unknown as one the Transport created.
 	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
 	callerPaid, callerCred := sent, sentCred
 	if sentChallenge != nil && sentCred != nil {
-		sentCredential = credentialKey{
-			id:     sentChallenge.ID,
-			method: methodKey{name: sentChallenge.Method, intent: sentChallenge.Intent},
-		}
-		credentials[sentCredential] = sentCred
+		sentCredential = newCredentialKey(sentCred.Challenge)
 	}
 
 	for retries := 0; ; retries++ {
@@ -232,17 +244,19 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
-		if sent && sentCred != nil && isPushCredential(sentCred) {
+		key := newCredentialKey(selected.challenge.ToEcho())
+		// The Challenge the last request answered is offered again: send the
+		// same Credential, without paying again, as mppx does. Any other
+		// Challenge gets a new Credential.
+		var cred *mpp.Credential
+		if sent && sentCred != nil && key == sentCredential {
+			cred = sentCred
+		}
+		if cred == nil && sent && sentCred != nil && isPushCredential(sentCred) {
 			// A push credential's payment (a hash credential's transfer or a
 			// zone credential's withdrawal) is already on chain: resending it
 			// is safe, but paying a new challenge would pay twice.
-			key := credentialKey{id: selected.challenge.ID, method: methodKey{name: selected.challenge.Method, intent: selected.challenge.Intent}}
-			if credentials[key] == nil || (problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload) {
-				return resp, nil
-			}
-		}
-		if problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload {
-			delete(credentials, sentCredential)
+			return resp, nil
 		}
 		drainAndClose(resp.Body)
 
@@ -256,14 +270,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 		}
 
-		key := credentialKey{
-			id: selected.challenge.ID,
-			method: methodKey{
-				name:   selected.challenge.Method,
-				intent: selected.challenge.Intent,
-			},
-		}
-		cred := credentials[key]
 		if cred == nil {
 			cred, err = t.createCredential(baseRequest.Context(), selected, challengeOrigin(request.URL))
 			if err != nil {
@@ -272,7 +278,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				}
 				return nil, err
 			}
-			credentials[key] = cred
 		}
 
 		authorization, err := mpp.FormatCredential(cred)
@@ -510,9 +515,7 @@ func (t *Transport) orderCandidates(ctx context.Context, ranked []challengeCandi
 
 // responseProblem returns the decoded problem of a 402 response body, or nil
 // when it is not problem details. It restores the body it reads, so the
-// response can still be returned to the caller. An invalid-payload problem
-// drops the cached credential before a retry; other 402 responses retain it to
-// avoid paying twice.
+// response can still be returned to the caller.
 func responseProblem(resp *http.Response) *mpp.PaymentError {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/problem+json" || resp.Body == nil {

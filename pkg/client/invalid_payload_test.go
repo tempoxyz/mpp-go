@@ -82,14 +82,17 @@ func TestTransportRegeneratesInvalidPayloadWithFixedExpiry(t *testing.T) {
 	}
 }
 
+// A 402 that offers again the Challenge just answered gets the same
+// Credential, whatever its problem type, as in mppx's client Fetch: an
+// invalid-payload problem does not create a new Credential.
 func TestTransportInvalidPayloadResponseClassification(t *testing.T) {
 	const invalid = `{"type":"https://paymentauth.org/problems/invalid-payload"}`
 	for _, tc := range []struct {
 		name, contentType, body string
 		calls                   int
 	}{
-		{"invalid payload", "application/problem+json", invalid, 2},
-		{"content type parameters", "application/problem+json; charset=utf-8", invalid, 2},
+		{"invalid payload", "application/problem+json", invalid, 1},
+		{"content type parameters", "application/problem+json; charset=utf-8", invalid, 1},
 		{"other problem", "application/problem+json", `{"type":"https://paymentauth.org/problems/verification-failed"}`, 1},
 		{"missing type", "application/problem+json", `{}`, 1},
 		{"malformed", "application/problem+json", `{"type":`, 1},

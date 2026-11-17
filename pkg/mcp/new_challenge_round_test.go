@@ -26,8 +26,8 @@ import (
 // credit signs to pay nothing) offered before the real charge, then, without
 // credit, a credit_insufficient payment-required error offering only the real
 // charge under a new ID. As in mppx's client Fetch retry rounds, the client
-// pays the new Challenge, never pays one Challenge twice and stops at its
-// retry limit.
+// pays the new Challenge, resends the same Credential when the Challenge it
+// answered is offered again and stops at its retry limit.
 
 // roundChallenge returns a tempo/charge Challenge; nonce makes Challenges
 // with the same amount distinct.
@@ -408,4 +408,125 @@ func TestMCPNewChallengeRound_RetriesPreserveCall(t *testing.T) {
 	}
 	assert.Equal(t, []string{"", proof.ID, next.ID}, []string{calls[0].challengeID, calls[1].challengeID, calls[2].challengeID})
 	assert.NotContains(t, params.Meta, mpp.MCPCredentialMetaKey, "the caller's params get no Credential")
+}
+
+// paymentError is a payment error with code offering challenges; httpStatus 0
+// leaves httpStatus out.
+func paymentError(t *testing.T, code int64, httpStatus int, problemType string, challenges ...*mpp.Challenge) error {
+	t.Helper()
+	data := map[string]any{"challenges": challenges, "problem": map[string]any{"type": problemType}}
+	if httpStatus != 0 {
+		data["httpStatus"] = httpStatus
+	}
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+	return &jsonrpc.Error{Code: code, Message: "payment error", Data: raw}
+}
+
+// A payment-required answer that offers again the Challenge just answered
+// gets the same Credential again, as in mppx: exactly one signing, and
+// display fields such as the description do not make it a new Challenge.
+// At most three Credentials are sent.
+func TestMCPNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
+	charge := roundChallenge(realm, "10000", "1")
+	reoffered := *charge
+	reoffered.Description = "Pay again"
+	for name, answer := range map[string]func(t *testing.T) error{
+		"payment required": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentRequiredCode, 402, string(mpp.ErrorTypeVerificationFailed), &reoffered)
+		},
+		"verification failed 402": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 402, string(mpp.ErrorTypeInvalidPayload), &reoffered)
+		},
+		"verification failed without httpStatus": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 0, string(mpp.ErrorTypeVerificationFailed), &reoffered)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := &roundServer{}
+			payer := &roundPayer{}
+			srv := server.serve(func(_ int, challengeID string) error {
+				if challengeID == "" {
+					return paymentRequiredError(t, "", charge)
+				}
+				return answer(t)
+			})
+			session := connect(t, srv, mcpclient.Wrap(newClient(), roundConfig(payer)))
+
+			_, err := callPremium(context.Background(), session, nil)
+			var wireErr *jsonrpc.Error
+			require.ErrorAs(t, err, &wireErr, "the last payment-required answer is the result")
+			assert.Equal(t, []string{charge.ID}, payer.paidIDs(), "exactly one signing")
+			calls := server.received()
+			require.Len(t, calls, 4, "one unpaid call and at most three Credentials")
+			for _, call := range calls[1:] {
+				assert.Equal(t, charge.ID, call.challengeID, "the same Credential is resent")
+			}
+		})
+	}
+}
+
+// Only the Challenge the last call answered is resent: one answered in an
+// earlier round and offered again gets a new Credential, as in mppx.
+func TestMCPNewChallengeRound_EarlierChallengeGetsNewCredential(t *testing.T) {
+	first, second := roundChallenge(realm, "10000", "1"), roundChallenge(realm, "10000", "2")
+	server := &roundServer{}
+	payer := &roundPayer{}
+	srv := server.serve(func(n int, _ string) error {
+		switch n {
+		case 0:
+			return paymentRequiredError(t, "", first)
+		case 1:
+			return paymentRequiredError(t, string(mpp.ErrorTypeVerificationFailed), second)
+		case 2:
+			return paymentRequiredError(t, string(mpp.ErrorTypeVerificationFailed), first)
+		}
+		return nil
+	})
+	session := connect(t, srv, mcpclient.Wrap(newClient(), roundConfig(payer)))
+
+	result, err := callPremium(context.Background(), session, nil)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	assert.Equal(t, []string{first.ID, second.ID, first.ID}, payer.paidIDs())
+	assert.Len(t, server.received(), 4)
+}
+
+// Only a payment-required answer starts a new round: -32042, or -32043 whose
+// httpStatus is 402 or absent. Any other error is the call's final answer,
+// even when it offers a new Challenge.
+func TestMCPNewChallengeRound_NonPaymentRequiredIsFinal(t *testing.T) {
+	charge, next := roundChallenge(realm, "10000", "1"), roundChallenge(realm, "10000", "2")
+	for name, final := range map[string]func(t *testing.T) error{
+		"verification failed 400": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 400, string(mpp.ErrorTypeVerificationFailed), next)
+		},
+		"verification failed 410": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 410, string(mpp.ErrorTypeVerificationFailed), next)
+		},
+		"invalid params": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPInvalidParamsCode, 402, string(mpp.ErrorTypeInvalidPayload), next)
+		},
+		"internal error": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPInternalErrorCode, 500, string(mpp.ErrorTypeVerificationFailed), next)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := &roundServer{}
+			payer := &roundPayer{}
+			srv := server.serve(func(_ int, challengeID string) error {
+				if challengeID == "" {
+					return paymentRequiredError(t, "", charge)
+				}
+				return final(t)
+			})
+			session := connect(t, srv, mcpclient.Wrap(newClient(), roundConfig(payer)))
+
+			_, err := callPremium(context.Background(), session, nil)
+			var wireErr *jsonrpc.Error
+			require.ErrorAs(t, err, &wireErr, "the server's error is returned")
+			assert.Equal(t, []string{charge.ID}, payer.paidIDs())
+			assert.Len(t, server.received(), 2)
+		})
+	}
 }

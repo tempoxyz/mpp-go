@@ -20,7 +20,9 @@ func TestTransportCallerCredentialRetry(t *testing.T) {
 		payments, requests int
 	}{
 		{name: "receipt recovery", payments: 0, requests: 2},
-		{name: "invalid payload", problem: "invalid-payload", payments: 1, requests: 2},
+		// The same Challenge offered again gets the same Credential, whatever
+		// the problem, as in mppx.
+		{name: "invalid payload", problem: "invalid-payload", payments: 0, requests: 2},
 		{name: "different challenge", different: true, payments: 1, requests: 2},
 		{name: "unknown outcome", problem: "payment-outcome-unknown", payments: 0, requests: 1},
 	} {

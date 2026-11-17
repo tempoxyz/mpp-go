@@ -460,18 +460,19 @@ func (m *invalidPayloadMethod) Intents() map[string]server.Intent {
 	return map[string]server.Intent{"charge": intent}
 }
 
-func TestInvalidPayloadRecreatesCredential(t *testing.T) {
+// An invalid-params (-32602) rejection is not a payment-required answer, so,
+// as in mppx, it is the call's final answer: no new Credential is created.
+func TestInvalidPayloadIsFinal(t *testing.T) {
 	payment, err := server.New(&invalidPayloadMethod{}, realm, secretKey)
 	require.NoError(t, err)
 	payer := &tokenSequenceMethod{tokens: []string{"stale", "valid"}}
 	session := connect(t, newServer(chargeHandler(payment)), mcpclient.Wrap(newClient(), mcpclient.Config{Methods: []client.Method{payer}}))
 
-	result, err := callPremium(context.Background(), session, nil)
-	require.NoError(t, err)
-	receipt, err := mcpclient.Receipt(result)
-	require.NoError(t, err)
-	require.NotNil(t, receipt)
-	assert.Len(t, payer.credentials(), 2)
+	_, err = callPremium(context.Background(), session, nil)
+	var wireErr *jsonrpc.Error
+	require.ErrorAs(t, err, &wireErr)
+	assert.EqualValues(t, mpp.MCPInvalidParamsCode, wireErr.Code)
+	assert.Len(t, payer.credentials(), 1)
 }
 
 // zeroTempoChallengeServer offers a zero-amount tempo/charge Challenge for
@@ -565,7 +566,11 @@ func TestHashPaymentRetriesNeverCreateReplacementTransfers(t *testing.T) {
 				challenge := &mpp.Challenge{ID: id, Realm: realm, Method: "test", Intent: "charge", Request: map[string]any{"currency": "A", "amount": "1"}}
 				data, err := json.Marshal(mpp.MCPPaymentRequiredData{HTTPStatus: 402, Challenges: []*mpp.Challenge{challenge}, Problem: map[string]any{"type": test.problem}})
 				require.NoError(t, err)
-				return nil, &jsonrpc.Error{Code: test.code, Message: "payment required", Data: data}
+				code := test.code
+				if calls == 1 {
+					code = mpp.MCPPaymentRequiredCode
+				}
+				return nil, &jsonrpc.Error{Code: code, Message: "payment required", Data: data}
 			}
 			session := connect(t, newServer(handler), mcpclient.Wrap(newClient(), mcpclient.Config{
 				Methods:           []client.Method{payer},

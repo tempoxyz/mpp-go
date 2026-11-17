@@ -489,8 +489,6 @@ func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.
 				original.Header = header
 			}
 			_, authorization := callerAuthorization(t, original)
-			replacement := *original
-			replacement.ID = "replacement"
 			fresh := *original
 			fresh.ID = "fresh"
 			rounds := 0
@@ -500,12 +498,11 @@ func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.
 				body := ""
 				switch rounds {
 				case 1:
+					// The caller's Challenge offered again: its Credential
+					// is resent, not replaced.
 					assert.Equal(t, authorization, req.Header.Get(header))
-					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(&replacement))
-				case 2:
-					assert.NotEqual(t, authorization, req.Header.Get(header))
 					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(original))
-				case 3:
+				case 2:
 					assert.Equal(t, authorization, req.Header.Get(header))
 					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(&fresh))
 					h.Set("Content-Type", "application/problem+json")
@@ -524,8 +521,8 @@ func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
-			assert.Equal(t, 1, method.calls)
-			assert.Equal(t, 3, rounds)
+			assert.Zero(t, method.calls)
+			assert.Equal(t, 2, rounds)
 		})
 	}
 }
