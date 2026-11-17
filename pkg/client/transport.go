@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -346,6 +347,12 @@ func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential
 		return false, nil, nil
 	}
 	cred, err := mpp.ParseCredential(value)
+	if errors.Is(err, mpp.ErrUnsupportedCredentialHeader) {
+		// The caller's own credential echoes a header a received challenge
+		// may not select. It still names the payment the caller made (a push
+		// credential's is already on chain), so read it without that header.
+		cred, err = parseCredentialWithoutHeader(value)
+	}
 	if err != nil {
 		return true, nil, nil
 	}
@@ -361,6 +368,26 @@ func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential
 		Opaque:     echo.Opaque,
 		Header:     echo.Header,
 	}, cred
+}
+
+// parseCredentialWithoutHeader parses a Payment credential after removing the
+// header member of its challenge echo.
+func parseCredentialWithoutHeader(value string) (*mpp.Credential, error) {
+	_, token, _ := strings.Cut(value, " ")
+	data, err := mpp.B64Decode(strings.TrimSpace(token))
+	if err != nil {
+		return nil, err
+	}
+	challenge, ok := data["challenge"].(map[string]any)
+	if !ok {
+		return nil, errors.New("mpp: credential challenge must be an object")
+	}
+	delete(challenge, "header")
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	return mpp.ParseCredential(mpp.SchemePayment + " " + base64.RawURLEncoding.EncodeToString(encoded))
 }
 
 // paymentCredentialValue returns the first header element, in any field
@@ -616,7 +643,9 @@ func (t *Transport) cloneRequest(req *http.Request) (*http.Request, error) {
 }
 
 // parseChallenges extracts Payment challenges from WWW-Authenticate headers.
-// Returns successfully parsed challenges and any parse errors.
+// Returns successfully parsed challenges and any parse errors. A challenge
+// that fails to parse, including one that selects an unsupported credential
+// header (mpp.ErrUnsupportedCredentialHeader), gets no credential.
 func (t *Transport) parseChallenges(header http.Header) ([]mpp.Challenge, []error) {
 	var challenges []mpp.Challenge
 	var errs []error

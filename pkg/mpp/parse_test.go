@@ -645,7 +645,7 @@ func TestParseChallenge(t *testing.T) {
 		{
 			name:    "invalid credential header name",
 			header:  `Payment id="abc", realm="api.example.com", method="tempo", intent="charge", request="e30", header="not a header"`,
-			wantErr: `invalid HTTP header name`,
+			wantErr: `unsupported credential header`,
 		},
 		{
 			name: "omits default authorization header",

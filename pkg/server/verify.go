@@ -48,8 +48,10 @@ type VerifyParams struct {
 	Meta map[string]string
 	// Expires overrides the default Challenge expiry.
 	Expires string
-	// Header selects the HTTP field for the Payment credential. Empty defaults
-	// to Authorization. Payment-Authorization is advertised when set.
+	// Header selects the HTTP field for the Payment credential. Empty or
+	// Authorization selects the default, Authorization, which is not
+	// advertised; Payment-Authorization is advertised when set. Any other
+	// value fails Challenge creation with mpp.ErrUnsupportedCredentialHeader.
 	Header string
 }
 
@@ -329,7 +331,9 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 		opts = append(opts, mpp.WithMeta(cred.Challenge.Opaque))
 	}
 	if cred.Challenge.Header != "" {
-		opts = append(opts, mpp.WithHeader(cred.Challenge.Header))
+		// Bind the echoed spelling as-is: the challenge ID was computed over
+		// the value the issuing server sent.
+		opts = append(opts, mpp.WithEchoedHeader(cred.Challenge.Header))
 	}
 	return opts
 }
