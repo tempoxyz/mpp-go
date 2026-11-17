@@ -97,7 +97,8 @@ type transportConfig struct {
 //     may already have been made, so the error is not reported as a decline.
 //
 // It is not called when a 402 offers again the challenge the last request
-// answered: the transport resends that request's credential instead.
+// answered: the transport resends that request's credential instead, unless
+// the 402 carries an invalid-payload problem.
 type OnChallengeFunc func(
 	ctx context.Context,
 	challenge *mpp.Challenge,
@@ -247,9 +248,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		key := newCredentialKey(selected.challenge.ToEcho())
 		// The Challenge the last request answered is offered again: send the
 		// same Credential, without paying again, as mppx does. Any other
-		// Challenge gets a new Credential.
+		// Challenge gets a new Credential, and so does the same Challenge
+		// after an invalid-payload problem: the server rejected the
+		// Credential itself, so sending it again cannot succeed.
+		invalidPayload := problem != nil && problem.Type == mpp.ErrorTypeInvalidPayload
 		var cred *mpp.Credential
-		if sent && sentCred != nil && key == sentCredential {
+		if sent && sentCred != nil && key == sentCredential && !invalidPayload {
 			cred = sentCred
 		}
 		if cred == nil && sent && sentCred != nil && isPushCredential(sentCred) {
@@ -515,7 +519,9 @@ func (t *Transport) orderCandidates(ctx context.Context, ranked []challengeCandi
 
 // responseProblem returns the decoded problem of a 402 response body, or nil
 // when it is not problem details. It restores the body it reads, so the
-// response can still be returned to the caller.
+// response can still be returned to the caller. An invalid-payload problem
+// makes the Transport create a new credential for a re-offered challenge;
+// other 402 responses resend the credential to avoid paying twice.
 func responseProblem(resp *http.Response) *mpp.PaymentError {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/problem+json" || resp.Body == nil {

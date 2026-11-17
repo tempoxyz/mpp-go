@@ -162,7 +162,8 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		// mppx's client Fetch and the HTTP Transport, a payment-required
 		// answer that offers that same Challenge again gets the same
 		// Credential, without paying again; any other Challenge gets a new
-		// Credential.
+		// Credential. After an invalid-payload problem the rejected
+		// Credential is never sent again: the Challenge gets a new one.
 		var last *mpp.Credential
 		var lastKey credentialKey
 		// sentPush is the last push credential (a Tempo hash or zone
@@ -191,7 +192,7 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		}
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
-			data, ok := paymentRequired(result, err)
+			data, invalidPayload, ok := paymentRequired(result, err)
 			if !ok {
 				if sentPush != nil && err != nil {
 					return result, &ReconciliationError{Credential: sentPush, Cause: err}
@@ -208,7 +209,13 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, credential, unpayable, payErr := config.pay(ctx, session, params, data, last, lastKey, cause, sentPush != nil)
+			resend := last
+			if invalidPayload {
+				// The server rejected the Credential itself: sending it
+				// again cannot succeed, so a new one is created.
+				resend = nil
+			}
+			paid, key, credential, unpayable, payErr := config.pay(ctx, session, params, data, resend, lastKey, cause, sentPush != nil)
 			if payErr != nil && sentPush != nil {
 				return result, &ReconciliationError{Credential: sentPush, Cause: errors.Join(err, payErr)}
 			}
@@ -269,9 +276,9 @@ func isPushCredential(credential *mpp.Credential) bool {
 
 // pay selects a Challenge and returns a copy of the original call's params
 // with a Credential for it in their metadata, the Challenge's key and the
-// Credential. When the selected Challenge is the one last answered (lastKey),
-// it sends last again; otherwise it approves and pays the Challenge. With
-// pushSent, it only resends last and returns
+// Credential. When last is set and the selected Challenge is the one it
+// answers (lastKey), it sends last again; otherwise it approves and pays the
+// Challenge. With pushSent, it only resends last and returns
 // ErrPaymentReconciliationRequired instead of creating a Credential.
 // unpayable reports that the answer offers no Challenge a Method may pay.
 func (config *Config) pay(
@@ -443,51 +450,73 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 }
 
 // IsPaymentRequiredError reports whether err is an MCP payment-required error,
-// or a payment-verification-failed error whose httpStatus is 402 or absent,
-// that offers at least one Challenge,
+// a payment-verification-failed error whose httpStatus is 402 or absent, or an
+// invalid-params error with an invalid-payload problem, that offers at least
+// one Challenge,
 // including one whose every Challenge selects an unsupported credential
 // header (mpp.ErrUnsupportedCredentialHeader), which no Method may pay.
 func IsPaymentRequiredError(err error) bool {
-	_, ok := paymentRequired(nil, err)
+	_, _, ok := paymentRequired(nil, err)
 	return ok
 }
 
 // paymentRequired returns the payment-required data of a tool call's error
 // or, when it succeeded, of its result metadata. Only a payment-required
 // answer starts a new round, as in mppx: a -32042 error, a -32043 error whose
-// httpStatus is 402 or absent, or a result with payment-required metadata.
-// Any other answer, such as an invalid-params (-32602) rejection, is final.
-func paymentRequired(result mcp.Result, err error) (data *mpp.MCPPaymentRequiredData, ok bool) {
+// httpStatus is 402 or absent, a result with payment-required metadata, or an
+// invalid-params (-32602) error whose problem is invalid-payload, which is how
+// servers report a rejected Credential payload. Any other answer, such as
+// another invalid-params error, is final. invalidPayload reports an
+// invalid-payload problem, whose Credential must be created again, as the
+// HTTP Transport does.
+func paymentRequired(result mcp.Result, err error) (data *mpp.MCPPaymentRequiredData, invalidPayload, ok bool) {
 	if err != nil {
 		var wireErr *jsonrpc.Error
 		if !errors.As(err, &wireErr) {
-			return nil, false
+			return nil, false, false
 		}
 		switch wireErr.Code {
 		case mpp.MCPPaymentRequiredCode:
-			return decodePaymentRequired(wireErr.Data)
+			data, ok = decodePaymentRequired(wireErr.Data)
 		case mpp.MCPPaymentVerificationFailedCode:
 			data, ok = decodePaymentRequired(wireErr.Data)
-			if !ok || (data.HTTPStatus != 0 && data.HTTPStatus != http.StatusPaymentRequired) {
-				return nil, false
+			if ok && data.HTTPStatus != 0 && data.HTTPStatus != http.StatusPaymentRequired {
+				return nil, false, false
 			}
-			return data, true
+		case mpp.MCPInvalidParamsCode:
+			data, ok = decodePaymentRequired(wireErr.Data)
+			if ok && !isInvalidPayload(data) {
+				return nil, false, false
+			}
 		}
-		return nil, false
+		if !ok {
+			return nil, false, false
+		}
+		return data, isInvalidPayload(data), true
 	}
 	toolResult, isTool := result.(*mcp.CallToolResult)
 	if !isTool || toolResult == nil {
-		return nil, false
+		return nil, false, false
 	}
 	value, present := toolResult.Meta[mpp.MCPPaymentRequiredMetaKey]
 	if !present {
-		return nil, false
+		return nil, false, false
 	}
 	raw, marshalErr := json.Marshal(value)
 	if marshalErr != nil {
-		return nil, false
+		return nil, false, false
 	}
-	return decodePaymentRequired(raw)
+	data, ok = decodePaymentRequired(raw)
+	if !ok {
+		return nil, false, false
+	}
+	return data, isInvalidPayload(data), true
+}
+
+// isInvalidPayload reports whether data's problem is invalid-payload: the
+// server rejected the Credential's payload.
+func isInvalidPayload(data *mpp.MCPPaymentRequiredData) bool {
+	return data.Problem["type"] == string(mpp.ErrorTypeInvalidPayload)
 }
 
 func decodePaymentRequired(raw json.RawMessage) (*mpp.MCPPaymentRequiredData, bool) {

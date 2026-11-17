@@ -424,7 +424,8 @@ func paymentError(t *testing.T, code int64, httpStatus int, problemType string, 
 }
 
 // A payment-required answer that offers again the Challenge just answered
-// gets the same Credential again, as in mppx: exactly one signing, and
+// gets the same Credential again, as in mppx: exactly one signing for any
+// problem but invalid-payload, and
 // display fields such as the description do not make it a new Challenge.
 // At most three Credentials are sent.
 func TestMCPNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
@@ -436,7 +437,10 @@ func TestMCPNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
 			return paymentError(t, mpp.MCPPaymentRequiredCode, 402, string(mpp.ErrorTypeVerificationFailed), &reoffered)
 		},
 		"verification failed 402": func(t *testing.T) error {
-			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 402, string(mpp.ErrorTypeInvalidPayload), &reoffered)
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 402, string(mpp.ErrorTypeVerificationFailed), &reoffered)
+		},
+		"payment expired": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 402, string(mpp.ErrorTypePaymentExpired), &reoffered)
 		},
 		"verification failed without httpStatus": func(t *testing.T) error {
 			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 0, string(mpp.ErrorTypeVerificationFailed), &reoffered)
@@ -466,6 +470,95 @@ func TestMCPNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
 	}
 }
 
+// An invalid-payload problem rejects the Credential itself: when its answer
+// offers the same Challenge again, the client signs a new Credential for it
+// instead of resending the rejected one. This repository's server reports
+// invalid-payload as -32602. Each new Credential counts toward the limit of
+// three, so a server that answers invalid-payload forever gets three.
+func TestMCPNewChallengeRound_InvalidPayloadSignsNewCredential(t *testing.T) {
+	charge := roundChallenge(realm, "10000", "1")
+	reoffered := *charge
+	reoffered.Description = "Pay again"
+	answers := map[string]func(t *testing.T) error{
+		"invalid params": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPInvalidParamsCode, 402, string(mpp.ErrorTypeInvalidPayload), &reoffered)
+		},
+		"verification failed 402": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 402, string(mpp.ErrorTypeInvalidPayload), &reoffered)
+		},
+		"payment required": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPPaymentRequiredCode, 402, string(mpp.ErrorTypeInvalidPayload), &reoffered)
+		},
+	}
+	for name, answer := range answers {
+		t.Run(name, func(t *testing.T) {
+			t.Run("accepted", func(t *testing.T) {
+				server := &roundServer{}
+				payer := &roundPayer{}
+				srv := server.serve(func(n int, challengeID string) error {
+					switch {
+					case challengeID == "":
+						return paymentRequiredError(t, "", charge)
+					case n == 1:
+						return answer(t)
+					}
+					return nil
+				})
+				session := connect(t, srv, mcpclient.Wrap(newClient(), roundConfig(payer)))
+
+				result, err := callPremium(context.Background(), session, nil)
+				require.NoError(t, err)
+				require.False(t, result.IsError)
+				assert.Equal(t, []string{charge.ID, charge.ID}, payer.paidIDs(), "a new Credential is signed")
+				calls := server.received()
+				require.Len(t, calls, 3)
+				assert.Equal(t, charge.ID, calls[2].challengeID)
+			})
+
+			t.Run("invalid-payload forever", func(t *testing.T) {
+				server := &roundServer{}
+				payer := &roundPayer{}
+				srv := server.serve(func(_ int, challengeID string) error {
+					if challengeID == "" {
+						return paymentRequiredError(t, "", charge)
+					}
+					return answer(t)
+				})
+				session := connect(t, srv, mcpclient.Wrap(newClient(), roundConfig(payer)))
+
+				_, err := callPremium(context.Background(), session, nil)
+				var wireErr *jsonrpc.Error
+				require.ErrorAs(t, err, &wireErr, "the last payment-required answer is the result")
+				assert.Equal(t, []string{charge.ID, charge.ID, charge.ID}, payer.paidIDs(), "one signing per Credential sent")
+				assert.Len(t, server.received(), 4, "one unpaid call and at most three Credentials")
+			})
+		})
+	}
+
+	t.Run("other problem after invalid-payload resends", func(t *testing.T) {
+		server := &roundServer{}
+		payer := &roundPayer{}
+		srv := server.serve(func(n int, _ string) error {
+			switch n {
+			case 0:
+				return paymentRequiredError(t, "", charge)
+			case 1:
+				return paymentError(t, mpp.MCPInvalidParamsCode, 402, string(mpp.ErrorTypeInvalidPayload), charge)
+			case 2:
+				return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 402, string(mpp.ErrorTypeVerificationFailed), charge)
+			}
+			return nil
+		})
+		session := connect(t, srv, mcpclient.Wrap(newClient(), roundConfig(payer)))
+
+		result, err := callPremium(context.Background(), session, nil)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		assert.Equal(t, []string{charge.ID, charge.ID}, payer.paidIDs(), "the new Credential is resent, not signed again")
+		assert.Len(t, server.received(), 4)
+	})
+}
+
 // Only the Challenge the last call answered is resent: one answered in an
 // earlier round and offered again gets a new Credential, as in mppx.
 func TestMCPNewChallengeRound_EarlierChallengeGetsNewCredential(t *testing.T) {
@@ -492,8 +585,9 @@ func TestMCPNewChallengeRound_EarlierChallengeGetsNewCredential(t *testing.T) {
 	assert.Len(t, server.received(), 4)
 }
 
-// Only a payment-required answer starts a new round: -32042, or -32043 whose
-// httpStatus is 402 or absent. Any other error is the call's final answer,
+// Only a payment-required answer starts a new round: -32042, -32043 whose
+// httpStatus is 402 or absent, or -32602 with an invalid-payload problem. Any
+// other error is the call's final answer,
 // even when it offers a new Challenge.
 func TestMCPNewChallengeRound_NonPaymentRequiredIsFinal(t *testing.T) {
 	charge, next := roundChallenge(realm, "10000", "1"), roundChallenge(realm, "10000", "2")
@@ -504,8 +598,8 @@ func TestMCPNewChallengeRound_NonPaymentRequiredIsFinal(t *testing.T) {
 		"verification failed 410": func(t *testing.T) error {
 			return paymentError(t, mpp.MCPPaymentVerificationFailedCode, 410, string(mpp.ErrorTypeVerificationFailed), next)
 		},
-		"invalid params": func(t *testing.T) error {
-			return paymentError(t, mpp.MCPInvalidParamsCode, 402, string(mpp.ErrorTypeInvalidPayload), next)
+		"invalid params without invalid-payload": func(t *testing.T) error {
+			return paymentError(t, mpp.MCPInvalidParamsCode, 402, string(mpp.ErrorTypeMalformedCredential), next)
 		},
 		"internal error": func(t *testing.T) error {
 			return paymentError(t, mpp.MCPInternalErrorCode, 500, string(mpp.ErrorTypeVerificationFailed), next)

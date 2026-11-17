@@ -568,16 +568,16 @@ func TestNewChallengeRound_RetriesPreserveRequest(t *testing.T) {
 }
 
 // A 402 that offers again the Challenge just answered gets the same
-// Credential again, as in mppx: exactly one signing, whatever the problem
-// type, and display fields such as the description do not make it a new
-// Challenge. Sends stop at the retry limit.
+// Credential again, as in mppx: exactly one signing for any problem but
+// invalid-payload, and display fields such as the description do not make it
+// a new Challenge. Sends stop at the retry limit.
 func TestNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
 	charge := roundChallenge("10000", "1")
 	reoffered := *charge
 	reoffered.Description = "Pay again"
 	for name, problem := range map[string]string{
-		"invalid-payload":     `{"type":"https://paymentauth.org/problems/invalid-payload","status":402}`,
 		"verification-failed": verificationFailedProblem,
+		"payment-expired":     `{"type":"https://paymentauth.org/problems/payment-expired","status":402}`,
 		"no problem":          "",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -629,6 +629,91 @@ func TestNewChallengeRound_SameChallengeResendsSameCredential(t *testing.T) {
 		requests := server.requests()
 		require.Len(t, requests, 3)
 		assert.Equal(t, requests[1].header.Get("Authorization"), requests[2].header.Get("Authorization"))
+	})
+}
+
+const invalidPayloadProblem = `{"type":"https://paymentauth.org/problems/invalid-payload","title":"Invalid payload","status":402}`
+
+// An invalid-payload problem rejects the Credential itself: when its 402
+// offers the same Challenge again, the Transport signs a new Credential for
+// it instead of resending the rejected one. Each new Credential counts toward
+// the retry limit, so a server that answers invalid-payload forever gets three.
+func TestNewChallengeRound_InvalidPayloadSignsNewCredential(t *testing.T) {
+	charge := roundChallenge("10000", "1")
+	reoffered := *charge
+	reoffered.Description = "Pay again"
+
+	t.Run("accepted", func(t *testing.T) {
+		for _, entry := range roundEntryPoints {
+			t.Run(entry, func(t *testing.T) {
+				server := &roundServer{handle: func(n int, credential *mpp.Credential, w http.ResponseWriter) {
+					switch {
+					case credential == nil:
+						writeChallenges(w, "", charge)
+					case n == 1:
+						writeChallenges(w, invalidPayloadProblem, &reoffered)
+					default:
+						writePaid(w)
+					}
+				}}
+				method := &roundMethod{}
+
+				resp, err := roundClient(t, entry, server, []Method{method})(newRoundRequest(t))
+				require.NoError(t, err)
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+				assert.Equal(t, "paid", readBody(t, resp))
+				assert.Equal(t, []string{charge.ID, charge.ID}, method.paidIDs(), "a new Credential is signed")
+				require.Len(t, server.requests(), 3)
+				credentials := server.credentials()
+				require.Len(t, credentials, 2)
+				assert.Equal(t, charge.ID, credentials[1].Challenge.ID)
+			})
+		}
+	})
+
+	t.Run("invalid-payload forever", func(t *testing.T) {
+		for _, entry := range roundEntryPoints {
+			t.Run(entry, func(t *testing.T) {
+				server := &roundServer{handle: func(_ int, credential *mpp.Credential, w http.ResponseWriter) {
+					if credential == nil {
+						writeChallenges(w, "", charge)
+						return
+					}
+					writeChallenges(w, invalidPayloadProblem, charge)
+				}}
+				method := &roundMethod{}
+
+				resp, err := roundClient(t, entry, server, []Method{method})(newRoundRequest(t))
+				require.NoError(t, err)
+				assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode, "the last 402 is the result")
+				assert.Contains(t, readBody(t, resp), "invalid-payload")
+				assert.Equal(t, []string{charge.ID, charge.ID, charge.ID}, method.paidIDs(), "one signing per Credential sent")
+				assert.Len(t, server.requests(), 1+defaultMaxPaymentRetries, "at most three Credentials are sent")
+			})
+		}
+	})
+
+	t.Run("other problem after invalid-payload resends", func(t *testing.T) {
+		server := &roundServer{handle: func(n int, credential *mpp.Credential, w http.ResponseWriter) {
+			switch {
+			case credential == nil:
+				writeChallenges(w, "", charge)
+			case n == 1:
+				writeChallenges(w, invalidPayloadProblem, charge)
+			case n == 2:
+				writeChallenges(w, verificationFailedProblem, charge)
+			default:
+				writePaid(w)
+			}
+		}}
+		method := &roundMethod{}
+		resp, err := newTestTransport([]Method{method}, server).RoundTrip(newRoundRequest(t))
+		require.NoError(t, err)
+		assert.Equal(t, "paid", readBody(t, resp))
+		assert.Equal(t, []string{charge.ID, charge.ID}, method.paidIDs())
+		requests := server.requests()
+		require.Len(t, requests, 4)
+		assert.Equal(t, requests[2].header.Get("Authorization"), requests[3].header.Get("Authorization"), "the new Credential is resent")
 	})
 }
 
