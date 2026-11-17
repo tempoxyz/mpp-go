@@ -868,9 +868,18 @@ func TestTransport_PayRedirects_RefusesBrokenRedirectChain(t *testing.T) {
 	require.NoError(t, transport.validatePaymentOrigin(sameOrigin, candidate))
 }
 
-// A hash credential's transfer is already on chain: a 402 to it is final,
+// A push credential's payment is already on chain: a 402 to it is final,
 // and the Transport never pays again.
 func TestTransport_RoundTrip_DoesNotRepayAfterHashCredential(t *testing.T) {
+	testDoesNotRepayAfterPushCredential(t, map[string]any{"type": "hash", "hash": "0x01"})
+}
+
+func TestTransport_RoundTrip_DoesNotRepayAfterZoneCredential(t *testing.T) {
+	testDoesNotRepayAfterPushCredential(t, map[string]any{"type": "zone", "hash": "0x01", "senderTag": "0x02", "zoneId": 3})
+}
+
+func testDoesNotRepayAfterPushCredential(t *testing.T, payload map[string]any) {
+	t.Helper()
 	var challenges []*mpp.Challenge
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -886,7 +895,7 @@ func TestTransport_RoundTrip_DoesNotRepayAfterHashCredential(t *testing.T) {
 		challengeForURL(t, srv.URL, "tempo", map[string]any{"attempt": 2}),
 	}
 	cred := newTestCredential("tempo")
-	cred.Payload = map[string]any{"type": "hash", "hash": "0x01"}
+	cred.Payload = payload
 	method := &mockMethod{name: "tempo", cred: cred}
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
