@@ -20,6 +20,8 @@ func TestTransportCallerCredentialRetry(t *testing.T) {
 		payments, requests int
 	}{
 		{name: "receipt recovery", payments: 0, requests: 2},
+		// An invalid-payload problem rejects the Credential itself, so the
+		// same Challenge offered again gets a new one.
 		{name: "invalid payload", problem: "invalid-payload", payments: 1, requests: 2},
 		{name: "different challenge", different: true, payments: 1, requests: 2},
 		{name: "unknown outcome", problem: "payment-outcome-unknown", payments: 0, requests: 1},

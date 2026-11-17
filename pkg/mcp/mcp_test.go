@@ -460,6 +460,8 @@ func (m *invalidPayloadMethod) Intents() map[string]server.Intent {
 	return map[string]server.Intent{"charge": intent}
 }
 
+// The server answers an invalid payload with -32602 and an invalid-payload
+// problem re-offering the same Challenge: the client creates a new Credential.
 func TestInvalidPayloadRecreatesCredential(t *testing.T) {
 	payment, err := server.New(&invalidPayloadMethod{}, realm, secretKey)
 	require.NoError(t, err)
