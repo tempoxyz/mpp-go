@@ -1,5 +1,18 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.10.0`
+
+### Minor Changes
+
+- Added Zone payments to the Tempo charge method, as in mppx: servers accept them with `Config.Zones` or `ChargeParams.Zones` and verify `zone` credentials against the Zone portal's settlement on Tempo, and clients pay from a Zone balance with `Config.Zone`. One payment intent never makes two withdrawals: a retried or new challenge for the same terms resumes the pending withdrawal (or fails with `ZoneSettlementPendingError`), the HTTP and MCP clients retry the same challenge while it settles, `ZoneCredentialGrace` lets servers accept a zone credential settled before its challenge expired, hash credentials never redeem a Zone portal's transfers, and the withdrawal fee counts against `PaymentPolicy` limits. (by @brendanjryan, [#311](https://github.com/tempoxyz/mpp-go/pull/311))
+
+### Patch Changes
+
+- Restricted the challenge `header` auth-param to `Payment-Authorization`, as the spec requires: a received challenge with any other value (including `Authorization` or empty) now fails with `mpp.ErrUnsupportedCredentialHeader` and gets no credential, while clients still pay another challenge in the same response. `WithHeader` and `VerifyParams.Header` now reject names other than Authorization and Payment-Authorization. (by @brendanjryan, [#325](https://github.com/tempoxyz/mpp-go/pull/325))
+- Changed the HTTP and MCP clients to resend the same Credential when a payment-required answer offers the Challenge just answered again (signing a new one only after an invalid-payload problem), and to pay any other Challenge with a new Credential, at most three times, as mppx does. Changed the MCP client to treat only -32042 errors, -32043 errors whose httpStatus is 402 or absent, and -32602 errors with an invalid-payload problem as payment-required, so other errors are the call's final answer. (by @brendanjryan, [#328](https://github.com/tempoxyz/mpp-go/pull/328))
+- Fixed formatting a parsed receipt so an explicitly empty `externalId` or `subscriptionId` is kept instead of dropped, as in mppx. (by @brendanjryan, [#326](https://github.com/tempoxyz/mpp-go/pull/326))
+- Zone clients resumed a pending withdrawal instead of withdrawing again and refused expired or cross-origin challenges, as mppx does. Servers granted `ZoneCredentialGrace` only to challenges carrying the `_mppx_expiry_grace` marker and rejected it with a Relay. (by @brendanjryan, [#327](https://github.com/tempoxyz/mpp-go/pull/327))
+
 ## `github.com/tempoxyz/mpp-go@0.9.1`
 
 ### Patch Changes
