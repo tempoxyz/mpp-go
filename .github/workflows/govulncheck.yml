@@ -36,6 +36,9 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+        # Build the pinned module without looking up newer versions' deprecation metadata.
+        run: |
+          scanner_dir=$(go mod download -json golang.org/x/vuln@v1.9.0 | jq -er '.Dir')
+          go build -C "$scanner_dir" -o "$RUNNER_TEMP/govulncheck" ./cmd/govulncheck
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: '"$RUNNER_TEMP/govulncheck" ./...'
