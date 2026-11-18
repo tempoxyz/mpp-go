@@ -35,7 +35,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
