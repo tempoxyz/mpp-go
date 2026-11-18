@@ -1550,7 +1550,7 @@ func TestZoneWithdrawalFeeCountsAgainstPolicyCaps(t *testing.T) {
 // A credential returned after its challenge expired is reused only for that
 // challenge: a new challenge with the same terms fails closed, naming the
 // paid challenge and the withdrawal's sender tag, without any network call,
-// until the redemption window ends.
+// even after the redemption window ends.
 func TestZoneLateCredentialIsReusedOnlyForItsChallenge(t *testing.T) {
 	t.Parallel()
 	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
@@ -1655,4 +1655,46 @@ func TestZoneOrigin(t *testing.T) {
 	} {
 		assert.Equal(t, want, zoneOrigin(origin), origin)
 	}
+}
+
+func TestZoneExpiredWithdrawalDoesNotMaskResumableMatch(t *testing.T) {
+	t.Parallel()
+	method, _, _, first := zonePendingFirst(t, "https://api.example.com")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	second := zoneTermsChallenge(t, now.Add(5*time.Minute), "second", nil)
+	third := zoneTermsChallenge(t, now.Add(6*time.Minute), "third", nil)
+	done := make(chan struct{})
+	close(done)
+	withdrawal := &zoneWithdrawal{
+		challenge: second, origin: "https://api.example.com", terms: zoneWithdrawalTerms(second, method.zone.id), done: done, sent: true,
+	}
+	method.zoneWithdrawals[zoneWithdrawalKey(second)] = withdrawal
+	for range 100 {
+		key, found, err := method.findZoneWithdrawal(third)
+		require.NoError(t, err)
+		assert.Equal(t, zoneWithdrawalKey(second), key)
+		assert.Same(t, withdrawal, found)
+	}
+}
+
+func TestZoneExpiredWithdrawalDoesNotExposeSenderTagToOtherOrigin(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	second := zoneTermsChallenge(t, now.Add(5*time.Minute), "second", nil)
+	calls := zoneRPC.callCount()
+	for _, origin := range []string{"", "https://other.example.com"} {
+		_, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), origin), second)
+		var pending *ZoneSettlementPendingError
+		require.ErrorAs(t, err, &pending)
+		assert.Empty(t, pending.SenderTag)
+	}
+	assert.Equal(t, calls, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
 }

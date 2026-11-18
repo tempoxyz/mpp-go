@@ -57,12 +57,13 @@ const approveSelector = "095ea7b3"
 // the same terms from the same origin resumes it too; the method never pays
 // those terms again while the withdrawal is outstanding.
 //
-// It is also returned, with no SenderTag and without any network call, for a
+// It is also returned without any network call for a
 // challenge whose terms an outstanding withdrawal already pays when the
 // challenge came from another origin, or one the caller did not verify, and
 // for a withdrawal whose challenge is past its redemption window (five
 // minutes after it expires): the method fails closed rather than withdraw
-// again.
+// again. SenderTag is omitted for another or unverified origin, or when no
+// completed late credential established the tag.
 type ZoneSettlementPendingError struct {
 	// Challenge is the challenge the withdrawal pays.
 	Challenge *mpp.Challenge
@@ -189,9 +190,9 @@ var ErrZoneDeadlineTooSoon = errors.New("tempo client: request deadline too soon
 // withdrawal another call waits on is a payment in flight, which a new
 // challenge with the same terms does not resume. redeemedLate reports that
 // its credential was returned after its challenge expired: only a retry of
-// that challenge gets the credential again, and until its redemption window
-// ends a challenge with the same terms fails closed, since the server may
-// have redeemed or refused it. Method.zoneMu guards both.
+// that challenge gets the credential again while redeemable. Other challenges
+// with the same terms fail closed, since the server may have redeemed or
+// refused it. Expiry does not resolve that ambiguity. Method.zoneMu guards both.
 type zoneWithdrawal struct {
 	challenge       *mpp.Challenge
 	origin          string
@@ -416,29 +417,29 @@ func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithd
 	if terms == "" {
 		return "", nil, nil
 	}
+	var blocked *zoneWithdrawal
+	var blockedKey string
 	for other, withdrawal := range m.zoneWithdrawals {
 		if withdrawal.terms != terms {
 			continue
 		}
-		// Its credential went out after its challenge expired, and its
-		// server may still accept or refuse it: sending it again for this
-		// challenge could redeem it twice, and a new payment could pay twice
-		// if it was refused.
 		if withdrawal.redeemedLate || !m.redeemable(withdrawal.challenge.Expires) {
-			return "", nil, &ZoneSettlementPendingError{
-				Challenge:   withdrawal.challenge,
-				ChallengeID: withdrawal.challenge.ID,
-				SenderTag:   withdrawal.senderTag.Hex(),
-				ZoneID:      m.zone.id,
+			// Keep scanning for a resumable withdrawal before failing closed.
+			// Origin checks and error construction belong to resumable, where
+			// no unsynchronised sender tag is exposed to a replacement request.
+			if blocked == nil || other < blockedKey {
+				blocked, blockedKey = withdrawal, other
 			}
+			continue
 		}
-		// A call still waiting on it is another payment in flight, not one
-		// this challenge retries: sharing its credential would leave one of
-		// the two payments unpaid.
+		// A call still waiting on it is another payment in flight.
 		if withdrawal.waiters > 0 {
 			continue
 		}
 		return other, withdrawal, nil
+	}
+	if blocked != nil {
+		return blockedKey, blocked, nil
 	}
 	return "", nil, nil
 }
@@ -455,12 +456,16 @@ func (m *Method) resumable(withdrawal *zoneWithdrawal, foreign bool, origin stri
 	if foreign {
 		refused = origin == "" || origin != withdrawal.origin
 	}
-	if refused || !m.redeemable(withdrawal.challenge.Expires) {
-		return &ZoneSettlementPendingError{
+	if refused || (foreign && withdrawal.redeemedLate) || !m.redeemable(withdrawal.challenge.Expires) {
+		pending := &ZoneSettlementPendingError{
 			Challenge:   withdrawal.challenge,
 			ChallengeID: withdrawal.challenge.ID,
 			ZoneID:      m.zone.id,
 		}
+		if !refused && withdrawal.redeemedLate && finished(withdrawal) {
+			pending.SenderTag = withdrawal.senderTag.Hex()
+		}
+		return pending
 	}
 	return nil
 }
@@ -752,8 +757,8 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			// is accepted only by a server that grants a grace period
 			// (ZoneCredentialGrace), so the withdrawal stays for a retry of
 			// its own challenge, which would otherwise pay again, and a
-			// later challenge for its terms fails closed until its
-			// redemption window ends.
+			// later challenge for its terms fails closed even after its
+			// redemption window ends. Expiry cannot undo a settled payment.
 			if m.expired(paid.Expires) {
 				m.markZoneWithdrawalRedeemedLate(key, pending)
 			} else {
