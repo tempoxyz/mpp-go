@@ -400,11 +400,8 @@ func (m *Method) pendingZoneWithdrawal(key string) *zoneWithdrawal {
 // earlier challenge started and no call is still waiting on. A withdrawal
 // stays outstanding until it produces a credential before its challenge
 // expires: it may have settled, so paying its terms again could pay twice.
-// It stops paying other challenges once its own can no longer be redeemed,
-// and is then forgotten. One whose credential was returned after its
-// challenge expired fails a new challenge for its terms with
-// *ZoneSettlementPendingError naming the challenge it paid and its sender
-// tag, until its redemption window ends.
+// Expiry cannot establish that a withdrawal failed. Unresolved or late
+// withdrawals continue to block matching replacement payments.
 func (m *Method) findZoneWithdrawal(challenge *mpp.Challenge) (string, *zoneWithdrawal, error) {
 	m.zoneMu.Lock()
 	defer m.zoneMu.Unlock()
@@ -423,18 +420,11 @@ func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithd
 		if withdrawal.terms != terms {
 			continue
 		}
-		// No server accepts its credential any more, so it can't pay this
-		// challenge. A retry of its own challenge still fails closed, since
-		// that looks it up by its own key first.
-		if !m.redeemable(withdrawal.challenge.Expires) {
-			delete(m.zoneWithdrawals, other)
-			continue
-		}
 		// Its credential went out after its challenge expired, and its
 		// server may still accept or refuse it: sending it again for this
 		// challenge could redeem it twice, and a new payment could pay twice
 		// if it was refused.
-		if withdrawal.redeemedLate {
+		if withdrawal.redeemedLate || !m.redeemable(withdrawal.challenge.Expires) {
 			return "", nil, &ZoneSettlementPendingError{
 				Challenge:   withdrawal.challenge,
 				ChallengeID: withdrawal.challenge.ID,
