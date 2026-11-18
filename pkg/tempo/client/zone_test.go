@@ -1801,11 +1801,12 @@ func TestZonePanicRetainsOnlyBroadcastReadyWithdrawals(t *testing.T) {
 			t.Parallel()
 			rpc := &zoneTestRPC{mode: "ok"}
 			fail := func() { panic("RPC panic") }
-			if stage == "nonce" {
+			switch stage {
+			case "nonce":
 				rpc.onNonce = fail
-			} else if stage == "send" {
+			case "send":
 				rpc.onSend = fail
-			} else {
+			default:
 				rpc.onReceipt = fail
 			}
 			method, _ := newZoneMethod(t, rpc, zoneTestChainID, nil)
