@@ -1823,3 +1823,46 @@ func TestZonePanicRetainsOnlyBroadcastReadyWithdrawals(t *testing.T) {
 		})
 	}
 }
+
+func TestZoneSharedPendingErrorKeepsOriginRedaction(t *testing.T) {
+	t.Parallel()
+	for _, origin := range []string{"https://api.example.com", "https://other.example.com", ""} {
+		t.Run(origin, func(t *testing.T) {
+			t.Parallel()
+			method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+			expires, err := mpp.ParseExpires(first.Expires)
+			require.NoError(t, err)
+			method.now = func() time.Time { return expires.Add(zone.RedemptionGrace) }
+			calls := zoneRPC.callCount()
+			leader := make(chan error, 1)
+			follower := make(chan error, 1)
+			method.zoneMu.Lock()
+			go func() {
+				_, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), first)
+				leader <- err
+			}()
+			require.Eventually(t, func() bool {
+				method.signingMu.Lock()
+				defer method.signingMu.Unlock()
+				return len(method.signing) == 1
+			}, time.Second, time.Millisecond)
+			go func() {
+				_, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), origin), first)
+				follower <- err
+			}()
+			waitForSigningWaiters(t, method, 1)
+			method.zoneMu.Unlock()
+			var original, shared *ZoneSettlementPendingError
+			require.ErrorAs(t, <-leader, &original)
+			require.ErrorAs(t, <-follower, &shared)
+			require.NotEmpty(t, original.TransactionHash)
+			if origin == "https://api.example.com" {
+				assert.Equal(t, original.TransactionHash, shared.TransactionHash)
+			} else {
+				assert.Empty(t, shared.TransactionHash)
+				assert.Empty(t, shared.SenderTag)
+			}
+			assert.Equal(t, calls, zoneRPC.callCount())
+		})
+	}
+}

@@ -23,6 +23,7 @@ import (
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -208,6 +209,7 @@ type Method struct {
 
 // signingCall is one in-flight CreateCredential shared by concurrent callers.
 type signingCall struct {
+	origin     string
 	done       chan struct{}
 	waiters    int
 	credential *mpp.Credential
@@ -360,11 +362,18 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 			if (errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded)) && ctx.Err() == nil {
 				continue
 			}
+			var pending *ZoneSettlementPendingError
+			origin := zoneOrigin(paymentctx.Origin(ctx))
+			if errors.As(call.err, &pending) && (origin == "" || origin != call.origin) {
+				redacted := *pending
+				redacted.TransactionHash, redacted.SenderTag, redacted.Err = "", "", nil
+				return nil, &redacted
+			}
 			return nil, call.err
 		}
 		return cloneCredential(call.credential), nil
 	}
-	call := &signingCall{done: make(chan struct{})}
+	call := &signingCall{done: make(chan struct{}), origin: zoneOrigin(paymentctx.Origin(ctx))}
 	if m.signing == nil {
 		m.signing = map[string]*signingCall{}
 	}
