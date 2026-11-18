@@ -1749,10 +1749,39 @@ func TestResetZoneWithdrawalRequiresChallenge(t *testing.T) {
 func TestResetZoneWithdrawalAllowsNewPaymentAfterManualReconciliation(t *testing.T) {
 	t.Parallel()
 	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
-	withdrawal := method.pendingZoneWithdrawal(zoneWithdrawalKey(first))
-	require.NotEmpty(t, withdrawal.hash)
-	require.NoError(t, method.ResetZoneWithdrawal(first, withdrawal.hash))
+	hash, ok := method.ZoneWithdrawalTransactionHash(first)
+	require.True(t, ok)
+	require.NotEmpty(t, hash)
+	require.NoError(t, method.ResetZoneWithdrawal(first, hash))
 	second := zoneTermsChallenge(t, time.Now().Add(6*time.Minute), "after-reconciliation", nil)
 	_, _ = method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
 	assert.Len(t, zoneRPC.sent, 2)
+}
+
+func TestZoneOriginlessLateSuccessCanBeManuallyReset(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(time.Minute)
+	method.now = func() time.Time { return now }
+	_, err = method.CreateCredential(context.Background(), first)
+	require.NoError(t, err)
+	now = expires.Add(zone.RedemptionGrace)
+	second := zoneTermsChallenge(t, now.Add(5*time.Minute), "replacement", nil)
+	_, err = method.CreateCredential(context.Background(), second)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+	assert.Empty(t, pending.TransactionHash)
+	_, ok := method.ZoneWithdrawalTransactionHash(second)
+	assert.False(t, ok)
+	hash, ok := method.ZoneWithdrawalTransactionHash(first)
+	require.True(t, ok)
+	require.NotEmpty(t, hash)
+	require.NoError(t, method.ResetZoneWithdrawal(first, hash))
+	_, err = method.CreateCredential(context.Background(), second)
+	require.NoError(t, err)
+	assert.Len(t, zoneRPC.sent, 2)
+	_, ok = method.ZoneWithdrawalTransactionHash(nil)
+	assert.False(t, ok)
 }

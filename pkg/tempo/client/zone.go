@@ -211,6 +211,25 @@ type zoneWithdrawal struct {
 	redeemedLate    bool
 }
 
+// ZoneWithdrawalTransactionHash returns a retained attempt's Zone transaction
+// hash for trusted caller-local reconciliation. Use the original Challenge,
+// including after a successful late Credential or an originless MCP payment.
+// A replacement challenge with matching terms does not identify the attempt.
+// The boolean is false if the attempt is absent or its send/lookup is in flight.
+// Do not expose this administrative lookup to untrusted payment issuers.
+func (m *Method) ZoneWithdrawalTransactionHash(challenge *mpp.Challenge) (string, bool) {
+	if challenge == nil {
+		return "", false
+	}
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	withdrawal := m.zoneWithdrawals[zoneWithdrawalKey(challenge)]
+	if withdrawal == nil || !finished(withdrawal) || withdrawal.hash == "" {
+		return "", false
+	}
+	return withdrawal.hash, true
+}
+
 // ResetZoneWithdrawal forgets a retained withdrawal after the caller manually
 // reconciles its transaction, settlement, and any redeemed Credential. Do not
 // reset while its outcome remains unknown. Reset permits another payment
@@ -218,7 +237,7 @@ type zoneWithdrawal struct {
 // already paid withdrawal can pay twice. It performs no network verification.
 //
 // Pass the original Challenge and TransactionHash from the pending or unknown
-// error. The hash must match the retained attempt, and no credential creation
+// error, or use ZoneWithdrawalTransactionHash after a late success. The hash must match the retained attempt, and no credential creation
 // or receipt lookup may still be running. A missing record is a no-op.
 func (m *Method) ResetZoneWithdrawal(challenge *mpp.Challenge, transactionHash string) error {
 	if challenge == nil || transactionHash == "" {
