@@ -67,7 +67,8 @@ type zoneTestRPC struct {
 	// answerHash, when set, is the hash a successful send answers with.
 	answerHash string
 	// onNonce, when set, runs at the nonce lookup.
-	onNonce func()
+	onNonce   func()
+	onReceipt func()
 	// trackNonce has the Zone answer the nonce lookup with the number of
 	// transactions sent, as a pending nonce, and refuse a send whose nonce
 	// was already sent with "nonce too low".
@@ -170,6 +171,9 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 	case "eth_gasPrice":
 		return &temporpc.JSONRPCResponse{Result: "0x1"}, nil
 	case "eth_getTransactionReceipt":
+		if r.onReceipt != nil {
+			r.onReceipt()
+		}
 		r.mu.Lock()
 		r.receipts++
 		receipts := r.receipts
@@ -1784,4 +1788,32 @@ func TestZoneOriginlessLateSuccessCanBeManuallyReset(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 2)
 	_, ok = method.ZoneWithdrawalTransactionHash(nil)
 	assert.False(t, ok)
+}
+
+func TestZonePanicRetainsOnlyBroadcastReadyWithdrawals(t *testing.T) {
+	t.Parallel()
+	for _, stage := range []string{"nonce", "receipt"} {
+		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
+			rpc := &zoneTestRPC{mode: "ok"}
+			fail := func() { panic("RPC panic") }
+			if stage == "nonce" {
+				rpc.onNonce = fail
+			} else {
+				rpc.onReceipt = fail
+			}
+			method, _ := newZoneMethod(t, rpc, zoneTestChainID, nil)
+			challenge := zoneChallenge(t, nil)
+			require.Panics(t, func() { _, _ = method.CreateCredential(context.Background(), challenge) })
+			hash, retained := method.ZoneWithdrawalTransactionHash(challenge)
+			assert.Equal(t, stage == "receipt", retained)
+			if retained {
+				assert.NotEmpty(t, hash)
+			}
+			rpc.onNonce, rpc.onReceipt = nil, nil
+			_, err := method.CreateCredential(context.Background(), challenge)
+			require.NoError(t, err)
+			assert.Len(t, rpc.sent, 1)
+		})
+	}
 }

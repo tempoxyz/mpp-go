@@ -742,6 +742,9 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 		defer func() {
 			if !finished {
 				pending.sent, pending.err = sending, errZoneWithdrawalPanicked
+				if sending {
+					pending.err = &ZoneWithdrawalUnknownError{Challenge: paid, TransactionHash: pending.hash, ZoneID: m.zone.id, Err: errZoneWithdrawalPanicked}
+				}
 				m.finishZoneWithdrawal(key, pending)
 			}
 		}()
@@ -763,16 +766,11 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 				m.zoneMu.Lock()
 				pending.settlementStart = &start
 				m.zoneMu.Unlock()
-				// Nothing is sent before the policy allows it, so a panic up
-				// to then leaves the challenge payable.
-				authorized := func(ctx context.Context, total *big.Int) error {
-					if err := authorize(ctx, total); err != nil {
-						return err
-					}
+				beforeSend := func(hash string) {
+					pending.hash = hash
 					sending = true
-					return nil
 				}
-				senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, paid, expected, authorized)
+				senderTag, hash, sent, sendErr = m.requestZoneWithdrawal(ctx, paid, expected, authorize, beforeSend)
 			}
 		}
 		// Only a failure before the transaction was sent, or a revert, is
@@ -915,7 +913,7 @@ func (w zoneWithdrawalRequest) matches(event zone.Requested) bool {
 //
 // authorize, called with the amount plus the withdrawal fee once the fee is
 // read, must allow the payment before anything is prepared or signed.
-func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, expected zoneWithdrawalRequest, authorize func(context.Context, *big.Int) error) (common.Hash, string, bool, error) {
+func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Challenge, expected zoneWithdrawalRequest, authorize func(context.Context, *big.Int) error, beforeSend func(string)) (common.Hash, string, bool, error) {
 	rpc := m.zone.rpc
 	signer := m.zone.signer
 	amount := expected.amount
@@ -1021,6 +1019,7 @@ func (m *Method) requestZoneWithdrawal(ctx context.Context, challenge *mpp.Chall
 
 	// The receipt is looked up, and must match, by the hash of the signed
 	// transaction, whatever hash the Zone answers the send with.
+	beforeSend(hash)
 	var receipt map[string]any
 	if sentHash, sendErr := rpc.SendRawTransaction(ctx, serialized); sendErr == nil && sentHash != "" && !strings.EqualFold(sentHash, hash) {
 		err = fmt.Errorf("zone answered the send with transaction hash %s", sentHash)
