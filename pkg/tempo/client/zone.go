@@ -63,12 +63,16 @@ const approveSelector = "095ea7b3"
 // for a withdrawal whose challenge is past its redemption window (five
 // minutes after it expires): the method fails closed rather than withdraw
 // again. SenderTag is omitted for another or unverified origin, or when no
-// completed late credential established the tag.
+// completed late credential established the tag. After manually reconciling
+// settlement and redemption, use Method.ResetZoneWithdrawal to permit a new payment.
 type ZoneSettlementPendingError struct {
 	// Challenge is the challenge the withdrawal pays.
 	Challenge *mpp.Challenge
 	// ChallengeID is the ID of the challenge the withdrawal pays.
 	ChallengeID string
+	// TransactionHash identifies the withdrawal for manual reconciliation and reset.
+	// It is omitted when refusing a replacement from another or unverified origin.
+	TransactionHash string
 	// SenderTag identifies the withdrawal in the portal's
 	// WithdrawalProcessed event.
 	SenderTag string
@@ -205,6 +209,39 @@ type zoneWithdrawal struct {
 	settlementStart *uint64
 	waiters         int
 	redeemedLate    bool
+}
+
+// ResetZoneWithdrawal forgets a retained withdrawal after the caller manually
+// reconciles its transaction, settlement, and any redeemed Credential. Do not
+// reset while its outcome remains unknown. Reset permits another payment
+// with matching terms; resetting an unresolved or
+// already paid withdrawal can pay twice. It performs no network verification.
+//
+// Pass the original Challenge and TransactionHash from the pending or unknown
+// error. The hash must match the retained attempt, and no credential creation
+// or receipt lookup may still be running. A missing record is a no-op.
+func (m *Method) ResetZoneWithdrawal(challenge *mpp.Challenge, transactionHash string) error {
+	if challenge == nil || transactionHash == "" {
+		return errors.New("tempo client: reset requires the original challenge and withdrawal transaction hash")
+	}
+	key := zoneWithdrawalKey(challenge)
+	if key == "" {
+		return errors.New("tempo client: invalid withdrawal challenge")
+	}
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	withdrawal := m.zoneWithdrawals[key]
+	if withdrawal == nil {
+		return nil
+	}
+	if !finished(withdrawal) || withdrawal.waiters != 0 {
+		return errors.New("tempo client: cannot reset a Zone withdrawal while a payment or lookup is in flight")
+	}
+	if withdrawal.hash != transactionHash {
+		return errors.New("tempo client: withdrawal transaction hash does not match the retained attempt")
+	}
+	delete(m.zoneWithdrawals, key)
+	return nil
 }
 
 // unknown reports whether a finished withdrawal's receipt was missing, so a
@@ -461,6 +498,9 @@ func (m *Method) resumable(withdrawal *zoneWithdrawal, foreign bool, origin stri
 			Challenge:   withdrawal.challenge,
 			ChallengeID: withdrawal.challenge.ID,
 			ZoneID:      m.zone.id,
+		}
+		if !refused && origin != "" && origin == withdrawal.origin && finished(withdrawal) {
+			pending.TransactionHash = withdrawal.hash
 		}
 		if !refused && withdrawal.redeemedLate && finished(withdrawal) {
 			pending.SenderTag = withdrawal.senderTag.Hex()
@@ -768,11 +808,12 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 		}
 	}
 	return nil, &ZoneSettlementPendingError{
-		Challenge:   paid,
-		ChallengeID: paid.ID,
-		SenderTag:   pending.senderTag.Hex(),
-		ZoneID:      m.zone.id,
-		Err:         err,
+		TransactionHash: pending.hash,
+		Challenge:       paid,
+		ChallengeID:     paid.ID,
+		SenderTag:       pending.senderTag.Hex(),
+		ZoneID:          m.zone.id,
+		Err:             err,
 	}
 }
 
