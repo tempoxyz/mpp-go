@@ -90,6 +90,28 @@ func TestRetryPendingKeepsCauseOnLastPendingAttempt(t *testing.T) {
 	assert.Equal(t, 2, calls)
 }
 
+type pendingError struct{ id string }
+
+func (e *pendingError) Error() string { return "pending " + e.id }
+func (e *pendingError) Unwrap() error { return ErrSettlementPending }
+
+func TestRetryPendingPrefersThisCallsPendingErrorOverTheCause(t *testing.T) {
+	for _, attempts := range []int{2, 3} {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		calls := 0
+		_, err := RetryPending(ctx, attempts, func() (int, error) {
+			calls++
+			if calls == 2 {
+				cancel(&pendingError{id: "other"})
+			}
+			return 0, &pendingError{id: "this"}
+		})
+		var got *pendingError
+		require.ErrorAs(t, err, &got)
+		assert.Equal(t, "this", got.id)
+	}
+}
+
 func TestRetryPendingDoesNotCreateOnceContextIsDone(t *testing.T) {
 	reason := errors.New("canceled during approval")
 	ctx, cancel := context.WithCancelCause(context.Background())

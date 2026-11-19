@@ -40,14 +40,15 @@ func Origin(ctx context.Context) string {
 // any other error at once. Once ctx is done it calls create no more, not even
 // the first time, and returns the context's cause, so a call canceled while a
 // payment awaited approval creates no Credential. When an earlier attempt
-// reported a pending settlement, that error is joined to the cause, so callers
-// can match either with errors.Is and keep the pending payment's details.
+// reported a pending settlement, the cause is joined after that error, so callers
+// can match either with errors.Is and errors.As finds this call's pending payment
+// before any typed error the cause carries.
 func RetryPending[T any](ctx context.Context, attempts int, create func() (T, error)) (T, error) {
 	var pending error
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			var zero T
-			return zero, errors.Join(context.Cause(ctx), pending)
+			return zero, errors.Join(pending, context.Cause(ctx))
 		}
 		value, err := create()
 		if err == nil || !errors.Is(err, ErrSettlementPending) {
@@ -55,7 +56,7 @@ func RetryPending[T any](ctx context.Context, attempts int, create func() (T, er
 		}
 		if attempt >= attempts {
 			if ctx.Err() != nil {
-				return value, errors.Join(context.Cause(ctx), err)
+				return value, errors.Join(err, context.Cause(ctx))
 			}
 			return value, err
 		}
