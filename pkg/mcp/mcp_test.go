@@ -389,7 +389,7 @@ func TestApprovalHook(t *testing.T) {
 func TestCancelDuringApprovalCreatesNoCredential(t *testing.T) {
 	method := &testMethod{}
 	payer := &testClientMethod{token: "valid"}
-	reason := errors.New("cancelled during approval")
+	reason := errors.New("canceled during approval")
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	c := mcpclient.Wrap(newClient(), mcpclient.Config{

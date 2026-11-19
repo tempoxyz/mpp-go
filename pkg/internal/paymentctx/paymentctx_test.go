@@ -51,13 +51,17 @@ func TestRetryPendingReturnsOtherErrorsAtOnce(t *testing.T) {
 }
 
 func TestRetryPendingStopsWhenContextIsDone(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	reason := errors.New("canceled while settling")
+	pendingErr := fmt.Errorf("zone withdrawal: %w", ErrSettlementPending)
+	ctx, cancel := context.WithCancelCause(context.Background())
 	calls := 0
 	_, err := RetryPending(ctx, 3, func() (int, error) {
 		calls++
-		cancel()
-		return 0, ErrSettlementPending
+		cancel(reason)
+		return 0, pendingErr
 	})
+	require.ErrorIs(t, err, reason)
+	require.ErrorIs(t, err, pendingErr)
 	require.ErrorIs(t, err, ErrSettlementPending)
 	assert.Equal(t, 1, calls)
 
@@ -71,7 +75,7 @@ func TestRetryPendingStopsWhenContextIsDone(t *testing.T) {
 }
 
 func TestRetryPendingDoesNotCreateOnceContextIsDone(t *testing.T) {
-	reason := errors.New("cancelled during approval")
+	reason := errors.New("canceled during approval")
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(reason)
 	calls := 0
