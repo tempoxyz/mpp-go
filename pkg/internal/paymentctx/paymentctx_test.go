@@ -51,13 +51,17 @@ func TestRetryPendingReturnsOtherErrorsAtOnce(t *testing.T) {
 }
 
 func TestRetryPendingStopsWhenContextIsDone(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	reason := errors.New("canceled while settling")
+	pendingErr := fmt.Errorf("zone withdrawal: %w", ErrSettlementPending)
+	ctx, cancel := context.WithCancelCause(context.Background())
 	calls := 0
 	_, err := RetryPending(ctx, 3, func() (int, error) {
 		calls++
-		cancel()
-		return 0, ErrSettlementPending
+		cancel(reason)
+		return 0, pendingErr
 	})
+	require.ErrorIs(t, err, reason)
+	require.ErrorIs(t, err, pendingErr)
 	require.ErrorIs(t, err, ErrSettlementPending)
 	assert.Equal(t, 1, calls)
 
@@ -68,4 +72,55 @@ func TestRetryPendingStopsWhenContextIsDone(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrSettlementPending)
 	assert.Equal(t, 1, calls)
+}
+
+func TestRetryPendingKeepsCauseOnLastPendingAttempt(t *testing.T) {
+	reason := errors.New("canceled on the last attempt")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	calls := 0
+	_, err := RetryPending(ctx, 2, func() (int, error) {
+		calls++
+		if calls == 2 {
+			cancel(reason)
+		}
+		return 0, ErrSettlementPending
+	})
+	require.ErrorIs(t, err, reason)
+	require.ErrorIs(t, err, ErrSettlementPending)
+	assert.Equal(t, 2, calls)
+}
+
+type pendingError struct{ id string }
+
+func (e *pendingError) Error() string { return "pending " + e.id }
+func (e *pendingError) Unwrap() error { return ErrSettlementPending }
+
+func TestRetryPendingPrefersThisCallsPendingErrorOverTheCause(t *testing.T) {
+	for _, attempts := range []int{2, 3} {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		calls := 0
+		_, err := RetryPending(ctx, attempts, func() (int, error) {
+			calls++
+			if calls == 2 {
+				cancel(&pendingError{id: "other"})
+			}
+			return 0, &pendingError{id: "this"}
+		})
+		var got *pendingError
+		require.ErrorAs(t, err, &got)
+		assert.Equal(t, "this", got.id)
+	}
+}
+
+func TestRetryPendingDoesNotCreateOnceContextIsDone(t *testing.T) {
+	reason := errors.New("canceled during approval")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(reason)
+	calls := 0
+	_, err := RetryPending(ctx, 3, func() (int, error) {
+		calls++
+		return 1, nil
+	})
+	require.ErrorIs(t, err, reason)
+	assert.Equal(t, 0, calls)
 }

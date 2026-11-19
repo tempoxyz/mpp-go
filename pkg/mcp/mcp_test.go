@@ -386,6 +386,27 @@ func TestApprovalHook(t *testing.T) {
 	assert.Equal(t, []string{"A"}, method.recorded())
 }
 
+func TestCancelDuringApprovalCreatesNoCredential(t *testing.T) {
+	method := &testMethod{}
+	payer := &testClientMethod{token: "valid"}
+	reason := errors.New("canceled during approval")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	c := mcpclient.Wrap(newClient(), mcpclient.Config{
+		Methods: []client.Method{payer},
+		OnPaymentRequired: func(context.Context, *mpp.Challenge) (bool, error) {
+			cancel(reason)
+			return true, nil
+		},
+	})
+	session := connect(t, newServer(chargeHandler(newPayment(t, method))), c)
+
+	_, err := callPremium(ctx, session, nil)
+	require.ErrorIs(t, err, reason)
+	assert.Empty(t, payer.credentials())
+	assert.Empty(t, method.recorded())
+}
+
 func TestNoCompatibleMethod(t *testing.T) {
 	method := &testMethod{}
 	other := &otherClientMethod{}
