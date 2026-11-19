@@ -69,3 +69,16 @@ func TestRetryPendingStopsWhenContextIsDone(t *testing.T) {
 	require.ErrorIs(t, err, ErrSettlementPending)
 	assert.Equal(t, 1, calls)
 }
+
+func TestRetryPendingDoesNotCreateOnceContextIsDone(t *testing.T) {
+	reason := errors.New("cancelled during approval")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(reason)
+	calls := 0
+	_, err := RetryPending(ctx, 3, func() (int, error) {
+		calls++
+		return 1, nil
+	})
+	require.ErrorIs(t, err, reason)
+	assert.Equal(t, 0, calls)
+}

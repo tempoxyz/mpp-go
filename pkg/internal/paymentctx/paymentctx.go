@@ -36,10 +36,16 @@ func Origin(ctx context.Context) string {
 }
 
 // RetryPending calls create, and calls it again while it fails with
-// ErrSettlementPending, up to attempts calls in all (at least one). It stops
-// once ctx is done and returns any other error at once.
+// ErrSettlementPending, up to attempts calls in all (at least one). It returns
+// any other error at once. Once ctx is done it calls create no more, not even
+// the first time, and returns the context's cause, so a call cancelled while a
+// payment awaited approval creates no Credential.
 func RetryPending[T any](ctx context.Context, attempts int, create func() (T, error)) (T, error) {
 	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			var zero T
+			return zero, context.Cause(ctx)
+		}
 		value, err := create()
 		if err == nil || !errors.Is(err, ErrSettlementPending) || attempt >= attempts || ctx.Err() != nil {
 			return value, err
