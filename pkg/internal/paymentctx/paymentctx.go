@@ -50,7 +50,13 @@ func RetryPending[T any](ctx context.Context, attempts int, create func() (T, er
 			return zero, errors.Join(context.Cause(ctx), pending)
 		}
 		value, err := create()
-		if err == nil || !errors.Is(err, ErrSettlementPending) || attempt >= attempts {
+		if err == nil || !errors.Is(err, ErrSettlementPending) {
+			return value, err
+		}
+		if attempt >= attempts {
+			if ctx.Err() != nil {
+				return value, errors.Join(context.Cause(ctx), err)
+			}
 			return value, err
 		}
 		pending = err

@@ -74,6 +74,22 @@ func TestRetryPendingStopsWhenContextIsDone(t *testing.T) {
 	assert.Equal(t, 1, calls)
 }
 
+func TestRetryPendingKeepsCauseOnLastPendingAttempt(t *testing.T) {
+	reason := errors.New("canceled on the last attempt")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	calls := 0
+	_, err := RetryPending(ctx, 2, func() (int, error) {
+		calls++
+		if calls == 2 {
+			cancel(reason)
+		}
+		return 0, ErrSettlementPending
+	})
+	require.ErrorIs(t, err, reason)
+	require.ErrorIs(t, err, ErrSettlementPending)
+	assert.Equal(t, 2, calls)
+}
+
 func TestRetryPendingDoesNotCreateOnceContextIsDone(t *testing.T) {
 	reason := errors.New("canceled during approval")
 	ctx, cancel := context.WithCancelCause(context.Background())
