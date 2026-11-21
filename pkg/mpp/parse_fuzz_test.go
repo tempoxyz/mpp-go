@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -67,19 +69,35 @@ func FuzzParseChallenge(f *testing.F) {
 			// Strict formatting refuses values a quoted auth-param cannot carry.
 			return
 		}
-		if hasRuneAboveLatin1(c1.Description) {
+		want := c1
+		escaped := hasRuneAboveLatin1(c1.Description)
+		if escaped {
 			// description escapes characters above U+00FF as \uXXXX, which
-			// parsers read back as quoted-pairs ("u2014"): not a round trip.
-			return
+			// parsers read back as quoted-pairs: "—" comes back as "u2014".
+			// Every other field still round-trips.
+			w := *c1
+			w.Description = quotedPairReading(c1.Description)
+			want = &w
 		}
 		c2, err := ParseChallenge(h1)
 		if err != nil {
 			t.Fatalf("ParseChallenge(formatAuthenticateStrict(c)) failed: %v\ninput: %q\nformatted: %q", err, header, h1)
 		}
-		assertSameChallenge(t, c1, c2, header, h1)
+		assertSameChallenge(t, want, c2, header, h1)
 		h2, err := formatAuthenticateStrict(c2, c2.Realm)
-		if err != nil || h1 != h2 {
+		if err != nil || (!escaped && h1 != h2) {
 			t.Fatalf("formatting is not stable: %q != %q (err %v)", h1, h2, err)
+		}
+		if escaped {
+			// c2's description is Latin-1 now, so h2 must round-trip exactly.
+			c3, err := ParseChallenge(h2)
+			if err != nil {
+				t.Fatalf("ParseChallenge(%q) failed: %v", h2, err)
+			}
+			assertSameChallenge(t, c2, c3, header, h2)
+			if h3, err := formatAuthenticateStrict(c3, c3.Realm); err != nil || h3 != h2 {
+				t.Fatalf("formatting is not stable: %q != %q (err %v)", h2, h3, err)
+			}
 		}
 
 		merged := SplitAuthenticate(h1 + ", " + h1)
@@ -87,6 +105,25 @@ func FuzzParseChallenge(f *testing.F) {
 			t.Fatalf("SplitAuthenticate(two challenges) = %q, want two copies of %q", merged, h1)
 		}
 	})
+}
+
+// quotedPairReading is what a parser reads back from a description that
+// escapeQuoted wrote: each character above U+00FF becomes the text of its
+// \uXXXX escape without the backslash, one per UTF-16 code unit.
+func quotedPairReading(description string) string {
+	var builder strings.Builder
+	for len(description) > 0 {
+		r, size := utf8.DecodeRuneInString(description)
+		if r > 0xff && size > 1 {
+			for _, unit := range utf16.Encode([]rune{r}) {
+				fmt.Fprintf(&builder, "u%04x", unit)
+			}
+		} else {
+			builder.WriteString(description[:size])
+		}
+		description = description[size:]
+	}
+	return builder.String()
 }
 
 func assertSameChallenge(t *testing.T, c1, c2 *Challenge, input, formatted string) {
