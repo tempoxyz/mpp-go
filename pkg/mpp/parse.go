@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -187,11 +186,8 @@ func readQuotedAuthParamValue(input string, start int) (string, int, error) {
 			if i >= len(input) {
 				return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
 			}
-			if r, next, ok := readUnicodeEscape(input, i); ok {
-				builder.WriteRune(r)
-				i = next
-				continue
-			}
+			// RFC 9110 quoted-pair: drop the backslash and keep the next
+			// octet as is. \uXXXX is not an escape, so "\u2014" reads "u2014".
 			builder.WriteByte(input[i])
 			i++
 		case '"':
@@ -202,35 +198,6 @@ func readQuotedAuthParamValue(input string, start int) (string, int, error) {
 		}
 	}
 	return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
-}
-
-func readUnicodeEscape(input string, i int) (rune, int, bool) {
-	unit, next, ok := readEscapedCodeUnit(input, i)
-	if !ok {
-		return 0, 0, false
-	}
-	if !utf16.IsSurrogate(rune(unit)) {
-		return rune(unit), next, true
-	}
-	if next < len(input) && input[next] == '\\' {
-		if low, after, ok := readEscapedCodeUnit(input, next+1); ok {
-			if r := utf16.DecodeRune(rune(unit), rune(low)); r != utf8.RuneError {
-				return r, after, true
-			}
-		}
-	}
-	return utf8.RuneError, next, true
-}
-
-func readEscapedCodeUnit(input string, i int) (uint16, int, bool) {
-	if i >= len(input) || input[i] != 'u' || i+5 > len(input) {
-		return 0, 0, false
-	}
-	value, err := strconv.ParseUint(input[i+1:i+5], 16, 16)
-	if err != nil {
-		return 0, 0, false
-	}
-	return uint16(value), i + 5, true
 }
 
 // ParseChallenge parses a Payment challenge from a WWW-Authenticate header value.
@@ -347,6 +314,9 @@ func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error)
 		if strict && strings.ContainsAny(v, "\r\n") {
 			return fmt.Errorf("mpp: invalid %s auth-param: contains CR or LF", k)
 		}
+		if strict && k != "description" && hasRuneAboveLatin1(v) {
+			return fmt.Errorf("mpp: invalid %s auth-param: contains characters above U+00FF", k)
+		}
 		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
 		return nil
 	}
@@ -457,12 +427,33 @@ func escapeQuoted(value string) string {
 				builder.WriteRune(r)
 				continue
 			}
+			// Only description gets here in strict mode. It is not bound into
+			// the challenge ID, so it keeps mppx's \uXXXX escape: header values
+			// must be ByteStrings, and parsers read it back as quoted-pairs
+			// ("u2014"), which only changes how it displays.
 			for _, unit := range utf16.Encode([]rune{r}) {
 				fmt.Fprintf(&builder, `\u%04x`, unit)
 			}
 		}
 	}
 	return builder.String()
+}
+
+// hasRuneAboveLatin1 reports whether value holds a character above U+00FF.
+// A quoted-string has no escape for such characters (a quoted-pair only
+// quotes the next octet) and fetch-based peers read header values as Latin-1
+// ByteStrings, so FormatChallenge rejects them in every auth-param but
+// description rather than emit a value another SDK would read differently,
+// which for realm and the other bound fields changes the challenge ID.
+func hasRuneAboveLatin1(value string) bool {
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r > 0xff && size > 1 {
+			return true
+		}
+		value = value[size:]
+	}
+	return false
 }
 
 // ParseCredential parses a Payment credential from an Authorization header value.
