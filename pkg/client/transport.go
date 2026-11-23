@@ -443,12 +443,14 @@ func parseCredentialWithoutHeader(value string) (*mpp.Credential, error) {
 // paymentCredentialValues returns every header element that uses the Payment
 // auth scheme: supported holds those in Authorization and
 // Payment-Authorization (field names in any case), other those in every other
-// field, since a challenge may name a custom credential field.
+// field, since a challenge may name a custom credential field. Values are
+// split as servers split them (mpp.SplitAuthenticate), so a comma inside a
+// quoted auth-param of another scheme does not start a Payment element.
 func paymentCredentialValues(header http.Header) (supported, other []string) {
 	for name, values := range header {
 		isSupported := strings.EqualFold(name, mpp.HeaderAuthorization) || strings.EqualFold(name, mpp.HeaderPaymentAuthorization)
 		for _, value := range values {
-			for _, part := range strings.Split(value, ",") {
+			for _, part := range mpp.SplitAuthenticate(value) {
 				part = strings.TrimSpace(part)
 				scheme, token, _ := strings.Cut(part, " ")
 				token = strings.TrimSpace(token)
