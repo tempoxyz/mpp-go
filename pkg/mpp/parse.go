@@ -912,7 +912,10 @@ func isMethodName(value string) bool {
 	return value != ""
 }
 
-// B64Decode decodes a base64url (no padding) string into a map.
+// B64Decode decodes a base64url (no padding) string holding a JSON object into
+// a map. It rejects any character outside the base64url alphabet
+// ([A-Za-z0-9_-]), including the CR and LF that encoding/base64 skips, and JSON
+// other than an object (such as null), as mppx does.
 //
 // Numbers decode as json.Number rather than float64. The challenge ID is an
 // HMAC over the re-encoded request, so a decode that cannot reproduce the
@@ -920,6 +923,9 @@ func isMethodName(value string) bool {
 // of mantissa, and any JSON integer above 2^53 comes back rounded, making a
 // challenge the server itself issued fail to verify.
 func B64Decode(s string) (map[string]any, error) {
+	if i := invalidBase64URLIndex(s); i >= 0 {
+		return nil, fmt.Errorf("base64 decode: invalid base64url character at input byte %d", i)
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode: %w", err)
@@ -928,7 +934,24 @@ func B64Decode(s string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("json decode: %w", err)
 	}
+	if m == nil {
+		return nil, fmt.Errorf("json decode: value must be an object")
+	}
 	return m, nil
+}
+
+// invalidBase64URLIndex returns the index of the first byte of s outside the
+// base64url alphabet, or -1. encoding/base64 skips CR and LF while decoding,
+// so they must be rejected before it runs.
+func invalidBase64URLIndex(s string) int {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return i
+	}
+	return -1
 }
 
 func decodeJSONMap(raw []byte) (map[string]any, error) {
