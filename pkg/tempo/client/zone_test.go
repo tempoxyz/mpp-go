@@ -1439,10 +1439,8 @@ func TestZoneOwnChallengeFromOtherKnownOriginFailsClosed(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 1)
 }
 
-// Five minutes after the first challenge expires, no server accepts its
-// credential: a retry of that challenge still fails closed and sends
-// nothing, but the withdrawal no longer pays other challenges, so a new
-// challenge for its terms is a new payment and the record is dropped.
+// Expiry does not establish whether funds moved: both the original
+// challenge and a fresh challenge for its terms must fail closed.
 func TestZoneWithdrawalPastRedemptionWindowFailsClosed(t *testing.T) {
 	t.Parallel()
 	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
@@ -1460,11 +1458,12 @@ func TestZoneWithdrawalPastRedemptionWindowFailsClosed(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 1)
 
 	second := zoneTermsChallenge(t, now.Add(10*time.Minute), "second", nil)
-	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
-	require.NoError(t, err)
-	assert.Equal(t, second.ID, credential.Challenge.ID)
-	assert.Len(t, zoneRPC.sent, 2)
-	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
+	_, err = method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
+	require.ErrorAs(t, err, &pending)
+	assert.Equal(t, first.ID, pending.ChallengeID)
+	assert.Equal(t, calls, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.NotNil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
 }
 
 // A credential made after its challenge expired keeps the withdrawal

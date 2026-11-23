@@ -423,10 +423,11 @@ func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithd
 		if withdrawal.terms != terms {
 			continue
 		}
-		// No server accepts its credential any more, so it can't pay this
-		// challenge. A retry of its own challenge still fails closed, since
-		// that looks it up by its own key first.
-		if !m.redeemable(withdrawal.challenge.Expires) {
+		// Credential expiry does not prove the withdrawal failed. Retain
+		// unresolved payments so a fresh challenge cannot pay them twice.
+		// A returned late credential, however, already has an observed
+		// settlement and retains the existing new-purchase behavior.
+		if !m.redeemable(withdrawal.challenge.Expires) && withdrawal.redeemedLate {
 			delete(m.zoneWithdrawals, other)
 			continue
 		}
@@ -434,7 +435,7 @@ func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithd
 		// server may still accept or refuse it: sending it again for this
 		// challenge could redeem it twice, and a new payment could pay twice
 		// if it was refused.
-		if withdrawal.redeemedLate {
+		if !m.redeemable(withdrawal.challenge.Expires) || withdrawal.redeemedLate {
 			return "", nil, &ZoneSettlementPendingError{
 				Challenge:   withdrawal.challenge,
 				ChallengeID: withdrawal.challenge.ID,
