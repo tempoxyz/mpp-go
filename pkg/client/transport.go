@@ -391,6 +391,14 @@ func callerCredential(header http.Header) (sent, unreadable bool, challenge *mpp
 
 // parseCallerCredential parses a Payment credential the caller set.
 func parseCallerCredential(value string) (*mpp.Credential, error) {
+	// The caller's own credential is read as leniently as before
+	// ParseCredential became strict: any run of spaces and tabs may separate
+	// the scheme from the token. Servers still require one space or more.
+	if scheme, token, ok := strings.Cut(strings.TrimSpace(value), " "); ok {
+		value = scheme + " " + strings.TrimLeft(token, " \t")
+	} else if scheme, token, ok := strings.Cut(strings.TrimSpace(value), "\t"); ok {
+		value = scheme + " " + strings.TrimLeft(token, " \t")
+	}
 	cred, err := mpp.ParseCredential(value)
 	if errors.Is(err, mpp.ErrUnsupportedCredentialHeader) {
 		// The caller's own credential echoes a header a received challenge
