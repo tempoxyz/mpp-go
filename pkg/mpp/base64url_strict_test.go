@@ -48,6 +48,8 @@ func TestParseChallengeRejectsNullRequest(t *testing.T) {
 }
 
 func TestParseChallengeRejectsLineBreaksInRequest(t *testing.T) {
-	_, err := ParseChallenge(`Payment id="0", realm="r", method="a", intent="a", request="e3\n0"`)
+	// A real LF inside the quoted request: encoding/base64 skipped it, so
+	// "e3<LF>0" decoded as "e30" and the Challenge parsed.
+	_, err := ParseChallenge("Payment id=\"0\", realm=\"r\", method=\"a\", intent=\"a\", request=\"e3\n0\"")
 	require.Error(t, err)
 }
