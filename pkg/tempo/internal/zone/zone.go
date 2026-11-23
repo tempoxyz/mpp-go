@@ -40,6 +40,11 @@ const lookbackBlocks = 7_200
 // WaitForSettlement covers.
 const logsRangeBlocks = lookbackBlocks + 1
 
+// maxSenderTagCandidates is the most sender tags SenderTagCandidates derives
+// for one withdrawal: the withdrawals its Zone block may hold. Each candidate
+// is a topic in every settlement poll's eth_getLogs filter.
+const maxSenderTagCandidates = 64
+
 // pollingInterval is the time between polls for a settled withdrawal.
 const pollingInterval = 500 * time.Millisecond
 
@@ -87,6 +92,7 @@ const portalABIJSON = `[
 const outboxABIJSON = `[
   {"type":"function","name":"calculateWithdrawalFee","stateMutability":"view","inputs":[
     {"type":"uint64","name":"gasLimit"}],"outputs":[{"type":"uint128","name":"fee"}]},
+  {"type":"function","name":"lastFallbackNonce","stateMutability":"view","inputs":[],"outputs":[{"type":"uint64"}]},
   {"type":"function","name":"requestWithdrawal","stateMutability":"nonpayable","inputs":[
     {"type":"address","name":"token"},
     {"type":"address","name":"to"},
@@ -361,9 +367,95 @@ func RequestedEvents(receipt map[string]any) []Requested {
 	return events
 }
 
-// Requester is the JSON-RPC subset WaitForSettlement uses.
+// HasRequestedLog reports whether a Zone transaction receipt has a ZoneOutbox
+// log with the WithdrawalRequested topic, whether or not it decodes. A Zone
+// RPC that redacts other contracts' logs leaves it out of the payer's receipt.
+func HasRequestedLog(receipt map[string]any) bool {
+	logs, _ := receipt["logs"].([]any)
+	for _, rawLog := range logs {
+		entry, isMap := rawLog.(map[string]any)
+		if !isMap || !strings.EqualFold(asString(entry["address"]), OutboxAddress.Hex()) {
+			continue
+		}
+		if topics, isList := entry["topics"].([]any); isList && len(topics) > 0 &&
+			strings.EqualFold(asString(topics[0]), RequestedTopic.Hex()) {
+			return true
+		}
+	}
+	return false
+}
+
+// Requester is the JSON-RPC subset WaitForSettlement and SenderTagCandidates
+// use.
 type Requester interface {
 	SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error)
+}
+
+// SenderTagCandidates derives the sender tags a withdrawal transaction may
+// carry when its receipt has no WithdrawalRequested event, as on a Zone RPC
+// that redacts logs, as mppx's Zone.senderTagCandidates.
+//
+// The outbox numbers each withdrawal with the next lastFallbackNonce, so the
+// transaction's withdrawal took one of the nonces its block added. Every
+// candidate hashes the payer's address and transaction, so only the payer's
+// withdrawal can match one.
+func SenderTagCandidates(ctx context.Context, rpc Requester, blockNumber uint64, sender common.Address, transactionHash common.Hash) ([]common.Hash, error) {
+	// No transaction is in the genesis block.
+	if blockNumber == 0 {
+		return nil, fmt.Errorf("zone withdrawal transaction %s did not request a withdrawal from the outbox", transactionHash.Hex())
+	}
+	before, err := lastFallbackNonce(ctx, rpc, blockNumber-1)
+	if err != nil {
+		return nil, err
+	}
+	after, err := lastFallbackNonce(ctx, rpc, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	if after <= before {
+		return nil, fmt.Errorf("zone withdrawal transaction %s did not request a withdrawal from the outbox", transactionHash.Hex())
+	}
+	// The nonces come from the Zone RPC, so a range no block could hold is
+	// refused rather than hashed.
+	if after-before > maxSenderTagCandidates {
+		return nil, fmt.Errorf("zone withdrawal transaction %s has %d candidate sender tags, more than %d", transactionHash.Hex(), after-before, maxSenderTagCandidates)
+	}
+	tags := make([]common.Hash, 0, after-before)
+	for nonce := before + 1; nonce <= after; nonce++ {
+		tags = append(tags, SenderTag(sender, transactionHash, nonce))
+	}
+	return tags, nil
+}
+
+// lastFallbackNonce reads the ZoneOutbox's lastFallbackNonce at a Zone block.
+func lastFallbackNonce(ctx context.Context, rpc Requester, block uint64) (uint64, error) {
+	data, err := OutboxABI.Pack("lastFallbackNonce")
+	if err != nil {
+		return 0, err
+	}
+	response, err := rpc.SendRequest(ctx, "eth_call", map[string]any{
+		"to":   OutboxAddress.Hex(),
+		"data": hexutil.Encode(data),
+	}, hexutil.EncodeUint64(block))
+	if err != nil {
+		return 0, fmt.Errorf("read Zone outbox lastFallbackNonce at block %d: %w", block, err)
+	}
+	if err := response.CheckError(); err != nil {
+		return 0, fmt.Errorf("read Zone outbox lastFallbackNonce at block %d: %w", block, err)
+	}
+	result, err := hexutil.Decode(asString(response.Result))
+	if err != nil {
+		return 0, fmt.Errorf("read Zone outbox lastFallbackNonce at block %d: %w", block, err)
+	}
+	values, err := OutboxABI.Unpack("lastFallbackNonce", result)
+	if err != nil || len(values) != 1 {
+		return 0, fmt.Errorf("read Zone outbox lastFallbackNonce at block %d: unexpected result %s", block, hexutil.Encode(result))
+	}
+	nonce, ok := values[0].(uint64)
+	if !ok {
+		return 0, fmt.Errorf("read Zone outbox lastFallbackNonce at block %d: unexpected result %s", block, hexutil.Encode(result))
+	}
+	return nonce, nil
 }
 
 // SettlementStartBlock returns the Tempo block a first WaitForSettlement for
@@ -383,6 +475,9 @@ func SettlementStartBlock(ctx context.Context, rpc Requester) (uint64, error) {
 type Settlement struct {
 	// Hash is the hash of the Tempo transaction that emitted it.
 	Hash string
+	// SenderTag is the sender tag of the settled withdrawal: the one of the
+	// tags waited for that the event carries.
+	SenderTag common.Hash
 	// Bounced reports that the event's callbackSuccess is false: the payout
 	// failed and its amount went back to the sender's Zone balance. An event
 	// whose data does not decode is not reported as a bounce; the server
@@ -403,8 +498,19 @@ const rpcGrace = 5 * time.Second
 // earlier one passes the earlier one's fromBlock, so it still finds a
 // settlement however far back the head has moved since.
 func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (Settlement, error) {
+	return WaitForSettledWithdrawal(ctx, rpc, portal, []common.Hash{senderTag}, to, fromBlock, timeout)
+}
+
+// WaitForSettledWithdrawal is WaitForSettlement for a withdrawal that may
+// carry any of several sender tags, as mppx's Zone.waitForSettledWithdrawal:
+// it waits until portal emits WithdrawalProcessed for one of senderTags, and
+// the Settlement it returns names that tag.
+func WaitForSettledWithdrawal(ctx context.Context, rpc Requester, portal common.Address, senderTags []common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (Settlement, error) {
 	if timeout < 0 {
 		return Settlement{}, fmt.Errorf("zone settlement timeout must be non-negative")
+	}
+	if len(senderTags) == 0 {
+		return Settlement{}, fmt.Errorf("zone settlement needs at least one sender tag")
 	}
 	deadline := time.Now().Add(timeout)
 	// Bound every RPC call by the deadline too, so a stalled Tempo RPC cannot
@@ -426,14 +532,14 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 			if latest-fromBlock >= logsRangeBlocks {
 				toBlock = fromBlock + logsRangeBlocks - 1
 			}
-			settlement, err := settlementLog(ctx, rpc, portal, toTopic, senderTag, fromBlock, toBlock)
+			settlement, err := settlementLog(ctx, rpc, portal, toTopic, senderTags, fromBlock, toBlock)
 			if err != nil || settlement.Hash != "" {
 				return settlement, err
 			}
 			fromBlock = toBlock + 1
 		}
 		if time.Now().Add(pollingInterval).After(deadline) {
-			return Settlement{}, fmt.Errorf("zone withdrawal %s did not settle on Tempo within %s", senderTag.Hex(), timeout)
+			return Settlement{}, fmt.Errorf("zone withdrawal %s did not settle on Tempo within %s", joinTags(senderTags), timeout)
 		}
 		timer := time.NewTimer(pollingInterval)
 		select {
@@ -449,12 +555,21 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 }
 
 // settlementLog returns the settlement in blocks fromBlock to toBlock in
-// which portal emitted WithdrawalProcessed for senderTag, or one with an
-// empty Hash when there is none.
-func settlementLog(ctx context.Context, rpc Requester, portal common.Address, toTopic any, senderTag common.Hash, fromBlock, toBlock uint64) (Settlement, error) {
+// which portal emitted WithdrawalProcessed for one of senderTags, or one with
+// an empty Hash when there is none.
+func settlementLog(ctx context.Context, rpc Requester, portal common.Address, toTopic any, senderTags []common.Hash, fromBlock, toBlock uint64) (Settlement, error) {
+	// One tag is a single topic; several are an OR list of topics.
+	var tagTopic any = senderTags[0].Hex()
+	if len(senderTags) > 1 {
+		tags := make([]string, len(senderTags))
+		for i, tag := range senderTags {
+			tags[i] = tag.Hex()
+		}
+		tagTopic = tags
+	}
 	response, err := rpc.SendRequest(ctx, "eth_getLogs", map[string]any{
 		"address":   portal.Hex(),
-		"topics":    []any{ProcessedTopic.Hex(), toTopic, senderTag.Hex()},
+		"topics":    []any{ProcessedTopic.Hex(), toTopic, tagTopic},
 		"fromBlock": hexutil.EncodeUint64(fromBlock),
 		"toBlock":   hexutil.EncodeUint64(toBlock),
 	})
@@ -466,14 +581,46 @@ func settlementLog(ctx context.Context, rpc Requester, portal common.Address, to
 	}
 	if logs, ok := response.Result.([]any); ok {
 		for _, rawLog := range logs {
-			if entry, ok := rawLog.(map[string]any); ok {
-				if hash := asString(entry["transactionHash"]); hash != "" {
-					return Settlement{Hash: hash, Bounced: processedBounced(entry)}, nil
-				}
+			entry, ok := rawLog.(map[string]any)
+			if !ok {
+				continue
+			}
+			hash := asString(entry["transactionHash"])
+			tag, ok := processedSenderTag(entry, senderTags)
+			if hash != "" && ok {
+				return Settlement{Hash: hash, SenderTag: tag, Bounced: processedBounced(entry)}, nil
 			}
 		}
 	}
 	return Settlement{}, nil
+}
+
+// processedSenderTag returns the sender tag of a WithdrawalProcessed log: its
+// senderTag topic when it is one of senderTags, or the only tag the filter
+// asked for when the log leaves its topics out. ok is false otherwise.
+func processedSenderTag(entry map[string]any, senderTags []common.Hash) (common.Hash, bool) {
+	topics, _ := entry["topics"].([]any)
+	if len(topics) < 3 {
+		if len(senderTags) == 1 {
+			return senderTags[0], true
+		}
+		return common.Hash{}, false
+	}
+	for _, tag := range senderTags {
+		if strings.EqualFold(asString(topics[2]), tag.Hex()) {
+			return tag, true
+		}
+	}
+	return common.Hash{}, false
+}
+
+// joinTags formats sender tags as "A or B".
+func joinTags(senderTags []common.Hash) string {
+	tags := make([]string, len(senderTags))
+	for i, tag := range senderTags {
+		tags[i] = tag.Hex()
+	}
+	return strings.Join(tags, " or ")
 }
 
 // processedBounced reports whether a WithdrawalProcessed log's data decodes
