@@ -65,6 +65,20 @@ func TestComposeAgingOfferDoesNotRejectOtherOffers(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestComposeAcceptsMergedAuthorizationValue(t *testing.T) {
+	payment, err := New(composeTestMethod{name: "test"}, composeRealm, composeSecret)
+	require.NoError(t, err)
+	configs := []ComposeConfig{{Mpp: payment, Params: ChargeParams{Amount: "1", Currency: "A"}}}
+	offered, err := Compose(context.Background(), "", configs...)
+	require.NoError(t, err)
+	authorization := mustFormatCredential(t, offered.Challenges[0].NewCredential(map[string]any{}))
+
+	paid, err := Compose(context.Background(), `Basic realm="x", `+authorization, configs...)
+	require.NoError(t, err)
+	require.Nil(t, paid.Challenge)
+	assert.Equal(t, "0xreceipt-test", paid.Receipt.Reference)
+}
+
 func mustFormatCredential(t *testing.T, credential *mpp.Credential) string {
 	t.Helper()
 	header, err := mpp.FormatCredential(credential)

@@ -257,7 +257,7 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeForUnparseableCallerCredential
 }
 
 func TestTransport_RoundTrip_DoesNotPayAfterUnparseableCallerCredential(t *testing.T) {
-	challenge := mpptest.NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "1"})
+	challenge := challengeForURL(t, "http://api.example.com", "tempo", map[string]any{"amount": "1"})
 	inner := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		header := http.Header{}
 		header.Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
@@ -277,6 +277,29 @@ func TestTransport_RoundTrip_DoesNotPayAfterUnparseableCallerCredential(t *testi
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
 	assert.Zero(t, method.calls)
+}
+
+func TestTransport_RoundTrip_PaysDespitePaymentShapedOtherHeader(t *testing.T) {
+	challenge := challengeForURL(t, "http://api.example.com", "tempo", map[string]any{"amount": "1"})
+	var calls atomic.Int32
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) > 1 {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+		}
+		header := http.Header{}
+		header.Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: http.NoBody}, nil
+	})
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Note", "Payment e30")
+
+	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
 }
 
 func TestClient_Do_RunsCallerRedirectHookFirst(t *testing.T) {
