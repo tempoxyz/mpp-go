@@ -1761,3 +1761,34 @@ func TestZoneExpiredReceiptReconciliationPublishesOutcomeSafely(t *testing.T) {
 	wg.Wait()
 	assert.Len(t, zoneRPC.sent, 1)
 }
+
+type receiptPanicRPC struct {
+	*zoneTestRPC
+	panicReceipt bool
+}
+
+func (r *receiptPanicRPC) SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	if r.panicReceipt && method == "eth_getTransactionReceipt" {
+		panic("receipt lookup failed")
+	}
+	return r.zoneTestRPC.SendRequest(ctx, method, params...)
+}
+
+func TestZoneReceiptPanicKeepsKnownWithdrawalRecoverable(t *testing.T) {
+	t.Parallel()
+	rpc := &zoneTestRPC{mode: "internal"}
+	method, _ := newZoneMethod(t, rpc, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	wrapper := &receiptPanicRPC{zoneTestRPC: rpc, panicReceipt: true}
+	method.zone.rpc = wrapper
+	require.Panics(t, func() { _, _ = method.CreateCredential(context.Background(), challenge) })
+	wrapper.panicReceipt = false
+	rpc.mode = "ok"
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.NotNil(t, credential)
+	assert.Len(t, rpc.sent, 1)
+}

@@ -337,3 +337,12 @@ func TestSettlementScanRetainsProgressAfterRPCTimeout(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, settlement.Hash)
 }
+
+func TestSettlementScanDoesNotCheckpointNearHeadEmptyLogs(t *testing.T) {
+	t.Parallel()
+	var next uint64 = 2800
+	rpc := &logsRPC{blocks: []string{hexutil.EncodeUint64(10001)}, logs: func(map[string]any) []any { return nil }}
+	_, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.Error(t, err)
+	assert.Equal(t, uint64(2800), next)
+}

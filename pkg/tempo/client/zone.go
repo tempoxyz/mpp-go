@@ -696,6 +696,9 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			if !finished {
 				m.zoneMu.Lock()
 				pending.sent, pending.err = sending, errZoneWithdrawalPanicked
+				if pending.hash != "" {
+					pending.err = &ZoneWithdrawalUnknownError{Challenge: pending.challenge, TransactionHash: pending.hash, ZoneID: m.zone.id, Err: errZoneWithdrawalPanicked}
+				}
 				m.zoneMu.Unlock()
 				m.finishZoneWithdrawal(key, pending)
 			}

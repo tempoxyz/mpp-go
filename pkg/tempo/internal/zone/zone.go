@@ -408,7 +408,7 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 
 // WaitForSettlementWithProgress reports the next unscanned block after each
 // successful empty historical range, so retries of long scans make progress.
-// The head range is revisited on retry, including while its logs are indexing.
+// At least one full range below the head is revisited while logs are indexing.
 // It uses the same trusted Tempo RPC and forward-only scan as WaitForSettlement.
 func WaitForSettlementWithProgress(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration, progress func(uint64)) (Settlement, error) {
 	if timeout < 0 {
@@ -439,7 +439,7 @@ func WaitForSettlementWithProgress(ctx context.Context, rpc Requester, portal co
 				return settlement, err
 			}
 			fromBlock = toBlock + 1
-			if progress != nil && toBlock < latest {
+			if progress != nil && latest-toBlock >= logsRangeBlocks {
 				progress(fromBlock)
 			}
 		}
