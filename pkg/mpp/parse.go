@@ -24,10 +24,12 @@ const maxAuthorizationPayload = 64 * 1024
 // boundAuthParams are the auth-params bound into the challenge ID (the id
 // itself and the inputs of its HMAC). A legacy \uXXXX escape in one of them
 // changes what the client echoes, so the server rejects the Credential.
+// method is left out: ParseChallenge accepts only lowercase ASCII method
+// names, which older servers never escaped, so "\uabcd" there is a plain
+// quoted-pair spelling of "uabcd".
 var boundAuthParams = map[string]bool{
 	"id":      true,
 	"realm":   true,
-	"method":  true,
 	"intent":  true,
 	"request": true,
 	"expires": true,

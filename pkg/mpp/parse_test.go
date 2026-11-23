@@ -409,6 +409,20 @@ func TestParseChallengeFlagsLegacyUnicodeEscapeInID(t *testing.T) {
 	assert.True(t, got.LegacyUnicodeEscape())
 }
 
+func TestParseChallengeDoesNotFlagQuotedPairInMethodName(t *testing.T) {
+	t.Parallel()
+
+	// A method name is lowercase ASCII, which older servers never escaped,
+	// so "\uabcd" is a quoted-pair spelling of the method "uabcd".
+	got, err := ParseChallenge(`Payment id="ch_1", realm="api.example.com", method="\uabcd", intent="charge", request="e30"`)
+	require.NoError(t, err)
+	assert.Equal(t, "uabcd", got.Method)
+	assert.False(t, got.LegacyUnicodeEscape())
+	header, err := FormatChallenge(got)
+	require.NoError(t, err)
+	assert.Contains(t, header, `method="uabcd"`)
+}
+
 func TestLegacyUnicodeEscapeIsNotPartOfTheWireForm(t *testing.T) {
 	t.Parallel()
 
