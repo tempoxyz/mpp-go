@@ -103,29 +103,33 @@ func TestTransport_RoundTrip_PaysDespitePaymentInQuotedAuthParam(t *testing.T) {
 }
 
 // TestTransport_RoundTrip_ReadsCredentialFollowedByAuthParams keeps the caller's
-// Credential when auth-params or another scheme follow its token in the same
-// field, so the Transport returns the 402 instead of paying again.
+// push Credential when auth-params or another scheme follow its token in the
+// same field, in Authorization or a custom field, so the Transport returns the
+// 402 instead of paying again.
 func TestTransport_RoundTrip_ReadsCredentialFollowedByAuthParams(t *testing.T) {
 	challenge := challengeForURL(t, "http://api.example.com", "tempo", map[string]any{"amount": "1"})
-	authorization, err := mpp.FormatCredential(newTestCredential("tempo"))
+	push := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": "0xabc"}}
+	authorization, err := mpp.FormatCredential(push)
 	require.NoError(t, err)
 	inner := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		header := http.Header{}
 		header.Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
 		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: http.NoBody}, nil
 	})
-	for _, suffix := range []string{", realm=x", ", Other", ",realm=\"a, b\""} {
-		t.Run(suffix, func(t *testing.T) {
-			method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
-			req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
-			require.NoError(t, err)
-			req.Header.Set("Authorization", authorization+suffix)
+	for _, name := range []string{"Authorization", "Payment-Authorization", "X-Custom-Payment"} {
+		for _, suffix := range []string{", realm=x", ", Negotiate", ",realm=\"a, b\""} {
+			t.Run(name+suffix, func(t *testing.T) {
+				method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+				req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+				require.NoError(t, err)
+				req.Header.Set(name, authorization+suffix)
 
-			resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
-			assert.Zero(t, method.calls)
-		})
+				resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+				assert.Zero(t, method.calls)
+			})
+		}
 	}
 }

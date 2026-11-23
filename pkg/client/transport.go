@@ -463,10 +463,9 @@ func paymentCredentialValues(header http.Header) (supported, other []string) {
 				scheme, token, _ := strings.Cut(part, " ")
 				token = strings.TrimSpace(token)
 				// SplitAuthenticate keeps auth-params that follow a token
-				// ("Payment <token>, realm=x") in the same part. Such a part
-				// is still the caller's credential: it is kept whole, so
-				// ParseCredential reports it unreadable and the 402 is
-				// returned instead of paying again.
+				// ("Payment <token>, realm=x") in the same part. The caller's
+				// credential is the token before the first comma, read as
+				// "Payment <token>" in every field, as before strict parsing.
 				token, _, _ = strings.Cut(token, ",")
 				token = strings.TrimSpace(token)
 				// A credential is the scheme and one token; this keeps
@@ -474,10 +473,11 @@ func paymentCredentialValues(header http.Header) (supported, other []string) {
 				if !strings.EqualFold(scheme, mpp.SchemePayment) || token == "" || strings.ContainsAny(token, " \t") {
 					continue
 				}
+				credential := scheme + " " + token
 				if isSupported {
-					supported = append(supported, part)
+					supported = append(supported, credential)
 				} else {
-					other = append(other, part)
+					other = append(other, credential)
 				}
 			}
 		}
