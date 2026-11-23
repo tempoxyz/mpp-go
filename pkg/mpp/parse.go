@@ -376,8 +376,12 @@ func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error)
 
 	reqB64 := c.RequestB64
 	if strict && reqB64 != "" {
-		if _, err := B64Decode(reqB64); err != nil {
+		request, err := B64Decode(reqB64)
+		if err != nil {
 			return "", fmt.Errorf("mpp: invalid challenge request: %w", err)
+		}
+		if request == nil {
+			return "", fmt.Errorf("mpp: invalid challenge request: must be a JSON object")
 		}
 	}
 	if reqB64 == "" {

@@ -152,6 +152,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// round, so its outcome is as unknown as one the Transport created.
 	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
 	callerPaid, callerCred := sent, sentCred
+	// A Payment credential the caller set in Authorization or
+	// Payment-Authorization that the client cannot parse may name a payment
+	// already made, so the client does not pay again for it.
+	callerUnreadable := sent && sentCred == nil &&
+		(mpp.FindPaymentAuthorization(baseRequest.Header.Get(mpp.HeaderAuthorization)) != "" ||
+			mpp.FindPaymentAuthorization(baseRequest.Header.Get(mpp.HeaderPaymentAuthorization)) != "")
 	if sentChallenge != nil && sentCred != nil {
 		sentCredential = newCredentialKey(sentCred.Challenge)
 	}
@@ -256,10 +262,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if sent && sentCred != nil && key == sentCredential && !invalidPayload {
 			cred = sentCred
 		}
-		if cred == nil && sent && sentCred != nil && isPushCredential(sentCred) {
+		if cred == nil && sent && ((sentCred != nil && isPushCredential(sentCred)) || (sentCred == nil && callerUnreadable)) {
 			// A push credential's payment (a hash credential's transfer or a
 			// zone credential's withdrawal) is already on chain: resending it
-			// is safe, but paying a new challenge would pay twice.
+			// is safe, but paying a new challenge would pay twice. A caller's
+			// credential the client cannot parse may be one too, so the
+			// caller reconciles it rather than the client paying again.
 			return resp, nil
 		}
 		drainAndClose(resp.Body)

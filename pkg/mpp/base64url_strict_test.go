@@ -2,6 +2,7 @@ package mpp
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,15 @@ func TestParseReceiptRejectsLineBreaksInBase64URL(t *testing.T) {
 func TestParseChallengeRejectsNullRequest(t *testing.T) {
 	_, err := ParseChallenge(`Payment id="0", realm="r", method="a", intent="a", request="bnVsbA"`)
 	require.Error(t, err)
+}
+
+func TestNullChallengeRequestIsRejectedEverywhere(t *testing.T) {
+	_, err := FormatChallenge(&Challenge{ID: "0", Realm: "r", Method: "a", Intent: "a", RequestB64: "bnVsbA"})
+	require.Error(t, err)
+
+	var c Challenge
+	require.Error(t, json.Unmarshal([]byte(`{"id":"0","realm":"r","method":"a","intent":"a","request":"bnVsbA"}`), &c))
+	require.Error(t, json.Unmarshal([]byte(`{"id":"0","realm":"r","method":"a","intent":"a","requestB64":"bnVsbA"}`), &c))
 }
 
 func TestParseChallengeKeepsNullOpaque(t *testing.T) {
