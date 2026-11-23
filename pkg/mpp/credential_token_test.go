@@ -7,6 +7,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseCredentialRejectsNonStringRequest(t *testing.T) {
+	token := base64.RawURLEncoding.EncodeToString([]byte(`{"challenge":{"id":"i","realm":"r","method":"a","intent":"a","request":{"amount":"1"}},"payload":{}}`))
+	_, err := ParseCredential("Payment " + token)
+	require.Error(t, err)
+}
+
 func TestParseCredentialRequiresSingleToken(t *testing.T) {
 	token := base64.RawURLEncoding.EncodeToString([]byte(`{"challenge":{"id":"i","realm":"r","method":"a","intent":"a","request":"e30"},"payload":{}}`))
 
@@ -25,6 +31,7 @@ func TestParseCredentialRequiresSingleToken(t *testing.T) {
 		"Basic xyz, Payment " + token,
 		"Payment " + token + " trailing",
 		"Payment " + token + ",",
+		",Payment " + token,
 		"Payment " + token[:4] + "\t" + token[4:],
 		"Payment",
 		"Payment ",

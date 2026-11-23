@@ -552,6 +552,10 @@ func ParseCredential(header string) (*Credential, error) {
 	if echo.Request == "" {
 		return nil, fmt.Errorf("mpp: credential challenge missing required field: request")
 	}
+	if _, ok := challengeMap["request"].(string); !ok {
+		// The echo carries the request as its base64url string, as mppx requires.
+		return nil, fmt.Errorf("mpp: credential challenge request must be a string")
+	}
 
 	if opaqueRaw, ok := challengeMap["opaque"]; ok {
 		switch opaque := opaqueRaw.(type) {
