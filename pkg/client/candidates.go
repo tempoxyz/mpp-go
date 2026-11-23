@@ -18,7 +18,10 @@ type ChallengeCandidate struct {
 // SelectChallengeCandidates returns the offered Challenges that methods can
 // pay, ranked like the HTTP Transport ranks them: by payment preference, then
 // in offer order. Expired Challenges, Challenges no method handles and
-// Challenges with q=0 are left out. Transports other than HTTP, such as MCP,
+// Challenges with q=0 are left out, and so are Challenges parsed with a legacy
+// \uXXXX escape in an ID-bound auth-param (mpp.Challenge.LegacyUnicodeEscape):
+// when only such Challenges were payable, it returns
+// mpp.ErrLegacyUnicodeEscapedChallenge. Transports other than HTTP, such as MCP,
 // use it to pick the Challenge to pay. Unknown preference keys and invalid
 // q-values return an error.
 func SelectChallengeCandidates(
@@ -30,7 +33,10 @@ func SelectChallengeCandidates(
 	if t.configErr != nil {
 		return nil, t.configErr
 	}
-	ranked := t.challengeCandidates(challenges, t.paymentPreferences, time.Now().UTC())
+	ranked, legacy := t.challengeCandidates(challenges, t.paymentPreferences, time.Now().UTC())
+	if len(ranked) == 0 && legacy {
+		return nil, mpp.ErrLegacyUnicodeEscapedChallenge
+	}
 	candidates := make([]ChallengeCandidate, len(ranked))
 	for i, candidate := range ranked {
 		candidates[i] = ChallengeCandidate{
