@@ -482,20 +482,25 @@ func ParseCredential(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 
-	header, err := FindPaymentAuthorizationStrict(header)
-	if err != nil {
-		return nil, err
-	}
+	// The value must be exactly "Payment" 1*SP token, as mppx requires: a
+	// comma-separated list of credentials or text after the token is
+	// rejected. Callers that accept a merged header extract the Payment
+	// credential first with FindPaymentAuthorizationStrict.
+	header = strings.Trim(header, " \t")
 	if header == "" {
 		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
+	// Errors never quote the value: without a space it is the token itself.
 	scheme, rest, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, SchemePayment) {
-		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
+		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
-	b64 := strings.TrimSpace(rest)
+	b64 := strings.TrimLeft(rest, " ")
+	if !isCredentialToken(b64) {
+		return nil, fmt.Errorf("mpp: invalid credential: expected Payment scheme followed by a single base64url token")
+	}
 	data, err := B64Decode(b64)
 	if err != nil {
 		return nil, fmt.Errorf("mpp: invalid credential encoding: %w", err)
@@ -554,6 +559,10 @@ func ParseCredential(header string) (*Credential, error) {
 	}
 	if echo.Request == "" {
 		return nil, fmt.Errorf("mpp: credential challenge missing required field: request")
+	}
+	if _, ok := challengeMap["request"].(string); !ok {
+		// The echo carries the request as its base64url string, as mppx requires.
+		return nil, fmt.Errorf("mpp: credential challenge request must be a string")
 	}
 
 	if opaqueRaw, ok := challengeMap["opaque"]; ok {
@@ -902,6 +911,14 @@ func receiptFields(r *Receipt) map[string]any {
 		data[k] = v
 	}
 	return data
+}
+
+// isCredentialToken reports whether value is one non-empty token: no
+// whitespace or comma, so a second credential or trailing text is rejected
+// here. Characters outside the base64url alphabet are left to B64Decode,
+// which reports them as a base64.CorruptInputError.
+func isCredentialToken(value string) bool {
+	return value != "" && !strings.ContainsAny(value, " \t\r\n,")
 }
 
 // b64EncodeAny encodes a value as compact JSON then base64url without padding.

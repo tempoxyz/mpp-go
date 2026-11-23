@@ -741,14 +741,14 @@ func TestParseCredential(t *testing.T) {
 			want:   headerCredential,
 		},
 		{
-			name:   "merged authorization header",
-			header: `Digest realm="alpha,beta", nonce="123", ` + credential.toAuthorization(),
-			want:   credential,
+			name:    "merged authorization header",
+			header:  `Digest realm="alpha,beta", nonce="123", ` + credential.toAuthorization(),
+			wantErr: `expected Payment scheme`,
 		},
 		{
 			name:    "multiple payment credentials",
 			header:  credential.toAuthorization() + ", " + credential.toAuthorization(),
-			wantErr: `multiple Payment credentials`,
+			wantErr: `single base64url token`,
 		},
 		{
 			name:    "missing payment scheme",
