@@ -27,7 +27,7 @@ func TestB64DecodeRejectsCharactersOutsideBase64URL(t *testing.T) {
 }
 
 func TestB64DecodeRejectsNonObjectJSON(t *testing.T) {
-	for _, value := range []string{"null", "[]", "1", `"s"`, "true"} {
+	for _, value := range []string{"[]", "1", `"s"`, "true"} {
 		_, err := B64Decode(base64.RawURLEncoding.EncodeToString([]byte(value)))
 		require.Error(t, err, value)
 	}
@@ -45,6 +45,13 @@ func TestParseReceiptRejectsLineBreaksInBase64URL(t *testing.T) {
 func TestParseChallengeRejectsNullRequest(t *testing.T) {
 	_, err := ParseChallenge(`Payment id="0", realm="r", method="a", intent="a", request="bnVsbA"`)
 	require.Error(t, err)
+}
+
+func TestParseChallengeKeepsNullOpaque(t *testing.T) {
+	// Only the request must be an object: an opaque of null still parses, as
+	// it did before, and as mppx, which does not decode opaque.
+	_, err := ParseChallenge(`Payment id="0", realm="r", method="a", intent="a", request="e30", opaque="bnVsbA"`)
+	require.NoError(t, err)
 }
 
 func TestParseChallengeRejectsLineBreaksInRequest(t *testing.T) {

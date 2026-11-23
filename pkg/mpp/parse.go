@@ -267,6 +267,10 @@ func ParseChallenge(header string) (*Challenge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mpp: invalid request field: %w", err)
 	}
+	if request == nil {
+		// mppx requires the request to be a JSON object; null is not one.
+		return nil, fmt.Errorf("mpp: invalid request field: must be a JSON object")
+	}
 
 	expires := params["expires"]
 	digest := params["digest"]
@@ -912,10 +916,10 @@ func isMethodName(value string) bool {
 	return value != ""
 }
 
-// B64Decode decodes a base64url (no padding) string holding a JSON object into
-// a map. It rejects any character outside the base64url alphabet
-// ([A-Za-z0-9_-]), including the CR and LF that encoding/base64 skips, and JSON
-// other than an object (such as null), as mppx does.
+// B64Decode decodes a base64url (no padding) string into a map. It rejects
+// any character outside the base64url alphabet ([A-Za-z0-9_-]), including the
+// CR and LF that encoding/base64 skips, as mppx does. JSON null decodes to a
+// nil map.
 //
 // Numbers decode as json.Number rather than float64. The challenge ID is an
 // HMAC over the re-encoded request, so a decode that cannot reproduce the
@@ -933,9 +937,6 @@ func B64Decode(s string) (map[string]any, error) {
 	m, err := decodeJSONMap(raw)
 	if err != nil {
 		return nil, fmt.Errorf("json decode: %w", err)
-	}
-	if m == nil {
-		return nil, fmt.Errorf("json decode: value must be an object")
 	}
 	return m, nil
 }
