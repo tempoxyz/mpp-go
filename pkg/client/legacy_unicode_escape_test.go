@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -115,4 +116,29 @@ func TestSelectChallengeCandidatesRefusesLegacyUnicodeEscapedChallenge(t *testin
 	require.NoError(t, err)
 	require.Len(t, candidates, 1)
 	assert.Equal(t, "plain", candidates[0].Challenge.ID)
+}
+
+// TestTransportReportsHookRejectionBesideLegacyOffer keeps the ordinary
+// no-method error when the OrderChallenges hook, not the legacy guard, left
+// nothing to pay.
+func TestTransportReportsHookRejectionBesideLegacyOffer(t *testing.T) {
+	var valid *mpp.Challenge
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("WWW-Authenticate", legacyChallengeHeader("legacy", `merchant\u2014api.example.com`))
+		w.Header().Add("WWW-Authenticate", mpptest.FormatChallenge(valid))
+		w.WriteHeader(http.StatusPaymentRequired)
+	}))
+	defer srv.Close()
+	valid = challengeForURL(t, srv.URL, "tempo", nil)
+
+	method := &recordingMethod{}
+	rejectAll := WithOrderChallenges(func(context.Context, []ChallengeCandidate) ([]ChallengeCandidate, error) {
+		return nil, nil
+	})
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := newTestTransport([]Method{method}, nil, rejectAll).RoundTrip(req)
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrNoMethodFound)
+	assert.NotErrorIs(t, err, mpp.ErrLegacyUnicodeEscapedChallenge)
+	assert.Empty(t, method.ids)
 }

@@ -213,6 +213,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		challenges, errs := t.parseChallenges(resp.Header)
 		_ = errs // Non-Payment or malformed headers are silently skipped.
 		candidates, legacy := t.challengeCandidates(challenges, preferences, time.Now().UTC())
+		// Report a legacy-escaped offer only when it left nothing payable,
+		// not when the OrderChallenges hook removed the payable offers.
+		legacy = legacy && len(candidates) == 0
 		if len(candidates) > 0 && t.orderChallenges != nil {
 			candidates, err = t.orderCandidates(baseRequest.Context(), candidates)
 			if err != nil {
