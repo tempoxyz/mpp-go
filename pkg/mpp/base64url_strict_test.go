@@ -24,7 +24,19 @@ func TestB64DecodeRejectsCharactersOutsideBase64URL(t *testing.T) {
 	} {
 		_, err := B64Decode(input)
 		require.Error(t, err, "%q", input)
+		var corrupt base64.CorruptInputError
+		require.ErrorAs(t, err, &corrupt, "%q", input)
 	}
+}
+
+func TestParseFunctionsWrapCorruptInputError(t *testing.T) {
+	var corrupt base64.CorruptInputError
+	_, err := ParseChallenge(`Payment id="0", realm="r", method="a", intent="a", request="+e30"`)
+	require.ErrorAs(t, err, &corrupt)
+	_, err = ParseCredential("Payment +e30")
+	require.ErrorAs(t, err, &corrupt)
+	_, err = ParseReceipt("+e30")
+	require.ErrorAs(t, err, &corrupt)
 }
 
 func TestB64DecodeRejectsNonObjectJSON(t *testing.T) {

@@ -150,14 +150,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var sentCredential credentialKey
 	// A credential the caller set on the request is sent with the first
 	// round, so its outcome is as unknown as one the Transport created.
-	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
-	callerPaid, callerCred := sent, sentCred
 	// A Payment credential the caller set in Authorization or
-	// Payment-Authorization that the client cannot parse may name a payment
-	// already made, so the client does not pay again for it.
-	callerUnreadable := sent && sentCred == nil &&
-		(mpp.FindPaymentAuthorization(baseRequest.Header.Get(mpp.HeaderAuthorization)) != "" ||
-			mpp.FindPaymentAuthorization(baseRequest.Header.Get(mpp.HeaderPaymentAuthorization)) != "")
+	// Payment-Authorization that the client cannot parse (callerUnreadable)
+	// may name a payment already made, so the client does not pay again for
+	// it.
+	sent, callerUnreadable, sentChallenge, sentCred := callerCredential(baseRequest.Header)
+	callerPaid, callerCred := sent, sentCred
 	if sentChallenge != nil && sentCred != nil {
 		sentCredential = newCredentialKey(sentCred.Challenge)
 	}
@@ -262,7 +260,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if sent && sentCred != nil && key == sentCredential && !invalidPayload {
 			cred = sentCred
 		}
-		if cred == nil && sent && ((sentCred != nil && isPushCredential(sentCred)) || (sentCred == nil && callerUnreadable)) {
+		if cred == nil && sent && ((sentCred != nil && isPushCredential(sentCred)) || callerUnreadable) {
 			// A push credential's payment (a hash credential's transfer or a
 			// zone credential's withdrawal) is already on chain: resending it
 			// is safe, but paying a new challenge would pay twice. A caller's
@@ -357,12 +355,42 @@ func (e *PaymentOutcomeUnknownError) Timeout() bool {
 }
 
 // callerCredential reports whether header carries a Payment credential the
-// caller set, in any field, and parses it when it can.
-func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential) {
-	value, ok := paymentCredentialValue(header)
-	if !ok {
-		return false, nil, nil
+// caller set, and parses it when it can. Authorization and
+// Payment-Authorization, the fields servers read credentials from, come first,
+// and every value of both is checked: of those that parse, a push credential
+// is preferred, since its payment is already on chain. unreadable reports a
+// Payment credential in either field that does not parse: it may name a
+// payment already made. Only when neither field holds a Payment credential is
+// another field used (a challenge may name a custom credential field), and a
+// Payment-shaped value there that does not parse is not unreadable, so
+// unrelated metadata such as "X-Status: Payment pending" cannot block payment.
+func callerCredential(header http.Header) (sent, unreadable bool, challenge *mpp.Challenge, cred *mpp.Credential) {
+	supported, other := paymentCredentialValues(header)
+	if len(supported) > 0 {
+		for _, value := range supported {
+			parsed, err := parseCallerCredential(value)
+			if err != nil {
+				unreadable = true
+				continue
+			}
+			if cred == nil || (!isPushCredential(cred) && isPushCredential(parsed)) {
+				cred = parsed
+			}
+		}
+		return true, unreadable, challengeFromEcho(cred), cred
 	}
+	if len(other) == 0 {
+		return false, false, nil, nil
+	}
+	cred, err := parseCallerCredential(other[0])
+	if err != nil {
+		return true, false, nil, nil
+	}
+	return true, false, challengeFromEcho(cred), cred
+}
+
+// parseCallerCredential parses a Payment credential the caller set.
+func parseCallerCredential(value string) (*mpp.Credential, error) {
 	cred, err := mpp.ParseCredential(value)
 	if errors.Is(err, mpp.ErrUnsupportedCredentialHeader) {
 		// The caller's own credential echoes a header a received challenge
@@ -370,11 +398,16 @@ func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential
 		// credential's is already on chain), so read it without that header.
 		cred, err = parseCredentialWithoutHeader(value)
 	}
-	if err != nil {
-		return true, nil, nil
+	return cred, err
+}
+
+// challengeFromEcho returns the Challenge cred echoes, or nil for a nil cred.
+func challengeFromEcho(cred *mpp.Credential) *mpp.Challenge {
+	if cred == nil {
+		return nil
 	}
 	echo := cred.Challenge
-	return true, &mpp.Challenge{
+	return &mpp.Challenge{
 		ID:         echo.ID,
 		Method:     echo.Method,
 		Intent:     echo.Intent,
@@ -384,7 +417,7 @@ func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential
 		Expires:    echo.Expires,
 		Opaque:     echo.Opaque,
 		Header:     echo.Header,
-	}, cred
+	}
 }
 
 // parseCredentialWithoutHeader parses a Payment credential after removing the
@@ -407,11 +440,13 @@ func parseCredentialWithoutHeader(value string) (*mpp.Credential, error) {
 	return mpp.ParseCredential(mpp.SchemePayment + " " + base64.RawURLEncoding.EncodeToString(encoded))
 }
 
-// paymentCredentialValue returns the first header element, in any field
-// regardless of its name's case, that uses the Payment auth scheme. A
-// challenge may name a custom credential field, so every field is checked.
-func paymentCredentialValue(header http.Header) (string, bool) {
-	for _, values := range header {
+// paymentCredentialValues returns every header element that uses the Payment
+// auth scheme: supported holds those in Authorization and
+// Payment-Authorization (field names in any case), other those in every other
+// field, since a challenge may name a custom credential field.
+func paymentCredentialValues(header http.Header) (supported, other []string) {
+	for name, values := range header {
+		isSupported := strings.EqualFold(name, mpp.HeaderAuthorization) || strings.EqualFold(name, mpp.HeaderPaymentAuthorization)
 		for _, value := range values {
 			for _, part := range strings.Split(value, ",") {
 				part = strings.TrimSpace(part)
@@ -419,13 +454,18 @@ func paymentCredentialValue(header http.Header) (string, bool) {
 				token = strings.TrimSpace(token)
 				// A credential is the scheme and one token; this keeps
 				// prose such as "payment received" in other fields out.
-				if strings.EqualFold(scheme, mpp.SchemePayment) && token != "" && !strings.ContainsAny(token, " \t") {
-					return part, true
+				if !strings.EqualFold(scheme, mpp.SchemePayment) || token == "" || strings.ContainsAny(token, " \t") {
+					continue
+				}
+				if isSupported {
+					supported = append(supported, part)
+				} else {
+					other = append(other, part)
 				}
 			}
 		}
 	}
-	return "", false
+	return supported, other
 }
 
 // closeRequestBody closes req.Body, as http.RoundTripper requires even when

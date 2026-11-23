@@ -932,7 +932,9 @@ func isMethodName(value string) bool {
 // challenge the server itself issued fail to verify.
 func B64Decode(s string) (map[string]any, error) {
 	if i := invalidBase64URLIndex(s); i >= 0 {
-		return nil, fmt.Errorf("base64 decode: invalid base64url character at input byte %d", i)
+		// Wrap the error encoding/base64 itself reports, so callers can
+		// still match it with errors.As.
+		return nil, fmt.Errorf("base64 decode: %w", base64.CorruptInputError(i))
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
