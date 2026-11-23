@@ -369,6 +369,7 @@ func TestParseChallengeFlagsLegacyUnicodeEscapeInBoundAuthParams(t *testing.T) {
 		name        string
 		realm       string
 		description string
+		extra       string
 		want        bool
 	}{
 		{name: "latin-1 escape in realm", realm: `caf\u00e9.example.com`, want: true},
@@ -381,6 +382,8 @@ func TestParseChallengeFlagsLegacyUnicodeEscapeInBoundAuthParams(t *testing.T) {
 		{name: "non-hex escape in realm", realm: `api\u12g4.example.com`, want: false},
 		{name: "escape in description only", realm: "api.example.com", description: `Payment \u2014 coffee`, want: false},
 		{name: "no escape", realm: "api.example.com", want: false},
+		{name: "escape in unknown extension only", realm: "api.example.com", extra: `, x-display="\u2014"`, want: false},
+		{name: "escape in digest", realm: "api.example.com", extra: `, digest="sha-256=\u00e9"`, want: true},
 	}
 
 	for _, tt := range tests {
@@ -390,6 +393,7 @@ func TestParseChallengeFlagsLegacyUnicodeEscapeInBoundAuthParams(t *testing.T) {
 			if tt.description != "" {
 				header += `, description="` + tt.description + `"`
 			}
+			header += tt.extra
 			got, err := ParseChallenge(header)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got.LegacyUnicodeEscape())

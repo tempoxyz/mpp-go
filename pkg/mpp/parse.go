@@ -21,9 +21,24 @@ const maxHeaderPayload = 16 * 1024
 // encoding. This matches mppx.
 const maxAuthorizationPayload = 64 * 1024
 
+// boundAuthParams are the auth-params bound into the challenge ID (the id
+// itself and the inputs of its HMAC). A legacy \uXXXX escape in one of them
+// changes what the client echoes, so the server rejects the Credential.
+var boundAuthParams = map[string]bool{
+	"id":      true,
+	"realm":   true,
+	"method":  true,
+	"intent":  true,
+	"request": true,
+	"expires": true,
+	"digest":  true,
+	"opaque":  true,
+	"header":  true,
+}
+
 // parseAuthParams parses a comma-separated list of key=value or key="value"
 // pairs from an auth-param list (RFC 9110 §11.2). legacy reports whether the
-// raw quoted value of an auth-param other than description held a legacy
+// raw quoted value of an auth-param bound into the challenge ID held a legacy
 // \uXXXX escape (see ErrLegacyUnicodeEscapedChallenge).
 func parseAuthParams(s string) (params map[string]string, legacy bool, err error) {
 	params = make(map[string]string)
@@ -66,9 +81,10 @@ func parseAuthParams(s string) (params map[string]string, legacy bool, err error
 			return nil, false, fmt.Errorf("mpp: duplicate auth-param %q", key)
 		}
 		params[name] = value
-		// description is not bound into the challenge ID, so its legacy
-		// escapes only change how it displays.
-		if escaped && name != "description" {
+		// Only auth-params bound into the challenge ID matter: description
+		// and unknown extensions are not bound, so their legacy escapes
+		// only change how they display.
+		if escaped && boundAuthParams[name] {
 			legacy = true
 		}
 		i = next

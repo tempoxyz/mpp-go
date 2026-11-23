@@ -82,7 +82,7 @@ func TestTransportPaysChallengeWithPlainQuotedPairs(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 					return
 				}
-				w.Header().Set("WWW-Authenticate", legacyChallengeHeader("plain", realm)+`, description="Payment \u2014 coffee"`)
+				w.Header().Set("WWW-Authenticate", legacyChallengeHeader("plain", realm)+`, description="Payment \u2014 coffee", x-display="\u2014"`)
 				w.WriteHeader(http.StatusPaymentRequired)
 			}))
 			defer srv.Close()

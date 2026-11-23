@@ -35,12 +35,12 @@ type Challenge struct {
 }
 
 // LegacyUnicodeEscape reports whether c was parsed from a header in which an
-// auth-param bound into the challenge ID (every one but description) held a
-// \uXXXX escape. Servers on older SDK releases wrote characters above U+00FF
-// that way; ParseChallenge reads it as an RFC 9110 quoted-pair ("\u00e9" reads
-// "u00e9"), so the parsed value differs from the one the ID binds and the
-// server would reject a Credential for c. Clients refuse to pay such a
-// challenge with ErrLegacyUnicodeEscapedChallenge.
+// auth-param bound into the challenge ID (not description or an unknown
+// extension) held a \uXXXX escape. Servers on older SDK releases wrote
+// characters above U+00FF that way; ParseChallenge reads it as an RFC 9110
+// quoted-pair ("\u00e9" reads "u00e9"), so the parsed value differs from the
+// one the ID binds and the server would reject a Credential for c. Clients
+// refuse to pay such a challenge with ErrLegacyUnicodeEscapedChallenge.
 func (c *Challenge) LegacyUnicodeEscape() bool {
 	return c != nil && c.legacyUnicodeEscape
 }
