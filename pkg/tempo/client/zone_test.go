@@ -60,12 +60,18 @@ type zoneTestRPC struct {
 	status   any
 	noStatus bool
 	// event, when set, spoils the WithdrawalRequested event of a successful
-	// withdrawal's receipt: "none" leaves it out, "garbled" makes its data
+	// withdrawal's receipt: "none" leaves it out, as a Zone RPC that redacts
+	// other contracts' logs does, "garbled" makes its data
 	// undecodable, and "sender", "token", "to", "amount" or "memo" changes
 	// that field; "hash" gives the receipt another transaction hash.
 	event string
 	// answerHash, when set, is the hash a successful send answers with.
 	answerHash string
+	// lastFallbackNonce is the outbox's lastFallbackNonce after block 0xa,
+	// which holds every withdrawal: 1 unless set. It is 0 before.
+	lastFallbackNonce uint64
+	// failNonceReads fails every lastFallbackNonce read.
+	failNonceReads bool
 	// onNonce, when set, runs at the nonce lookup.
 	onNonce func()
 	// trackNonce has the Zone answer the nonce lookup with the number of
@@ -166,6 +172,19 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 		if r.mode == "prepare" {
 			return nil, errors.New("connection lost")
 		}
+		call := params[0].(map[string]any)
+		if call["data"] == hexutil.Encode(zone.OutboxABI.Methods["lastFallbackNonce"].ID) {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.failNonceReads {
+				return nil, errors.New("read failed")
+			}
+			nonce := uint64(0)
+			if params[1] == "0xa" {
+				nonce = max(r.lastFallbackNonce, 1)
+			}
+			return &temporpc.JSONRPCResponse{Result: fmt.Sprintf("0x%064x", nonce)}, nil
+		}
 		return &temporpc.JSONRPCResponse{Result: fmt.Sprintf("0x%064x", zoneTestFee)}, nil
 	case "eth_gasPrice":
 		return &temporpc.JSONRPCResponse{Result: "0x1"}, nil
@@ -254,6 +273,7 @@ func (r *zoneTestRPC) receipt(hash string) map[string]any {
 	}
 	receipt := map[string]any{
 		"transactionHash": hash,
+		"blockNumber":     "0xa",
 		"status":          "0x1",
 		"logs":            logs,
 	}
@@ -973,7 +993,7 @@ func TestZoneValidBefore(t *testing.T) {
 // withdrawing again.
 func TestZoneDoesNotWithdrawAgainAfterReceiptWithoutMatchingEvent(t *testing.T) {
 	t.Parallel()
-	for _, event := range []string{"none", "garbled", "sender", "token", "to", "amount", "memo", "hash"} {
+	for _, event := range []string{"garbled", "sender", "token", "to", "amount", "memo", "hash"} {
 		t.Run(event, func(t *testing.T) {
 			t.Parallel()
 			zoneRPC := &zoneTestRPC{mode: "ok", event: event}
@@ -1574,6 +1594,7 @@ func TestZoneLateCredentialIsReusedOnlyForItsChallenge(t *testing.T) {
 	require.ErrorIs(t, err, paymentctx.ErrSettlementPending)
 	assert.Equal(t, first.ID, pending.ChallengeID)
 	assert.Equal(t, late.Payload["senderTag"], pending.SenderTag)
+	assert.Equal(t, []string{pending.SenderTag}, pending.SenderTags)
 	assert.Contains(t, pending.Error(), pending.SenderTag)
 	assert.Equal(t, calls, zoneRPC.callCount())
 
@@ -1791,4 +1812,120 @@ func TestZoneReceiptPanicKeepsKnownWithdrawalRecoverable(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, credential)
 	assert.Len(t, rpc.sent, 1)
+}
+
+// A Zone RPC that redacts other contracts' logs leaves the outbox's
+// WithdrawalRequested event out of the payer's receipt: the method derives the
+// sender tag from the outbox's lastFallbackNonce at the withdrawal's block and
+// the one before, and settles.
+func TestZonePaysWhenZoneRPCRedactsOutboxEvents(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	credential, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.NoError(t, err)
+
+	require.Len(t, zoneRPC.sent, 1)
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	tag := zone.SenderTag(signer.Address(), crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0])), 1).Hex()
+	assert.Equal(t, tag, credential.Payload["senderTag"])
+	assert.Equal(t, zoneTestSettlement, credential.Payload["hash"])
+	assert.Equal(t, tag, tempoRPC.topics[2])
+}
+
+// A sender tag read that fails after the withdrawal was sent fails the call
+// without withdrawing again: a retry of the challenge derives the tag again
+// and settles the one withdrawal.
+func TestZoneRetriesFailedSenderTagReadWithoutWithdrawingAgain(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none", failNonceReads: true}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.ErrorContains(t, err, "sender tag could not be read")
+	var unknown *ZoneWithdrawalUnknownError
+	assert.NotErrorAs(t, err, &unknown)
+	require.Len(t, zoneRPC.sent, 1)
+	assert.Contains(t, err.Error(), crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0])).Hex())
+
+	zoneRPC.mu.Lock()
+	zoneRPC.failNonceReads = false
+	zoneRPC.mu.Unlock()
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, "zone", credential.Payload["type"])
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// Candidate sender tags derived once are kept for the withdrawal, so a retry
+// after the settlement wait gave up does not read the Zone's state at the
+// withdrawal's block again, which a node that prunes old state may no longer
+// hold.
+func TestZoneKeepsDerivedSenderTagsForRetries(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.failNonceReads = true
+	zoneRPC.mu.Unlock()
+	tempoRPC.settled = true
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, pending.SenderTag, credential.Payload["senderTag"])
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// A withdrawal whose tag the Zone RPC hid in a block that added several
+// withdrawals waits for any of the candidate tags, and a settlement wait that
+// gives up reports them all, with no single SenderTag.
+func TestZoneSettlementPendingErrorCarriesSenderTags(t *testing.T) {
+	t.Parallel()
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+
+	t.Run("known", func(t *testing.T) {
+		t.Parallel()
+		zoneRPC := &zoneTestRPC{mode: "ok"}
+		method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+		tempoRPC.settled = false
+		_, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+		var pending *ZoneSettlementPendingError
+		require.ErrorAs(t, err, &pending)
+		tag := zone.SenderTag(signer.Address(), crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0])), 1).Hex()
+		assert.Equal(t, []string{tag}, pending.SenderTags)
+		assert.Equal(t, tag, pending.SenderTag)
+		assert.Contains(t, pending.Error(), "withdrawal "+tag+" for challenge")
+	})
+
+	t.Run("candidates", func(t *testing.T) {
+		t.Parallel()
+		zoneRPC := &zoneTestRPC{mode: "ok", event: "none", lastFallbackNonce: 2}
+		method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+		tempoRPC.settled = false
+		_, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+		var pending *ZoneSettlementPendingError
+		require.ErrorAs(t, err, &pending)
+		txHash := crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0]))
+		tags := []string{zone.SenderTag(signer.Address(), txHash, 1).Hex(), zone.SenderTag(signer.Address(), txHash, 2).Hex()}
+		assert.Equal(t, tags, pending.SenderTags)
+		assert.Empty(t, pending.SenderTag)
+		assert.Contains(t, pending.Error(), "withdrawal with sender tag "+tags[0]+" or "+tags[1]+" for challenge")
+		// The settlement filter asks for either tag.
+		assert.Equal(t, tags, tempoRPC.topics[2])
+	})
+}
+
+func TestZoneSettlementPendingErrorWithSingleSenderTag(t *testing.T) {
+	t.Parallel()
+	err := &ZoneSettlementPendingError{ChallengeID: "id", SenderTag: "0x01", ZoneID: 3}
+	assert.Contains(t, err.Error(), "Zone 3 withdrawal 0x01 for challenge")
 }
