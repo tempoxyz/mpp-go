@@ -1725,6 +1725,31 @@ func TestZoneRetriesFailedSenderTagReadWithoutWithdrawingAgain(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 1)
 }
 
+// Candidate sender tags derived once are kept for the withdrawal, so a retry
+// after the settlement wait gave up does not read the Zone's state at the
+// withdrawal's block again, which a node that prunes old state may no longer
+// hold.
+func TestZoneKeepsDerivedSenderTagsForRetries(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+
+	zoneRPC.mu.Lock()
+	zoneRPC.failNonceReads = true
+	zoneRPC.mu.Unlock()
+	tempoRPC.settled = true
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, pending.SenderTag, credential.Payload["senderTag"])
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
 // A withdrawal whose tag the Zone RPC hid in a block that added several
 // withdrawals waits for any of the candidate tags, and a settlement wait that
 // gives up reports them all, with no single SenderTag.

@@ -420,9 +420,12 @@ func SenderTagCandidates(ctx context.Context, rpc Requester, blockNumber uint64,
 	if after-before > maxSenderTagCandidates {
 		return nil, fmt.Errorf("zone withdrawal transaction %s has %d candidate sender tags, more than %d", transactionHash.Hex(), after-before, maxSenderTagCandidates)
 	}
-	tags := make([]common.Hash, 0, after-before)
-	for nonce := before + 1; nonce <= after; nonce++ {
-		tags = append(tags, SenderTag(sender, transactionHash, nonce))
+	// Counting up to the range, rather than up to after, keeps an after of
+	// the uint64 maximum from wrapping the nonce to 0 and looping forever.
+	count := after - before
+	tags := make([]common.Hash, 0, count)
+	for i := uint64(1); i <= count; i++ {
+		tags = append(tags, SenderTag(sender, transactionHash, before+i))
 	}
 	return tags, nil
 }

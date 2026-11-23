@@ -2,6 +2,7 @@ package zone
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -358,6 +359,14 @@ func TestSenderTagCandidates(t *testing.T) {
 		t.Parallel()
 		_, err := SenderTagCandidates(context.Background(), &zoneCallRPC{before: 0, after: 1 << 63}, 10, sender, hash)
 		assert.ErrorContains(t, err, "more than 64")
+	})
+
+	t.Run("derives the tags of a range ending at the largest nonce", func(t *testing.T) {
+		t.Parallel()
+		rpc := &zoneCallRPC{before: math.MaxUint64 - 2, after: math.MaxUint64}
+		tags, err := SenderTagCandidates(context.Background(), rpc, 10, sender, hash)
+		require.NoError(t, err)
+		assert.Equal(t, []common.Hash{SenderTag(sender, hash, math.MaxUint64-1), SenderTag(sender, hash, math.MaxUint64)}, tags)
 	})
 
 	t.Run("reports a failed read", func(t *testing.T) {

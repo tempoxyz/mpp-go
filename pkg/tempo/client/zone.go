@@ -773,15 +773,24 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	if pending.err != nil {
 		return nil, pending.err
 	}
-	// Derived on every attempt when the Zone RPC hid the tag, so a failed
-	// read on the Zone is retried without withdrawing again: the withdrawal
-	// stays pending for the challenge.
+	// Derived when the Zone RPC hid the tag, so a failed read on the Zone is
+	// retried without withdrawing again: the withdrawal stays pending for the
+	// challenge. Candidates once derived are kept, so a later attempt does
+	// not need the Zone's state at the withdrawal's block again.
+	m.zoneMu.Lock()
 	senderTags := pending.receipt.senderTags
+	m.zoneMu.Unlock()
 	if len(senderTags) == 0 {
 		senderTags, err = zone.SenderTagCandidates(ctx, m.zone.rpc, pending.receipt.blockNumber, pending.receipt.sender, common.HexToHash(pending.hash))
 		if err != nil {
 			return nil, fmt.Errorf("tempo client: Zone withdrawal transaction %s was sent, but its sender tag could not be read from the Zone; retry the challenge to resume without withdrawing again: %w", pending.hash, err)
 		}
+		m.zoneMu.Lock()
+		if len(pending.receipt.senderTags) == 0 {
+			pending.receipt.senderTags = senderTags
+		}
+		senderTags = pending.receipt.senderTags
+		m.zoneMu.Unlock()
 	}
 
 	recipient := common.HexToAddress(request.Recipient)
