@@ -425,11 +425,12 @@ func TestLegacyUnicodeEscapeIsNotPartOfTheWireForm(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, string(plainJSON), string(legacyJSON))
 
-	legacyHeader, err := FormatChallenge(legacy)
+	// Formatting fails closed: the header it would write reparses as an
+	// ordinary offer.
+	_, err = FormatChallenge(legacy)
+	require.ErrorIs(t, err, ErrLegacyUnicodeEscapedChallenge)
+	_, err = FormatChallenge(plain)
 	require.NoError(t, err)
-	plainHeader, err := FormatChallenge(plain)
-	require.NoError(t, err)
-	assert.Equal(t, plainHeader, legacyHeader)
 	assert.Equal(t, plain.ToEcho(), legacy.ToEcho())
 	assert.False(t, (*Challenge)(nil).LegacyUnicodeEscape())
 }

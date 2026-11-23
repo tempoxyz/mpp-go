@@ -338,10 +338,16 @@ func ParseChallenge(header string) (*Challenge, error) {
 // auth-params (id, realm, method, intent, request), which would otherwise be
 // omitted and yield a challenge ParseChallenge rejects, a method that is not a valid method name
 // (lowercase ASCII letters), a RequestB64 that is not base64url-encoded JSON,
-// and a header over the size limit.
+// a header over the size limit, and a challenge parsed with a legacy \uXXXX
+// escape in an ID-bound auth-param (ErrLegacyUnicodeEscapedChallenge).
 func FormatChallenge(c *Challenge) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("mpp: challenge is nil")
+	}
+	// Formatting would drop the escape and yield a header that reparses as
+	// an ordinary, payable offer whose ID the server still rejects.
+	if c.legacyUnicodeEscape {
+		return "", ErrLegacyUnicodeEscapedChallenge
 	}
 	return formatAuthenticateStrict(c, c.Realm)
 }
