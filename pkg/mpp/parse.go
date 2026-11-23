@@ -474,10 +474,11 @@ func ParseCredential(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 
-	header, err := FindPaymentAuthorizationStrict(header)
-	if err != nil {
-		return nil, err
-	}
+	// The value must be exactly "Payment" 1*SP token, as mppx requires: a
+	// comma-separated list of credentials or text after the token is
+	// rejected. Callers that accept a merged header extract the Payment
+	// credential first with FindPaymentAuthorizationStrict.
+	header = strings.Trim(header, " \t")
 	if header == "" {
 		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
@@ -487,7 +488,10 @@ func ParseCredential(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
 	}
 
-	b64 := strings.TrimSpace(rest)
+	b64 := strings.TrimLeft(rest, " ")
+	if !isCredentialToken(b64) {
+		return nil, fmt.Errorf("mpp: invalid credential: expected Payment scheme followed by a single base64url token")
+	}
 	data, err := B64Decode(b64)
 	if err != nil {
 		return nil, fmt.Errorf("mpp: invalid credential encoding: %w", err)
@@ -894,6 +898,24 @@ func receiptFields(r *Receipt) map[string]any {
 		data[k] = v
 	}
 	return data
+}
+
+// isCredentialToken reports whether value is a non-empty run of base64url
+// characters, optionally followed by "=" padding, which B64Decode then
+// rejects with its own error.
+func isCredentialToken(value string) bool {
+	body := strings.TrimRight(value, "=")
+	if body == "" {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // b64EncodeAny encodes a value as compact JSON then base64url without padding.
