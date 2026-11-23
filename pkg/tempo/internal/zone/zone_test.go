@@ -132,8 +132,9 @@ func TestFindWithdrawalAndProcessedEvent(t *testing.T) {
 }
 
 type logsRPC struct {
-	blocks []string
-	logs   func(filter map[string]any) []any
+	blocks  []string
+	logs    func(filter map[string]any) []any
+	logsErr func(filter map[string]any) error
 }
 
 func (r *logsRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
@@ -145,6 +146,11 @@ func (r *logsRPC) SendRequest(_ context.Context, method string, params ...interf
 		}
 		return &temporpc.JSONRPCResponse{Result: block}, nil
 	case "eth_getLogs":
+		if r.logsErr != nil {
+			if err := r.logsErr(params[0].(map[string]any)); err != nil {
+				return nil, err
+			}
+		}
 		return &temporpc.JSONRPCResponse{Result: r.logs(params[0].(map[string]any))}, nil
 	}
 	return &temporpc.JSONRPCResponse{Error: &temporpc.JSONRPCError{Code: -1, Message: method}}, nil
@@ -307,4 +313,36 @@ func TestIsPortalAddress(t *testing.T) {
 	} {
 		assert.Equal(t, want, IsPortalAddress(common.HexToAddress(address)), address)
 	}
+}
+
+func TestSettlementScanRetainsProgressAfterRPCTimeout(t *testing.T) {
+	t.Parallel()
+	var next uint64 = 2800
+	rpc := &logsRPC{blocks: []string{hexutil.EncodeUint64(30_000)}, logs: func(map[string]any) []any { return nil }}
+	rpc.logsErr = func(filter map[string]any) error {
+		if hexutil.MustDecodeUint64(filter["fromBlock"].(string)) == 10001 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	_, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, uint64(10001), next)
+	rpc.logsErr = nil
+	rpc.logs = func(filter map[string]any) []any {
+		assert.Equal(t, "0x2711", filter["fromBlock"])
+		return []any{map[string]any{"transactionHash": "0x" + repeat("ab", 32)}}
+	}
+	settlement, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.NoError(t, err)
+	assert.NotEmpty(t, settlement.Hash)
+}
+
+func TestSettlementScanDoesNotCheckpointNearHeadEmptyLogs(t *testing.T) {
+	t.Parallel()
+	var next uint64 = 2800
+	rpc := &logsRPC{blocks: []string{hexutil.EncodeUint64(10001)}, logs: func(map[string]any) []any { return nil }}
+	_, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.Error(t, err)
+	assert.Equal(t, uint64(2800), next)
 }

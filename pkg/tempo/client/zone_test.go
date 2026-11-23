@@ -1439,13 +1439,12 @@ func TestZoneOwnChallengeFromOtherKnownOriginFailsClosed(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 1)
 }
 
-// Five minutes after the first challenge expires, no server accepts its
-// credential: a retry of that challenge still fails closed and sends
-// nothing, but the withdrawal no longer pays other challenges, so a new
-// challenge for its terms is a new payment and the record is dropped.
+// Expiry does not establish whether funds moved: both the original
+// challenge and a fresh challenge for its terms must fail closed.
 func TestZoneWithdrawalPastRedemptionWindowFailsClosed(t *testing.T) {
 	t.Parallel()
-	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	method, zoneRPC, tempoRPC, first := zonePendingFirst(t, "https://api.example.com")
+	tempoRPC.settled = false
 	expires, err := mpp.ParseExpires(first.Expires)
 	require.NoError(t, err)
 	now := expires.Add(zone.RedemptionGrace)
@@ -1460,11 +1459,12 @@ func TestZoneWithdrawalPastRedemptionWindowFailsClosed(t *testing.T) {
 	assert.Len(t, zoneRPC.sent, 1)
 
 	second := zoneTermsChallenge(t, now.Add(10*time.Minute), "second", nil)
-	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
-	require.NoError(t, err)
-	assert.Equal(t, second.ID, credential.Challenge.ID)
-	assert.Len(t, zoneRPC.sent, 2)
-	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
+	_, err = method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
+	require.ErrorAs(t, err, &pending)
+	assert.Equal(t, first.ID, pending.ChallengeID)
+	assert.Equal(t, calls, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.NotNil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
 }
 
 // A credential made after its challenge expired keeps the withdrawal
@@ -1657,4 +1657,138 @@ func TestZoneOrigin(t *testing.T) {
 	} {
 		assert.Equal(t, want, zoneOrigin(origin), origin)
 	}
+}
+
+func TestZoneWithdrawalPastWindowReconcilesWithoutPayingAgain(t *testing.T) {
+	t.Parallel()
+	method, zoneRPC, _, first := zonePendingFirst(t, "https://api.example.com")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	credential, err := method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), first)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "settled, but its credential can no longer be redeemed")
+	assert.Nil(t, credential)
+	assert.Len(t, zoneRPC.sent, 1)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
+	second := zoneTermsChallenge(t, now.Add(10*time.Minute), "second", nil)
+	credential, err = method.CreateCredential(paymentctx.WithOrigin(context.Background(), "https://api.example.com"), second)
+	require.NoError(t, err)
+	assert.Equal(t, second.ID, credential.Challenge.ID)
+	assert.Len(t, zoneRPC.sent, 2)
+}
+
+func TestZoneUnknownWithdrawalPastWindowKeepsTransactionHashAndReconciles(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "internal"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	first := zoneTermsChallenge(t, time.Now().Add(10*time.Minute), "first", nil)
+	ctx := paymentctx.WithOrigin(context.Background(), "https://api.example.com")
+	_, err := method.CreateCredential(ctx, first)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	hash := unknown.TransactionHash
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	second := zoneTermsChallenge(t, now.Add(10*time.Minute), "second", nil)
+	_, err = method.CreateCredential(ctx, second)
+	require.ErrorAs(t, err, &unknown)
+	assert.Equal(t, hash, unknown.TransactionHash)
+	calls := zoneRPC.callCount()
+	_, err = method.CreateCredential(ctx, first)
+	require.ErrorAs(t, err, &unknown)
+	assert.Equal(t, calls+1, zoneRPC.callCount())
+	assert.Len(t, zoneRPC.sent, 1)
+	zoneRPC.mode = "ok"
+	credential, err := method.CreateCredential(ctx, first)
+	require.ErrorContains(t, err, "settled, but its credential can no longer be redeemed")
+	assert.Nil(t, credential)
+	assert.Nil(t, method.pendingZoneWithdrawal(zoneWithdrawalKey(first)))
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+func TestZonePrefersRedeemableWithdrawalOverExpiredUnresolvedMatch(t *testing.T) {
+	t.Parallel()
+	method, _, _, first := zonePendingFirst(t, "https://api.example.com")
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	second := zoneTermsChallenge(t, now.Add(10*time.Minute), "second", nil)
+	key := zoneWithdrawalKey(second)
+	method.zoneWithdrawals[key] = &zoneWithdrawal{challenge: second, terms: zoneWithdrawalTerms(second, method.zone.id)}
+	third := zoneTermsChallenge(t, now.Add(10*time.Minute), "third", nil)
+	for range 100 {
+		found, withdrawal, err := method.findZoneWithdrawal(third)
+		require.NoError(t, err)
+		assert.Equal(t, key, found)
+		assert.Equal(t, second, withdrawal.challenge)
+	}
+}
+
+func TestZoneExpiredReceiptReconciliationPublishesOutcomeSafely(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "internal"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	first := zoneTermsChallenge(t, time.Now().Add(10*time.Minute), "first", nil)
+	ctx := paymentctx.WithOrigin(context.Background(), "https://api.example.com")
+	_, err := method.CreateCredential(ctx, first)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	zoneRPC.mode = "ok"
+	zoneRPC.looking = make(chan struct{}, 4)
+	zoneRPC.release = make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = method.CreateCredential(ctx, first) })
+	<-zoneRPC.looking
+	described := *first
+	described.Description = "same payment with different presentation"
+	wg.Go(func() { _, _ = method.CreateCredential(ctx, &described) })
+	fresh := zoneTermsChallenge(t, now.Add(10*time.Minute), "fresh", nil)
+	wg.Go(func() {
+		for range 1000 {
+			_, _, _ = method.findZoneWithdrawal(fresh)
+		}
+	})
+	close(zoneRPC.release)
+	wg.Wait()
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+type receiptPanicRPC struct {
+	*zoneTestRPC
+	panicReceipt bool
+}
+
+func (r *receiptPanicRPC) SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	if r.panicReceipt && method == "eth_getTransactionReceipt" {
+		panic("receipt lookup failed")
+	}
+	return r.zoneTestRPC.SendRequest(ctx, method, params...)
+}
+
+func TestZoneReceiptPanicKeepsKnownWithdrawalRecoverable(t *testing.T) {
+	t.Parallel()
+	rpc := &zoneTestRPC{mode: "internal"}
+	method, _ := newZoneMethod(t, rpc, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	wrapper := &receiptPanicRPC{zoneTestRPC: rpc, panicReceipt: true}
+	method.zone.rpc = wrapper
+	require.Panics(t, func() { _, _ = method.CreateCredential(context.Background(), challenge) })
+	wrapper.panicReceipt = false
+	rpc.mode = "ok"
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.NotNil(t, credential)
+	assert.Len(t, rpc.sent, 1)
 }

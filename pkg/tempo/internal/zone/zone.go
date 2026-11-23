@@ -403,6 +403,14 @@ const rpcGrace = 5 * time.Second
 // earlier one passes the earlier one's fromBlock, so it still finds a
 // settlement however far back the head has moved since.
 func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration) (Settlement, error) {
+	return WaitForSettlementWithProgress(ctx, rpc, portal, senderTag, to, fromBlock, timeout, nil)
+}
+
+// WaitForSettlementWithProgress reports the next unscanned block after each
+// successful empty historical range, so retries of long scans make progress.
+// At least one full range below the head is revisited while logs are indexing.
+// It uses the same trusted Tempo RPC and forward-only scan as WaitForSettlement.
+func WaitForSettlementWithProgress(ctx context.Context, rpc Requester, portal common.Address, senderTag common.Hash, to *common.Address, fromBlock uint64, timeout time.Duration, progress func(uint64)) (Settlement, error) {
 	if timeout < 0 {
 		return Settlement{}, fmt.Errorf("zone settlement timeout must be non-negative")
 	}
@@ -431,6 +439,9 @@ func WaitForSettlement(ctx context.Context, rpc Requester, portal common.Address
 				return settlement, err
 			}
 			fromBlock = toBlock + 1
+			if progress != nil && latest-toBlock >= logsRangeBlocks {
+				progress(fromBlock)
+			}
 		}
 		if time.Now().Add(pollingInterval).After(deadline) {
 			return Settlement{}, fmt.Errorf("zone withdrawal %s did not settle on Tempo within %s", senderTag.Hex(), timeout)
