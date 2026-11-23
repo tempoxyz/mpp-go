@@ -1728,3 +1728,36 @@ func TestZonePrefersRedeemableWithdrawalOverExpiredUnresolvedMatch(t *testing.T)
 		assert.Equal(t, second, withdrawal.challenge)
 	}
 }
+
+func TestZoneExpiredReceiptReconciliationPublishesOutcomeSafely(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "internal"}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	first := zoneTermsChallenge(t, time.Now().Add(10*time.Minute), "first", nil)
+	ctx := paymentctx.WithOrigin(context.Background(), "https://api.example.com")
+	_, err := method.CreateCredential(ctx, first)
+	var unknown *ZoneWithdrawalUnknownError
+	require.ErrorAs(t, err, &unknown)
+	expires, err := mpp.ParseExpires(first.Expires)
+	require.NoError(t, err)
+	now := expires.Add(zone.RedemptionGrace)
+	method.now = func() time.Time { return now }
+	zoneRPC.mode = "ok"
+	zoneRPC.looking = make(chan struct{}, 4)
+	zoneRPC.release = make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = method.CreateCredential(ctx, first) })
+	<-zoneRPC.looking
+	described := *first
+	described.Description = "same payment with different presentation"
+	wg.Go(func() { _, _ = method.CreateCredential(ctx, &described) })
+	fresh := zoneTermsChallenge(t, now.Add(10*time.Minute), "fresh", nil)
+	wg.Go(func() {
+		for range 1000 {
+			_, _, _ = method.findZoneWithdrawal(fresh)
+		}
+	})
+	close(zoneRPC.release)
+	wg.Wait()
+	assert.Len(t, zoneRPC.sent, 1)
+}

@@ -437,7 +437,7 @@ func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithd
 		// challenge could redeem it twice, and a new payment could pay twice
 		// if it was refused.
 		if !m.redeemable(withdrawal.challenge.Expires) || withdrawal.redeemedLate {
-			if withdrawal.unknown() {
+			if withdrawal.hash != "" && withdrawal.senderTag == (common.Hash{}) {
 				blocked = &ZoneWithdrawalUnknownError{Challenge: withdrawal.challenge, TransactionHash: withdrawal.hash, ZoneID: m.zone.id, Err: withdrawal.err}
 				continue
 			}
@@ -694,7 +694,9 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 		sending := pending.hash != ""
 		defer func() {
 			if !finished {
+				m.zoneMu.Lock()
 				pending.sent, pending.err = sending, errZoneWithdrawalPanicked
+				m.zoneMu.Unlock()
 				m.finishZoneWithdrawal(key, pending)
 			}
 		}()
@@ -731,7 +733,9 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 		// Only a failure before the transaction was sent, or a revert, is
 		// safe to retry. After that, the withdrawal may have gone through,
 		// so retries of this challenge do not send it again.
+		m.zoneMu.Lock()
 		pending.sent, pending.hash, pending.senderTag, pending.err = sent || sendErr == nil, hash, senderTag, sendErr
+		m.zoneMu.Unlock()
 		finished = true
 		m.finishZoneWithdrawal(key, pending)
 		if sendErr != nil {
@@ -746,7 +750,13 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	start, err := m.zoneSettlementStart(ctx, rpc, pending)
 	if err == nil {
 		var settlement zone.Settlement
-		settlement, err = zone.WaitForSettlement(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(paid.Expires))
+		settlement, err = zone.WaitForSettlementWithProgress(ctx, rpc, zone.PortalAddress(m.zone.id), pending.senderTag, &recipient, start, m.settlementTimeout(paid.Expires), func(next uint64) {
+			m.zoneMu.Lock()
+			defer m.zoneMu.Unlock()
+			if pending.settlementStart == nil || next > *pending.settlementStart {
+				pending.settlementStart = &next
+			}
+		})
 		if err == nil && settlement.Bounced {
 			// The payout bounced back to the payer's Zone balance and paid
 			// nothing, so the server would reject its credential: fail
@@ -792,9 +802,9 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	}
 }
 
-// zoneSettlementStart returns the Tempo block settlement waits for withdrawal
-// search from: the one its first wait chose, so a retry long after that still
-// finds a settlement the first wait missed.
+// zoneSettlementStart returns the next Tempo block the withdrawal's settlement
+// search must inspect. Completed historical ranges are checkpointed, while the
+// most recent range is rechecked on retry.
 func (m *Method) zoneSettlementStart(ctx context.Context, rpc tempo.RPCClient, withdrawal *zoneWithdrawal) (uint64, error) {
 	m.zoneMu.Lock()
 	start := withdrawal.settlementStart
