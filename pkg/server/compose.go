@@ -135,6 +135,11 @@ func Compose(ctx context.Context, authorization string, offers ...Offer) (*Charg
 	if err != nil {
 		return nil, err
 	}
+	// ParseCredential takes a single "Payment <token>" value: pick it out of
+	// a merged Authorization value first, as the HTTP flows do.
+	if credential, err := mpp.FindPaymentAuthorizationStrict(authorization); err == nil && credential != "" {
+		authorization = credential
+	}
 	result, err := paymentFlow{entries: entries}.run(ctx, authorization, sourceAny, "", nil)
 	if err != nil && !result.IsChallenge() {
 		return nil, err

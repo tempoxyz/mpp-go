@@ -391,6 +391,14 @@ func callerCredential(header http.Header) (sent, unreadable bool, challenge *mpp
 
 // parseCallerCredential parses a Payment credential the caller set.
 func parseCallerCredential(value string) (*mpp.Credential, error) {
+	// The caller's own credential is read as leniently as before
+	// ParseCredential became strict: any run of spaces and tabs may separate
+	// the scheme from the token. Servers still require one space or more.
+	if scheme, token, ok := strings.Cut(strings.TrimSpace(value), " "); ok {
+		value = scheme + " " + strings.TrimLeft(token, " \t")
+	} else if scheme, token, ok := strings.Cut(strings.TrimSpace(value), "\t"); ok {
+		value = scheme + " " + strings.TrimLeft(token, " \t")
+	}
 	cred, err := mpp.ParseCredential(value)
 	if errors.Is(err, mpp.ErrUnsupportedCredentialHeader) {
 		// The caller's own credential echoes a header a received challenge
@@ -443,24 +451,33 @@ func parseCredentialWithoutHeader(value string) (*mpp.Credential, error) {
 // paymentCredentialValues returns every header element that uses the Payment
 // auth scheme: supported holds those in Authorization and
 // Payment-Authorization (field names in any case), other those in every other
-// field, since a challenge may name a custom credential field.
+// field, since a challenge may name a custom credential field. Values are
+// split as servers split them (mpp.SplitAuthenticate), so a comma inside a
+// quoted auth-param of another scheme does not start a Payment element.
 func paymentCredentialValues(header http.Header) (supported, other []string) {
 	for name, values := range header {
 		isSupported := strings.EqualFold(name, mpp.HeaderAuthorization) || strings.EqualFold(name, mpp.HeaderPaymentAuthorization)
 		for _, value := range values {
-			for _, part := range strings.Split(value, ",") {
+			for _, part := range mpp.SplitAuthenticate(value) {
 				part = strings.TrimSpace(part)
 				scheme, token, _ := strings.Cut(part, " ")
+				token = strings.TrimSpace(token)
+				// SplitAuthenticate keeps auth-params that follow a token
+				// ("Payment <token>, realm=x") in the same part. The caller's
+				// credential is the token before the first comma, read as
+				// "Payment <token>" in every field, as before strict parsing.
+				token, _, _ = strings.Cut(token, ",")
 				token = strings.TrimSpace(token)
 				// A credential is the scheme and one token; this keeps
 				// prose such as "payment received" in other fields out.
 				if !strings.EqualFold(scheme, mpp.SchemePayment) || token == "" || strings.ContainsAny(token, " \t") {
 					continue
 				}
+				credential := scheme + " " + token
 				if isSupported {
-					supported = append(supported, part)
+					supported = append(supported, credential)
 				} else {
-					other = append(other, part)
+					other = append(other, credential)
 				}
 			}
 		}
