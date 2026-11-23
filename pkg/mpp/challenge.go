@@ -29,6 +29,20 @@ type Challenge struct {
 	// implicit default, Authorization. When set, it is advertised as the
 	// challenge header parameter and bound into the challenge ID.
 	Header string `json:"header,omitempty"`
+	// legacyUnicodeEscape records that ParseChallenge read a legacy \uXXXX
+	// escape in an ID-bound auth-param. It is not part of the wire form.
+	legacyUnicodeEscape bool
+}
+
+// LegacyUnicodeEscape reports whether c was parsed from a header in which an
+// auth-param bound into the challenge ID (every one but description) held a
+// \uXXXX escape. Servers on older SDK releases wrote characters above U+00FF
+// that way; ParseChallenge reads it as an RFC 9110 quoted-pair ("\u00e9" reads
+// "u00e9"), so the parsed value differs from the one the ID binds and the
+// server would reject a Credential for c. Clients refuse to pay such a
+// challenge with ErrLegacyUnicodeEscapedChallenge.
+func (c *Challenge) LegacyUnicodeEscape() bool {
+	return c != nil && c.legacyUnicodeEscape
 }
 
 // ChallengeEcho is the subset of a Challenge echoed back in a Credential.

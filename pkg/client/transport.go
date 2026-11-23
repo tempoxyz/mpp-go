@@ -212,7 +212,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		challenges, errs := t.parseChallenges(resp.Header)
 		_ = errs // Non-Payment or malformed headers are silently skipped.
-		candidates := t.challengeCandidates(challenges, preferences, time.Now().UTC())
+		candidates, legacy := t.challengeCandidates(challenges, preferences, time.Now().UTC())
 		if len(candidates) > 0 && t.orderChallenges != nil {
 			candidates, err = t.orderCandidates(baseRequest.Context(), candidates)
 			if err != nil {
@@ -228,6 +228,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				return resp, nil
 			}
 			drainAndClose(resp.Body)
+			if legacy {
+				return nil, fmt.Errorf("%w: %w", mpp.ErrLegacyUnicodeEscapedChallenge, newNoMethodFoundError(challenges, t.configuredMethods()))
+			}
 			return nil, newNoMethodFoundError(challenges, t.configuredMethods())
 		}
 		var selected challengeCandidate
@@ -552,8 +555,13 @@ type peekedBody struct {
 	io.Closer
 }
 
-func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {
-	candidates := make([]challengeCandidate, 0, len(challenges))
+// challengeCandidates returns the Challenges a method can pay, ranked by
+// payment preference, then in offer order. legacy reports that a Challenge a method could otherwise pay was left out
+// because it holds a legacy \uXXXX escape in an ID-bound auth-param
+// (mpp.ErrLegacyUnicodeEscapedChallenge): its Credential would be rejected,
+// possibly after a pushed payment had moved funds.
+func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) (candidates []challengeCandidate, legacy bool) {
+	candidates = make([]challengeCandidate, 0, len(challenges))
 	for i := range challenges {
 		ch := &challenges[i]
 		if ch.Expires != "" {
@@ -581,6 +589,10 @@ func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences 
 			if matcher, ok := method.(ChallengeMatcher); ok && !matcher.CanHandleChallenge(ch) {
 				continue
 			}
+			if ch.LegacyUnicodeEscape() {
+				legacy = true
+				continue
+			}
 			candidates = append(candidates, challengeCandidate{
 				challenge: ch,
 				method:    method,
@@ -591,7 +603,7 @@ func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences 
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].quality > candidates[j].quality
 	})
-	return candidates
+	return candidates, legacy
 }
 
 type challengeCandidate struct {

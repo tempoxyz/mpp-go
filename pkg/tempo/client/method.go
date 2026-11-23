@@ -327,6 +327,10 @@ func (m *Method) Intent() string {
 
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
 //
+// It refuses, with mpp.ErrLegacyUnicodeEscapedChallenge and before signing
+// anything, a challenge parsed with a legacy \uXXXX escape in an ID-bound
+// auth-param (mpp.Challenge.LegacyUnicodeEscape).
+//
 // Concurrent calls for the same challenge share one in-flight signing, so they
 // cannot produce two independently settleable transactions. Once that signing
 // finishes, successfully or not, a later call signs afresh. Calls share a
@@ -335,6 +339,11 @@ func (m *Method) Intent() string {
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge == nil {
 		return nil, fmt.Errorf("tempo client: challenge is required")
+	}
+	// The server would reject a Credential for this challenge, after a hash
+	// or zone payment had already been broadcast.
+	if challenge.LegacyUnicodeEscape() {
+		return nil, fmt.Errorf("tempo client: %w", mpp.ErrLegacyUnicodeEscapedChallenge)
 	}
 	encoded, err := json.Marshal(challenge)
 	if err != nil {

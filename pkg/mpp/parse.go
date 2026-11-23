@@ -22,9 +22,11 @@ const maxHeaderPayload = 16 * 1024
 const maxAuthorizationPayload = 64 * 1024
 
 // parseAuthParams parses a comma-separated list of key=value or key="value"
-// pairs from an auth-param list (RFC 9110 §11.2).
-func parseAuthParams(s string) (map[string]string, error) {
-	params := make(map[string]string)
+// pairs from an auth-param list (RFC 9110 §11.2). legacy reports whether the
+// raw quoted value of an auth-param other than description held a legacy
+// \uXXXX escape (see ErrLegacyUnicodeEscapedChallenge).
+func parseAuthParams(s string) (params map[string]string, legacy bool, err error) {
+	params = make(map[string]string)
 	for i := 0; i < len(s); {
 		for i < len(s) && (s[i] == ',' || s[i] == ' ' || s[i] == '\t') {
 			i++
@@ -39,7 +41,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 		key := s[start:i]
 		if key == "" {
-			return nil, fmt.Errorf("mpp: malformed auth-param")
+			return nil, false, fmt.Errorf("mpp: malformed auth-param")
 		}
 		// Auth-param names are case-insensitive (RFC 9110 §11.2).
 		name := strings.ToLower(key)
@@ -48,7 +50,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 		if i >= len(s) || s[i] != '=' {
-			return nil, fmt.Errorf("mpp: malformed auth-param")
+			return nil, false, fmt.Errorf("mpp: malformed auth-param")
 		}
 		i++
 
@@ -56,14 +58,19 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 
-		value, next, err := readAuthParamValue(s, i)
+		value, next, escaped, err := readAuthParamValue(s, i)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if _, exists := params[name]; exists {
-			return nil, fmt.Errorf("mpp: duplicate auth-param %q", key)
+			return nil, false, fmt.Errorf("mpp: duplicate auth-param %q", key)
 		}
 		params[name] = value
+		// description is not bound into the challenge ID, so its legacy
+		// escapes only change how it displays.
+		if escaped && name != "description" {
+			legacy = true
+		}
 		i = next
 
 		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
@@ -76,10 +83,10 @@ func parseAuthParams(s string) (map[string]string, error) {
 			if name == "description" {
 				break
 			}
-			return nil, fmt.Errorf("mpp: malformed auth-param separator")
+			return nil, false, fmt.Errorf("mpp: malformed auth-param separator")
 		}
 	}
-	return params, nil
+	return params, legacy, nil
 }
 
 // SplitAuthenticate splits a potentially merged authentication header value into
@@ -166,7 +173,10 @@ func isTokenChar(ch byte) bool {
 	}
 }
 
-func readAuthParamValue(input string, start int) (string, int, error) {
+// readAuthParamValue reads a token or quoted-string auth-param value starting
+// at start. escaped reports whether a quoted value held a legacy \uXXXX
+// escape.
+func readAuthParamValue(input string, start int) (value string, next int, escaped bool, err error) {
 	if start < len(input) && input[start] == '"' {
 		return readQuotedAuthParamValue(input, start+1)
 	}
@@ -174,30 +184,54 @@ func readAuthParamValue(input string, start int) (string, int, error) {
 	for end < len(input) && input[end] != ',' {
 		end++
 	}
-	return strings.TrimSpace(input[start:end]), end, nil
+	return strings.TrimSpace(input[start:end]), end, false, nil
 }
 
-func readQuotedAuthParamValue(input string, start int) (string, int, error) {
+func readQuotedAuthParamValue(input string, start int) (value string, next int, escaped bool, err error) {
 	var builder strings.Builder
 	for i := start; i < len(input); {
 		switch ch := input[i]; ch {
 		case '\\':
 			i++
 			if i >= len(input) {
-				return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+				return "", 0, false, fmt.Errorf("mpp: unterminated quoted auth-param")
+			}
+			// Servers on older SDK releases wrote characters above U+00FF
+			// as \uXXXX. Record it so clients refuse to pay the challenge.
+			if isLegacyUnicodeEscape(input[i:]) {
+				escaped = true
 			}
 			// RFC 9110 quoted-pair: drop the backslash and keep the next
 			// octet as is. \uXXXX is not an escape, so "\u2014" reads "u2014".
 			builder.WriteByte(input[i])
 			i++
 		case '"':
-			return builder.String(), i + 1, nil
+			return builder.String(), i + 1, escaped, nil
 		default:
 			builder.WriteByte(ch)
 			i++
 		}
 	}
-	return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+	return "", 0, false, fmt.Errorf("mpp: unterminated quoted auth-param")
+}
+
+// isLegacyUnicodeEscape reports whether s, the text after a backslash in a
+// quoted-string, starts with "u" and four hex digits, the \uXXXX escape that
+// older servers wrote.
+func isLegacyUnicodeEscape(s string) bool {
+	if len(s) < 5 || s[0] != 'u' {
+		return false
+	}
+	for _, ch := range []byte(s[1:5]) {
+		if !isHexDigit(ch) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHexDigit(ch byte) bool {
+	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
 }
 
 // ParseChallenge parses a Payment challenge from a WWW-Authenticate header value.
@@ -212,7 +246,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
 	}
 
-	params, err := parseAuthParams(rest)
+	params, legacy, err := parseAuthParams(rest)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +305,8 @@ func ParseChallenge(header string) (*Challenge, error) {
 		Opaque:      opaque,
 		Header:      credentialHeader,
 
-		opaqueB64: preservedOpaque,
+		opaqueB64:           preservedOpaque,
+		legacyUnicodeEscape: legacy,
 	}, nil
 }
 
