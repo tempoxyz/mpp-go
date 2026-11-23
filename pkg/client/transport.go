@@ -256,10 +256,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if sent && sentCred != nil && key == sentCredential && !invalidPayload {
 			cred = sentCred
 		}
-		if cred == nil && sent && sentCred != nil && isPushCredential(sentCred) {
+		if cred == nil && sent && (sentCred == nil || isPushCredential(sentCred)) {
 			// A push credential's payment (a hash credential's transfer or a
 			// zone credential's withdrawal) is already on chain: resending it
-			// is safe, but paying a new challenge would pay twice.
+			// is safe, but paying a new challenge would pay twice. A caller's
+			// credential the client cannot parse may be one too, so the
+			// caller reconciles it rather than the client paying again.
 			return resp, nil
 		}
 		drainAndClose(resp.Body)

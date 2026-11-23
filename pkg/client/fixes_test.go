@@ -256,6 +256,29 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeForUnparseableCallerCredential
 	assert.Contains(t, err.Error(), "do not blindly retry")
 }
 
+func TestTransport_RoundTrip_DoesNotPayAfterUnparseableCallerCredential(t *testing.T) {
+	challenge := mpptest.NewChallenge("secret", "realm", "tempo", "charge", map[string]any{"amount": "1"})
+	inner := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		header := http.Header{}
+		header.Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: http.NoBody}, nil
+	})
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+	require.NoError(t, err)
+	// A space and a tab before the token: detected as a Payment credential,
+	// but not "Payment" 1*SP token, so it cannot be classified.
+	authorization, err := mpp.FormatCredential(newTestCredential("tempo"))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Payment \t"+strings.TrimPrefix(authorization, "Payment "))
+
+	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+	assert.Zero(t, method.calls)
+}
+
 func TestClient_Do_RunsCallerRedirectHookFirst(t *testing.T) {
 	var otherHits atomic.Int32
 	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

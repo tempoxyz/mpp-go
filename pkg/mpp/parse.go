@@ -483,9 +483,10 @@ func ParseCredential(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
+	// Errors never quote the value: without a space it is the token itself.
 	scheme, rest, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, SchemePayment) {
-		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
+		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
 	b64 := strings.TrimLeft(rest, " ")

@@ -32,5 +32,6 @@ func TestParseCredentialRequiresSingleToken(t *testing.T) {
 	} {
 		_, err := ParseCredential(header)
 		require.Error(t, err, "%q", header)
+		require.NotContains(t, err.Error(), token[:16], "%q", header)
 	}
 }
