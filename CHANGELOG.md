@@ -1,5 +1,14 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.10.1`
+
+### Patch Changes
+
+- Changed `ParseChallenge` to read a backslash in a quoted auth-param as an RFC 9110 quoted-pair, so `realm="a\u2014b"` parses as `au2014b`, and made `FormatChallenge` reject characters above U+00FF in every auth-param but `description`, which keeps its `\uXXXX` escape. A server whose realm holds such a character can no longer issue HTTP Challenges (each 402 becomes a 500), so change it to an ASCII realm before upgrading. Made clients refuse to pay a Challenge from an older server that escaped an ID-bound auth-param as `\uXXXX` (`Challenge.LegacyUnicodeEscape`), before signing or broadcasting anything, and fail with `mpp.ErrLegacyUnicodeEscapedChallenge` when no other Challenge is payable. (by @brendanjryan, [#331](https://github.com/tempoxyz/mpp-go/pull/331))
+- Prevented duplicate Zone payments when an unresolved withdrawal outlives its challenge's redemption window. (by @brendanjryan, [#337](https://github.com/tempoxyz/mpp-go/pull/337))
+- `B64Decode`, and so Challenge, Credential and Payment-Receipt parsing, started rejecting characters outside the base64url alphabet, including the CR and LF that `encoding/base64` skipped. Challenge parsing and formatting rejected a request that decoded to JSON `null`, matching mppx, and the HTTP client returned a 402 unpaid when a credential the caller set could not be parsed. (by @brendanjryan, [#333](https://github.com/tempoxyz/mpp-go/pull/333))
+- `ParseCredential` started requiring the value to be exactly `Payment` followed by one base64url token, as mppx does, and its errors no longer quote the value. The HTTP client returned a 402 to the caller, without paying again, when a credential the caller set could not be parsed. (by @brendanjryan, [#336](https://github.com/tempoxyz/mpp-go/pull/336))
+
 ## `github.com/tempoxyz/mpp-go@0.10.0`
 
 ### Minor Changes
