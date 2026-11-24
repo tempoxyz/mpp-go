@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -44,6 +45,11 @@ const logsRangeBlocks = lookbackBlocks + 1
 // for one withdrawal: the withdrawals its Zone block may hold. Each candidate
 // is a topic in every settlement poll's eth_getLogs filter.
 const maxSenderTagCandidates = 64
+
+// ErrSenderTagsUnresolved reports outbox nonces that name no candidate
+// sender tag for a withdrawal: its block added none, or more than
+// maxSenderTagCandidates. Reading them again gives the same answer.
+var ErrSenderTagsUnresolved = errors.New("zone outbox nonces do not resolve the sender tag")
 
 // pollingInterval is the time between polls for a settled withdrawal.
 const pollingInterval = 500 * time.Millisecond
@@ -413,12 +419,12 @@ func SenderTagCandidates(ctx context.Context, rpc Requester, blockNumber uint64,
 		return nil, err
 	}
 	if after <= before {
-		return nil, fmt.Errorf("zone withdrawal transaction %s did not request a withdrawal from the outbox", transactionHash.Hex())
+		return nil, fmt.Errorf("%w: zone withdrawal transaction %s did not request a withdrawal from the outbox", ErrSenderTagsUnresolved, transactionHash.Hex())
 	}
 	// The nonces come from the Zone RPC, so a range no block could hold is
 	// refused rather than hashed.
 	if after-before > maxSenderTagCandidates {
-		return nil, fmt.Errorf("zone withdrawal transaction %s has %d candidate sender tags, more than %d", transactionHash.Hex(), after-before, maxSenderTagCandidates)
+		return nil, fmt.Errorf("%w: zone withdrawal transaction %s has %d candidate sender tags, more than %d", ErrSenderTagsUnresolved, transactionHash.Hex(), after-before, maxSenderTagCandidates)
 	}
 	// Counting up to the range, rather than up to after, keeps an after of
 	// the uint64 maximum from wrapping the nonce to 0 and looping forever.
@@ -602,8 +608,16 @@ func settlementLog(ctx context.Context, rpc Requester, portal common.Address, to
 				continue
 			}
 			hash := asString(entry["transactionHash"])
-			tag, ok := processedSenderTag(entry, senderTags)
-			if hash != "" && ok {
+			if hash == "" {
+				continue
+			}
+			tag, ok, known := processedSenderTag(entry, senderTags)
+			if !known {
+				// The filter asked for one of several tags, but the log
+				// does not say which: fail rather than search past it.
+				return Settlement{}, fmt.Errorf("zone WithdrawalProcessed log in transaction %s has no sender tag topic", hash)
+			}
+			if ok {
 				return Settlement{Hash: hash, SenderTag: tag, Bounced: processedBounced(entry)}, nil
 			}
 		}
@@ -613,21 +627,23 @@ func settlementLog(ctx context.Context, rpc Requester, portal common.Address, to
 
 // processedSenderTag returns the sender tag of a WithdrawalProcessed log: its
 // senderTag topic when it is one of senderTags, or the only tag the filter
-// asked for when the log leaves its topics out. ok is false otherwise.
-func processedSenderTag(entry map[string]any, senderTags []common.Hash) (common.Hash, bool) {
+// asked for when the log leaves its topics out. ok is false otherwise. known
+// is false when the log leaves its topics out and the filter asked for
+// several tags, so which one it carries is unknown.
+func processedSenderTag(entry map[string]any, senderTags []common.Hash) (tag common.Hash, ok, known bool) {
 	topics, _ := entry["topics"].([]any)
 	if len(topics) < 3 {
 		if len(senderTags) == 1 {
-			return senderTags[0], true
+			return senderTags[0], true, true
 		}
-		return common.Hash{}, false
+		return common.Hash{}, false, false
 	}
 	for _, tag := range senderTags {
 		if strings.EqualFold(asString(topics[2]), tag.Hex()) {
-			return tag, true
+			return tag, true, true
 		}
 	}
-	return common.Hash{}, false
+	return common.Hash{}, false, true
 }
 
 // joinTags formats sender tags as "A or B".

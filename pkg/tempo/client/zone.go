@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/big"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,10 @@ const zoneSubmissionMargin = 15 * time.Second
 // zoneReceiptTimeout bounds the wait for a Zone withdrawal's receipt,
 // including after its send response fails.
 const zoneReceiptTimeout = 15 * time.Second
+
+// zoneSenderTagReadTimeout bounds the outbox reads that derive a Zone
+// withdrawal's candidate sender tags when the Zone RPC hid its tag.
+const zoneSenderTagReadTimeout = 10 * time.Second
 
 // zoneReceiptPollInterval is the time between polls for a Zone receipt.
 const zoneReceiptPollInterval = 500 * time.Millisecond
@@ -210,6 +215,10 @@ var ErrZoneDeadlineTooSoon = errors.New("tempo client: request deadline too soon
 // transaction's hash, kept so a retry can look for a receipt that was missing.
 // settlementStart, guarded by Method.zoneMu, is the Tempo block the first
 // settlement wait searched from, so a resumed wait searches from it too.
+// settlementFrom is that first block, kept so a wait for other candidate
+// sender tags searches again from it. candidates, guarded by Method.zoneMu,
+// are the sender tags last derived from the Zone outbox when the receipt hid
+// the tag.
 //
 // challenge is the challenge the withdrawal pays, bound to it by its memo;
 // origin the origin that issued it ("" when unknown); terms what another
@@ -233,6 +242,8 @@ type zoneWithdrawal struct {
 	receipt         sentZoneWithdrawal
 	err             error
 	settlementStart *uint64
+	settlementFrom  *uint64
+	candidates      []common.Hash
 	waiters         int
 	redeemedLate    bool
 	settledTag      common.Hash
@@ -485,6 +496,9 @@ func (m *Method) findZoneWithdrawalLocked(key, terms string) (string, *zoneWithd
 				continue
 			}
 			senderTags := withdrawal.receipt.senderTags
+			if len(senderTags) == 0 {
+				senderTags = withdrawal.candidates
+			}
 			if withdrawal.redeemedLate {
 				senderTags = []common.Hash{withdrawal.settledTag}
 			}
@@ -583,6 +597,7 @@ func (m *Method) claimZoneWithdrawal(ctx context.Context, challenge *mpp.Challen
 				hash:            withdrawal.hash,
 				err:             withdrawal.err,
 				settlementStart: withdrawal.settlementStart,
+				settlementFrom:  withdrawal.settlementFrom,
 				redeemedLate:    withdrawal.redeemedLate,
 				waiters:         1,
 			}
@@ -762,7 +777,7 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 			var start uint64
 			if start, sendErr = zone.SettlementStartBlock(ctx, rpc); sendErr == nil {
 				m.zoneMu.Lock()
-				pending.settlementStart = &start
+				pending.settlementStart, pending.settlementFrom = &start, &start
 				m.zoneMu.Unlock()
 				// Nothing is sent before the policy allows it, so a panic up
 				// to then leaves the challenge payable.
@@ -791,24 +806,9 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	if pending.err != nil {
 		return nil, pending.err
 	}
-	// Derived when the Zone RPC hid the tag, so a failed read on the Zone is
-	// retried without withdrawing again: the withdrawal stays pending for the
-	// challenge. Candidates once derived are kept, so a later attempt does
-	// not need the Zone's state at the withdrawal's block again.
-	m.zoneMu.Lock()
-	senderTags := pending.receipt.senderTags
-	m.zoneMu.Unlock()
-	if len(senderTags) == 0 {
-		senderTags, err = zone.SenderTagCandidates(ctx, m.zone.rpc, pending.receipt.blockNumber, pending.receipt.sender, common.HexToHash(pending.hash))
-		if err != nil {
-			return nil, fmt.Errorf("tempo client: Zone withdrawal transaction %s was sent, but its sender tag could not be read from the Zone; retry the challenge to resume without withdrawing again: %w", pending.hash, err)
-		}
-		m.zoneMu.Lock()
-		if len(pending.receipt.senderTags) == 0 {
-			pending.receipt.senderTags = senderTags
-		}
-		senderTags = pending.receipt.senderTags
-		m.zoneMu.Unlock()
+	senderTags, err := m.zoneSenderTags(ctx, paid, expected, pending)
+	if err != nil {
+		return nil, err
 	}
 
 	recipient := common.HexToAddress(request.Recipient)
@@ -861,6 +861,66 @@ func (m *Method) createZoneCredential(ctx context.Context, rpc tempo.RPCClient, 
 	return nil, newZoneSettlementPendingError(paid, m.zone.id, senderTags, err)
 }
 
+// zoneSenderTags returns the sender tags a sent withdrawal may carry: its tag
+// when its receipt showed it, else the candidates derived from the Zone
+// outbox (zone.SenderTagCandidates). The candidates are derived on every
+// attempt, as mppx does, after the receipt is looked up again once, so a
+// receipt that now carries the WithdrawalRequested event gives the tag
+// itself. The reads are bounded by zoneSenderTagReadTimeout. When they fail,
+// the candidates an earlier attempt derived are used; with none, the call
+// fails and the withdrawal stays pending for the challenge, so a retry does
+// not withdraw again. When the candidates change, the settlement search
+// starts again from its first block, since earlier ranges were searched for
+// other tags.
+func (m *Method) zoneSenderTags(ctx context.Context, challenge *mpp.Challenge, expected zoneWithdrawalRequest, pending *zoneWithdrawal) ([]common.Hash, error) {
+	m.zoneMu.Lock()
+	receipt, hash, previous := pending.receipt, pending.hash, pending.candidates
+	m.zoneMu.Unlock()
+	if len(receipt.senderTags) > 0 {
+		return receipt.senderTags, nil
+	}
+	// Only a successful receipt counts: one still missing or not matching
+	// the signed withdrawal leaves what the first receipt showed.
+	if fresh, err := lookupZoneTransaction(ctx, m.zone.rpc, "eth_getTransactionReceipt", hash); err == nil && fresh != nil {
+		if outcome, _, _, err := m.zoneWithdrawalOutcome(challenge, expected, fresh, hash); err == nil {
+			receipt = outcome
+			m.zoneMu.Lock()
+			pending.receipt = outcome
+			m.zoneMu.Unlock()
+			if len(outcome.senderTags) > 0 {
+				return outcome.senderTags, nil
+			}
+		}
+	}
+	timeout := m.zoneSenderTagReadTimeout
+	if timeout == 0 {
+		timeout = zoneSenderTagReadTimeout
+	}
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	tags, err := zone.SenderTagCandidates(readCtx, m.zone.rpc, receipt.blockNumber, receipt.sender, common.HexToHash(hash))
+	if err != nil {
+		if len(previous) > 0 {
+			return previous, nil
+		}
+		if errors.Is(err, zone.ErrSenderTagsUnresolved) {
+			// Reading again gives the same nonces, so retrying does not
+			// help; the withdrawal still stays pending so it is never paid
+			// twice.
+			return nil, fmt.Errorf("tempo client: Zone withdrawal transaction %s was sent, but the Zone outbox does not identify its sender tag; find its settlement by transaction hash before paying the challenge again: %w", hash, err)
+		}
+		return nil, fmt.Errorf("tempo client: Zone withdrawal transaction %s was sent, but its sender tag could not be read from the Zone; retry the challenge to resume without withdrawing again: %w", hash, err)
+	}
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	if pending.candidates != nil && !slices.Equal(pending.candidates, tags) && pending.settlementFrom != nil {
+		from := *pending.settlementFrom
+		pending.settlementStart = &from
+	}
+	pending.candidates = tags
+	return tags, nil
+}
+
 // zoneSettlementStart returns the next Tempo block the withdrawal's settlement
 // search must inspect. Completed historical ranges are checkpointed, while the
 // most recent range is rechecked on retry.
@@ -878,7 +938,7 @@ func (m *Method) zoneSettlementStart(ctx context.Context, rpc tempo.RPCClient, w
 	m.zoneMu.Lock()
 	defer m.zoneMu.Unlock()
 	if withdrawal.settlementStart == nil {
-		withdrawal.settlementStart = &block
+		withdrawal.settlementStart, withdrawal.settlementFrom = &block, &block
 	}
 	return *withdrawal.settlementStart, nil
 }

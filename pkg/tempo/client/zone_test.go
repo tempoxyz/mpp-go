@@ -70,8 +70,10 @@ type zoneTestRPC struct {
 	// lastFallbackNonce is the outbox's lastFallbackNonce after block 0xa,
 	// which holds every withdrawal: 1 unless set. It is 0 before.
 	lastFallbackNonce uint64
-	// failNonceReads fails every lastFallbackNonce read.
+	// failNonceReads fails every lastFallbackNonce read; hangNonceReads
+	// holds each until its context ends.
 	failNonceReads bool
+	hangNonceReads bool
 	// onNonce, when set, runs at the nonce lookup.
 	onNonce func()
 	// trackNonce has the Zone answer the nonce lookup with the number of
@@ -161,7 +163,7 @@ func (r *zoneTestRPC) SendRawTransaction(_ context.Context, serialized string) (
 	return crypto.Keccak256Hash(common.FromHex(serialized)).Hex(), nil
 }
 
-func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+func (r *zoneTestRPC) SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
 	r.record(method)
 	if r.mode == "fail" {
 		time.Sleep(10 * time.Millisecond)
@@ -175,6 +177,11 @@ func (r *zoneTestRPC) SendRequest(_ context.Context, method string, params ...in
 		call := params[0].(map[string]any)
 		if call["data"] == hexutil.Encode(zone.OutboxABI.Methods["lastFallbackNonce"].ID) {
 			r.mu.Lock()
+			if r.hangNonceReads {
+				r.mu.Unlock()
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
 			defer r.mu.Unlock()
 			if r.failNonceReads {
 				return nil, errors.New("read failed")
@@ -331,7 +338,12 @@ func (r *zoneTestTempoRPC) SendRequest(_ context.Context, method string, params 
 		if !r.settled || (r.settledAt != 0 && (r.settledAt < from || r.settledAt > to)) {
 			return &temporpc.JSONRPCResponse{Result: []any{}}, nil
 		}
-		entry := map[string]any{"transactionHash": zoneTestSettlement}
+		// The log carries the tag the filter asked for, or the first of several.
+		tag := r.topics[2]
+		if tags, ok := tag.([]string); ok {
+			tag = tags[0]
+		}
+		entry := map[string]any{"transactionHash": zoneTestSettlement, "topics": []any{r.topics[0], r.topics[1], tag}}
 		if r.bounced {
 			data, err := zone.PortalABI.Events["WithdrawalProcessed"].Inputs.NonIndexed().Pack(common.HexToAddress(testCurrency), big.NewInt(1_000_000), false)
 			if err != nil {
@@ -1922,6 +1934,106 @@ func TestZoneSettlementPendingErrorCarriesSenderTags(t *testing.T) {
 		// The settlement filter asks for either tag.
 		assert.Equal(t, tags, tempoRPC.topics[2])
 	})
+}
+
+// A retry of a withdrawal whose receipt hid its tag looks the receipt up
+// again, so a receipt that now carries the WithdrawalRequested event gives
+// the tag even while the outbox reads fail.
+func TestZoneRetryReadsRedactedReceiptAgain(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none", failNonceReads: true}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	require.ErrorContains(t, err, "sender tag could not be read")
+	zoneRPC.mu.Lock()
+	zoneRPC.event = ""
+	receipts := zoneRPC.receipts
+	zoneRPC.mu.Unlock()
+
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	signer, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	tag := zone.SenderTag(signer.Address(), crypto.Keccak256Hash(common.FromHex(zoneRPC.sent[0])), 1).Hex()
+	assert.Equal(t, tag, credential.Payload["senderTag"])
+	assert.Greater(t, zoneRPC.receipts, receipts)
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// Outbox nonces that name no candidate tag give the same answer on every
+// read: the call says so rather than asking for a retry, and the withdrawal
+// stays pending, so the challenge is never paid twice.
+func TestZoneReportsUnresolvableSenderTag(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none", lastFallbackNonce: 65}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	challenge := zoneChallenge(t, nil)
+
+	for range 2 {
+		_, err := method.CreateCredential(context.Background(), challenge)
+		require.ErrorIs(t, err, zone.ErrSenderTagsUnresolved)
+		assert.ErrorContains(t, err, "the Zone outbox does not identify its sender tag")
+		assert.NotContains(t, err.Error(), "retry the challenge")
+		assert.NotErrorIs(t, err, paymentctx.ErrSettlementPending)
+	}
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// The outbox reads that derive candidate tags are bounded, so a stalled Zone
+// RPC does not hold the paid request until the caller's context ends.
+func TestZoneBoundsSenderTagReads(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none", hangNonceReads: true}
+	method, _ := newZoneMethod(t, zoneRPC, zoneTestChainID, nil)
+	method.zoneSenderTagReadTimeout = 50 * time.Millisecond
+
+	_, err := method.CreateCredential(context.Background(), zoneChallenge(t, nil))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.ErrorContains(t, err, "sender tag could not be read")
+	assert.Len(t, zoneRPC.sent, 1)
+}
+
+// Candidate tags are derived again on a retry; when they change, the
+// settlement search starts again from its first block, since the blocks it
+// checkpointed were searched for other tags.
+func TestZoneSearchesAgainWhenCandidateSenderTagsChange(t *testing.T) {
+	t.Parallel()
+	zoneRPC := &zoneTestRPC{mode: "ok", event: "none"}
+	method, tempoRPC := newZoneMethod(t, zoneRPC, zoneTestChainID, func(c *Config) { c.Zone.SettlementTimeout = time.Nanosecond })
+	tempoRPC.settled = false
+	challenge := zoneChallenge(t, nil)
+
+	_, err := method.CreateCredential(context.Background(), challenge)
+	var pending *ZoneSettlementPendingError
+	require.ErrorAs(t, err, &pending)
+	require.Len(t, pending.SenderTags, 1)
+
+	// Say the first search checkpointed past the block that settles it.
+	method.zoneMu.Lock()
+	require.Len(t, method.zoneWithdrawals, 1)
+	var from uint64
+	for _, withdrawal := range method.zoneWithdrawals {
+		from = *withdrawal.settlementFrom
+		checkpoint := from + 5
+		withdrawal.settlementStart = &checkpoint
+	}
+	method.zoneMu.Unlock()
+	zoneRPC.mu.Lock()
+	zoneRPC.lastFallbackNonce = 2
+	zoneRPC.mu.Unlock()
+	tempoRPC.mu.Lock()
+	tempoRPC.settled, tempoRPC.settledAt, tempoRPC.ranges = true, from+2, nil
+	tempoRPC.mu.Unlock()
+
+	credential, err := method.CreateCredential(context.Background(), challenge)
+	require.NoError(t, err)
+	assert.Equal(t, zoneTestSettlement, credential.Payload["hash"])
+	tempoRPC.mu.Lock()
+	defer tempoRPC.mu.Unlock()
+	assert.Equal(t, from, tempoRPC.ranges[0][0])
+	assert.Len(t, zoneRPC.sent, 1)
 }
 
 func TestZoneSettlementPendingErrorWithSingleSenderTag(t *testing.T) {

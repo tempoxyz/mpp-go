@@ -200,7 +200,10 @@ type Method struct {
 	// zoneReceiptTimeout bounds the wait for a Zone withdrawal's receipt;
 	// zero means zoneReceiptTimeout.
 	zoneReceiptTimeout time.Duration
-	zoneMu             sync.Mutex
+	// zoneSenderTagReadTimeout bounds the outbox reads that derive candidate
+	// sender tags; zero means zoneSenderTagReadTimeout.
+	zoneSenderTagReadTimeout time.Duration
+	zoneMu                   sync.Mutex
 	// zoneWithdrawals holds Zone withdrawals sent for a challenge, by the
 	// challenge's JSON, so a retry resumes them instead of paying again.
 	zoneWithdrawals map[string]*zoneWithdrawal

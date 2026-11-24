@@ -389,6 +389,7 @@ func TestSenderTagCandidates(t *testing.T) {
 		t.Parallel()
 		_, err := SenderTagCandidates(context.Background(), &zoneCallRPC{before: 4, after: 4}, 10, sender, hash)
 		assert.ErrorContains(t, err, "did not request a withdrawal")
+		assert.ErrorIs(t, err, ErrSenderTagsUnresolved)
 		_, err = SenderTagCandidates(context.Background(), &zoneCallRPC{}, 0, sender, hash)
 		assert.ErrorContains(t, err, "did not request a withdrawal")
 	})
@@ -397,6 +398,7 @@ func TestSenderTagCandidates(t *testing.T) {
 		t.Parallel()
 		_, err := SenderTagCandidates(context.Background(), &zoneCallRPC{before: 0, after: 1 << 63}, 10, sender, hash)
 		assert.ErrorContains(t, err, "more than 64")
+		assert.ErrorIs(t, err, ErrSenderTagsUnresolved)
 	})
 
 	t.Run("derives the tags of a range ending at the largest nonce", func(t *testing.T) {
@@ -411,6 +413,7 @@ func TestSenderTagCandidates(t *testing.T) {
 		t.Parallel()
 		_, err := SenderTagCandidates(context.Background(), &logsRPC{}, 10, sender, hash)
 		assert.ErrorContains(t, err, "lastFallbackNonce")
+		assert.NotErrorIs(t, err, ErrSenderTagsUnresolved)
 	})
 }
 
@@ -444,6 +447,31 @@ func TestWaitForSettledWithdrawal(t *testing.T) {
 
 	_, err = WaitForSettledWithdrawal(context.Background(), &logsRPC{blocks: []string{"0x1"}, logs: func(map[string]any) []any { return nil }}, portal, []common.Hash{tagA, tagB}, nil, 0, 0, nil)
 	assert.ErrorContains(t, err, "zone withdrawal "+tagA.Hex()+" or "+tagB.Hex()+" did not settle on Tempo")
+}
+
+// A WithdrawalProcessed log without its sender tag topic, returned for a
+// filter on several tags, does not say which withdrawal settled: the wait
+// fails rather than checkpoint past its range.
+func TestWaitForSettledWithdrawalFailsOnLogWithoutSenderTag(t *testing.T) {
+	t.Parallel()
+	portal := PortalAddress(3)
+	tagA := common.HexToHash("0x" + repeat("a1", 32))
+	tagB := common.HexToHash("0x" + repeat("b2", 32))
+	hash := "0x" + repeat("ab", 32)
+	rpc := &logsRPC{blocks: []string{"0x10"}, logs: func(map[string]any) []any {
+		return []any{map[string]any{"transactionHash": hash}}
+	}}
+	var checkpoints []uint64
+	_, err := WaitForSettledWithdrawal(context.Background(), rpc, portal, []common.Hash{tagA, tagB}, nil, 0, time.Second, func(next uint64) {
+		checkpoints = append(checkpoints, next)
+	})
+	assert.ErrorContains(t, err, "has no sender tag topic")
+	assert.Empty(t, checkpoints)
+
+	// One tag is still matched by the filter alone.
+	settlement, err := WaitForSettledWithdrawal(context.Background(), rpc, portal, []common.Hash{tagA}, nil, 0, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, Settlement{Hash: hash, SenderTag: tagA}, settlement)
 }
 
 func TestHasRequestedLog(t *testing.T) {
