@@ -598,7 +598,21 @@ func (m *Method) buildTransfer(
 	gasLimit := tempo.DefaultGasLimit
 	if len(transfers) == 1 {
 		dataHex := transferDataHex(transfers[0])
-		estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex)
+		// Name the signing access key in the estimate so the node checks its
+		// spending limits, as viem does. A key this transaction still has to
+		// authorize is not on the keychain yet, so its estimate runs as the
+		// account. The authorization is read again just before signing.
+		var estimateKey *common.Address
+		if m.accessKey != nil {
+			pending, err := m.pendingKeyAuthorization(ctx, rpc)
+			if err != nil {
+				return "", err
+			}
+			if pending == nil {
+				estimateKey = m.accessKeyAddress()
+			}
+		}
+		estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex, estimateKey)
 		if err != nil {
 			// The estimate simulates the transfer as the signing key. A
 			// spending-limit or balance revert there would also revert on
@@ -786,8 +800,6 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 	return uint64(validBefore), nil
 }
 
-// account is the address that pays and is named as the credential source:
-// the access key's root account, or the signer's address.
 // accessKeyAddress returns the address of the access key that signs, or nil
 // when the account signs for itself.
 func (m *Method) accessKeyAddress() *common.Address {
@@ -798,6 +810,8 @@ func (m *Method) accessKeyAddress() *common.Address {
 	return &address
 }
 
+// account is the address that pays and is named as the credential source:
+// the access key's root account, or the signer's address.
 func (m *Method) account() common.Address {
 	if m.accessKey != nil {
 		return m.accessKey.Account
@@ -941,17 +955,15 @@ func (m *Method) estimateGas(
 	rpc tempo.RPCClient,
 	to string,
 	data string,
+	keyID *common.Address,
 ) (uint64, error) {
 	request := map[string]any{
 		"from": m.account().Hex(),
 		"to":   to,
 		"data": data,
 	}
-	// Name the signing access key so the node checks its spending limits, as
-	// viem does. A key this transaction still has to authorize is not on the
-	// keychain yet, so its estimate runs as the account.
-	if m.accessKey != nil && m.accessKey.KeyAuthorization == nil {
-		request["keyId"] = m.signer.Address().Hex()
+	if keyID != nil {
+		request["keyId"] = keyID.Hex()
 	}
 	response, err := rpc.SendRequest(ctx, "eth_estimateGas", request)
 	if err != nil {

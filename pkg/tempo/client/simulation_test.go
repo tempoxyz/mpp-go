@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/require"
 	temporpc "github.com/tempoxyz/tempo-go/pkg/client"
+	"github.com/tempoxyz/tempo-go/pkg/keychain"
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -40,9 +41,16 @@ type revertingEstimateRPC struct {
 	*mockRPC
 	data      any
 	estimates []map[string]any
+	// keyOnChain, when set, is the keyId AccountKeychain.getKey reports.
+	keyOnChain common.Address
 }
 
 func (r *revertingEstimateRPC) SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	if method == "eth_call" && r.keyOnChain != (common.Address{}) {
+		// AccountKeychain.getKey: KeyInfo with a nonzero keyId, so the key is authorized.
+		word := strings.Repeat("0", 64)
+		return &temporpc.JSONRPCResponse{Result: "0x" + word + common.Bytes2Hex(common.LeftPadBytes(r.keyOnChain.Bytes(), 32)) + strings.Repeat(word, 3)}, nil
+	}
 	if method == "eth_estimateGas" {
 		if len(params) > 0 {
 			if request, ok := params[0].(map[string]any); ok {
@@ -153,4 +161,66 @@ func TestSimulationError(t *testing.T) {
 	require.ErrorAs(t, simulationError(revert(testSpendingLimitExceeded), account, nil), &limitErr)
 	require.Nil(t, limitErr.AccessKey)
 	require.NotContains(t, limitErr.Error(), "key 0x")
+}
+
+func TestEstimateNamesAConfiguredKeyOnceItIsOnChain(t *testing.T) {
+	t.Parallel()
+
+	root, err := temposigner.NewSigner(testPrivateKey)
+	require.NoError(t, err)
+	key, err := temposigner.NewSigner("0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a")
+	require.NoError(t, err)
+	authorization, err := keychain.NewKeyAuthorization(42431, 0, key.Address()).Sign(root)
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name    string
+		onChain bool
+	}{
+		{name: "authorized key", onChain: true},
+		{name: "key this payment authorizes", onChain: false},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rpc := &revertingEstimateRPC{mockRPC: &mockRPC{chainID: 42431, gasPrice: "0x1"}, data: testSpendingLimitExceeded}
+			if tt.onChain {
+				rpc.keyOnChain = key.Address()
+			} else {
+				rpc.data = "0xdeadbeef"
+			}
+			method, err := New(Config{
+				AccessKey:     &AccessKey{Signer: key, Account: root.Address(), KeyAuthorization: authorization},
+				RPC:           &keychainAnswer{revertingEstimateRPC: rpc, authorized: tt.onChain},
+				ChainID:       42431,
+				PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
+			})
+			require.NoError(t, err)
+
+			_, err = method.CreateCredential(context.Background(), sponsoredChallenge(t, mpp.ExpiresIn(5*time.Minute)))
+			require.Len(t, rpc.estimates, 1)
+			if tt.onChain {
+				var limitErr *SpendingLimitExceededError
+				require.ErrorAs(t, err, &limitErr)
+				require.Equal(t, key.Address().Hex(), rpc.estimates[0]["keyId"])
+			} else {
+				require.NoError(t, err)
+				require.NotContains(t, rpc.estimates[0], "keyId")
+			}
+		})
+	}
+}
+
+// keychainAnswer answers AccountKeychain.getKey with an unauthorized key
+// unless authorized, and passes every other request on.
+type keychainAnswer struct {
+	*revertingEstimateRPC
+	authorized bool
+}
+
+func (r *keychainAnswer) SendRequest(ctx context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	if method == "eth_call" && !r.authorized {
+		return &temporpc.JSONRPCResponse{Result: "0x" + strings.Repeat("0", 64*5)}, nil
+	}
+	return r.revertingEstimateRPC.SendRequest(ctx, method, params...)
 }

@@ -37,6 +37,7 @@ type SpendingLimitExceededError struct {
 	Err error
 }
 
+// Error implements error.
 func (e *SpendingLimitExceededError) Error() string {
 	key := ""
 	if e.AccessKey != nil {
@@ -68,6 +69,7 @@ type InsufficientBalanceError struct {
 	Err error
 }
 
+// Error implements error.
 func (e *InsufficientBalanceError) Error() string {
 	return fmt.Sprintf("tempo client: insufficient balance: %s holds %s of token %s, but the payment requires %s", e.Account.Hex(), e.Available, e.Token.Hex(), e.Required)
 }
