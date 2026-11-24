@@ -49,6 +49,10 @@ type OriginValidator interface {
 // a Credential is created: by an OnChallengeFunc that returns an error of its
 // own, or by the MCP client's OnPaymentRequired hook. Check it with
 // errors.Is.
+//
+// An OnChallengeFunc returns it (or an error wrapping it) to decline a
+// payment without failing the request: the HTTP Transport, Client and
+// http.Client then return the server's 402 response with a nil error.
 var ErrPaymentDeclined = errors.New("mpp: payment declined")
 
 // ErrNoMethodFound matches, with errors.Is, the *NoMethodFoundError a request

@@ -556,11 +556,10 @@ func TestErrCredentialReplayed(t *testing.T) {
 
 	for _, reason := range []string{"transaction hash already used", "proof credential already used"} {
 		replayed := ErrCredentialReplayed(reason)
-		assert.Equal(t, http.StatusForbidden, replayed.Status)
-		assert.ErrorIs(t, replayed, ErrVerification)
-		want := ErrVerificationFailed(reason).ProblemDetails("challenge-id")
-		want["status"] = http.StatusForbidden
-		assert.Equal(t, want, replayed.ProblemDetails("challenge-id"))
+		assert.Equal(t, http.StatusPaymentRequired, replayed.Status)
+		assert.ErrorIs(t, replayed, ErrorTypeInvalidChallenge)
+		assert.Equal(t, "Invalid Challenge", replayed.Title)
+		assert.Equal(t, reason, replayed.Detail)
 	}
 	assert.Equal(t, "credential has already been used", ErrCredentialReplayed("").Detail)
 }

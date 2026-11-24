@@ -177,7 +177,7 @@ func TestWithChallengeNonce(t *testing.T) {
 	require.NoError(t, err)
 	second, err := payment.Charge(context.Background(), params)
 	require.NoError(t, err)
-	assert.NotEmpty(t, first.Challenge.Opaque["_mppx_nonce"])
+	assert.Regexp(t, "^[A-Za-z0-9_-]{22}$", first.Challenge.Opaque["_mpp_nonce"])
 	assert.NotEqual(t, first.Challenge.ID, second.Challenge.ID)
 
 	for _, issued := range []*ChargeResult{first, second} {
