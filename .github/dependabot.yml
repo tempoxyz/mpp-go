@@ -3,7 +3,8 @@ version: 2
 # Patch and minor updates are grouped per ecosystem and merge on their own
 # through the Dependabot workflow once checks pass. A major update opens its
 # own pull request, so a breaking release holds back only itself. Security
-# updates are grouped separately and are not held to the weekly schedule.
+# updates are grouped separately, majors again on their own, and are not held
+# to the weekly schedule.
 updates:
   # tests/ is a separate module that replaces mpp-go with ../ and repeats the
   # root requirements: update both so they stay in step.
@@ -21,6 +22,7 @@ updates:
       security:
         applies-to: security-updates
         patterns: ["*"]
+        update-types: [minor, patch]
     cooldown:
       default-days: 7
       semver-major-days: 7
@@ -39,6 +41,7 @@ updates:
       security:
         applies-to: security-updates
         patterns: ["*"]
+        update-types: [minor, patch]
     cooldown:
       # Buffer the scanner's seven-day minimum: Dependabot reads date-only tag metadata.
       default-days: 8
@@ -58,6 +61,7 @@ updates:
       security:
         applies-to: security-updates
         patterns: ["*"]
+        update-types: [minor, patch]
     cooldown:
       default-days: 7
       semver-major-days: 7
