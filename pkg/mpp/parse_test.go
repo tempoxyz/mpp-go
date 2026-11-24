@@ -225,9 +225,55 @@ func TestFormatAuthenticateEscapesUnicodeAsUTF16(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, header, `description="Payment \u2014 coffee \u2615 \ud83d\ude00"`)
 
+	// Parsers read quoted-pairs, so the escapes come back as plain text.
 	parsed, err := ParseChallenge(header)
 	require.NoError(t, err)
-	assert.Equal(t, challenge.Description, parsed.Description)
+	assert.Equal(t, "Payment u2014 coffee u2615 ud83dude00", parsed.Description)
+}
+
+func TestFormatChallengeRejectsCharactersAboveLatin1InBoundAuthParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*Challenge)
+		param  string
+	}{
+		{name: "realm", mutate: func(c *Challenge) { c.Realm = "merchant—api.example.com" }, param: "realm"},
+		{name: "id", mutate: func(c *Challenge) { c.ID = "ch_—" }, param: "id"},
+		{name: "intent", mutate: func(c *Challenge) { c.Intent = "charge😀" }, param: "intent"},
+		{name: "digest", mutate: func(c *Challenge) { c.Digest = "sha-256=☕" }, param: "digest"},
+		{name: "expires", mutate: func(c *Challenge) { c.Expires = "2026-01-29T12:00:00Z—" }, param: "expires"},
+		{name: "replacement character", mutate: func(c *Challenge) { c.Realm = "api\uFFFD.example.com" }, param: "realm"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			challenge := newChallenge("secret", "api.example.com", "tempo", "charge", map[string]any{"amount": "100"})
+			tt.mutate(challenge)
+
+			got, err := FormatChallenge(challenge)
+			require.ErrorContains(t, err, "invalid "+tt.param+" auth-param: contains characters above U+00FF")
+			assert.Empty(t, got)
+		})
+	}
+}
+
+func TestFormatChallengeRoundTripsLatin1Realm(t *testing.T) {
+	t.Parallel()
+
+	realm := "café.example.com"
+	challenge := newChallenge("secret", realm, "tempo", "charge", map[string]any{"amount": "100"})
+
+	header, err := FormatChallenge(challenge)
+	require.NoError(t, err)
+	assert.Contains(t, header, `realm="`+realm+`"`)
+
+	parsed, err := ParseChallenge(header)
+	require.NoError(t, err)
+	assert.Equal(t, realm, parsed.Realm)
+	assert.True(t, parsed.VerifyID("secret"))
 }
 
 func TestFormatAuthenticatePreservesRawLatin1Bytes(t *testing.T) {
@@ -270,22 +316,26 @@ func TestFormatAuthenticateRejectsExpandedHeaderAboveLimit(t *testing.T) {
 	assert.Empty(t, challenge.toAuthenticate("api.example.com"))
 }
 
-func TestParseChallengeDecodesUnicodeEscapes(t *testing.T) {
+func TestParseChallengeReadsQuotedPairs(t *testing.T) {
 	t.Parallel()
 
+	// RFC 9110 quoted-pair: a backslash quotes the next octet and \uXXXX is
+	// not an escape.
 	tests := []struct {
 		name    string
 		escaped string
 		want    string
 	}{
-		{name: "bmp", escaped: `em dash \u2014 and coffee \u2615`, want: "em dash — and coffee ☕"},
-		{name: "astral", escaped: `grinning \ud83d\ude00 face`, want: "grinning 😀 face"},
+		{name: "bmp", escaped: `em dash \u2014 and coffee \u2615`, want: "em dash u2014 and coffee u2615"},
+		{name: "astral", escaped: `grinning \ud83d\ude00 face`, want: "grinning ud83dude00 face"},
 		{name: "raw latin-1", escaped: "café naïve", want: "café naïve"},
-		{name: "lone high surrogate", escaped: `lone \ud83d here`, want: "lone \uFFFD here"},
-		{name: "lone low surrogate", escaped: `lone \ude00 here`, want: "lone \uFFFD here"},
+		{name: "raw utf-8", escaped: "em dash — here", want: "em dash — here"},
+		{name: "lone surrogate", escaped: `lone \ud83d here`, want: "lone ud83d here"},
 		{name: "doubled backslash", escaped: `not an escape \\u2014`, want: `not an escape \u2014`},
 		{name: "truncated escape", escaped: `short \u12 tail`, want: "short u12 tail"},
-		{name: "ASCII escape", escaped: `api\u0061`, want: "apia"},
+		{name: "ASCII escape", escaped: `api\u0061`, want: "apiu0061"},
+		{name: "escaped quote", escaped: `say \"hi\"`, want: `say "hi"`},
+		{name: "escaped letter", escaped: `\a\b\c`, want: "abc"},
 	}
 
 	for _, tt := range tests {
@@ -298,6 +348,105 @@ func TestParseChallengeDecodesUnicodeEscapes(t *testing.T) {
 			assert.Equal(t, tt.want, got.Description)
 		})
 	}
+}
+
+func TestParseChallengeUnicodeEscapeInRealmIsQuotedPair(t *testing.T) {
+	t.Parallel()
+
+	header := `Payment id="ch_unicode_realm", realm="merchant\u2014api.example.com", method="tempo", intent="charge", request="e30"`
+	got, err := ParseChallenge(header)
+	require.NoError(t, err)
+	assert.Equal(t, "merchantu2014api.example.com", got.Realm)
+}
+
+func TestParseChallengeFlagsLegacyUnicodeEscapeInBoundAuthParams(t *testing.T) {
+	t.Parallel()
+
+	// Older servers wrote characters above U+00FF in auth-params as \uXXXX.
+	// ParseChallenge reads them as quoted-pairs and flags the challenge when
+	// an ID-bound auth-param held one, so clients refuse to pay it.
+	tests := []struct {
+		name        string
+		realm       string
+		description string
+		extra       string
+		want        bool
+	}{
+		{name: "latin-1 escape in realm", realm: `caf\u00e9.example.com`, want: true},
+		{name: "em dash escape in realm", realm: `merchant\u2014api.example.com`, want: true},
+		{name: "uppercase hex in realm", realm: `caf\u00E9.example.com`, want: true},
+		{name: "escaped quote in realm", realm: `api.\"example.com`, want: false},
+		{name: "escaped backslash in realm", realm: `api.\\example.com`, want: false},
+		{name: "escaped backslash before u in realm", realm: `api\\u2014.example.com`, want: false},
+		{name: "truncated escape in realm", realm: `api\u12.example.com`, want: false},
+		{name: "non-hex escape in realm", realm: `api\u12g4.example.com`, want: false},
+		{name: "escape in description only", realm: "api.example.com", description: `Payment \u2014 coffee`, want: false},
+		{name: "no escape", realm: "api.example.com", want: false},
+		{name: "escape in unknown extension only", realm: "api.example.com", extra: `, x-display="\u2014"`, want: false},
+		{name: "escape in digest", realm: "api.example.com", extra: `, digest="sha-256=\u00e9"`, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			header := `Payment id="ch_1", realm="` + tt.realm + `", method="tempo", intent="charge", request="e30"`
+			if tt.description != "" {
+				header += `, description="` + tt.description + `"`
+			}
+			header += tt.extra
+			got, err := ParseChallenge(header)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.LegacyUnicodeEscape())
+		})
+	}
+}
+
+func TestParseChallengeFlagsLegacyUnicodeEscapeInID(t *testing.T) {
+	t.Parallel()
+
+	got, err := ParseChallenge(`Payment id="ch\u00e9", realm="api.example.com", method="tempo", intent="charge", request="e30"`)
+	require.NoError(t, err)
+	assert.True(t, got.LegacyUnicodeEscape())
+}
+
+func TestParseChallengeDoesNotFlagQuotedPairInMethodName(t *testing.T) {
+	t.Parallel()
+
+	// A method name is lowercase ASCII, which older servers never escaped,
+	// so "\uabcd" is a quoted-pair spelling of the method "uabcd".
+	got, err := ParseChallenge(`Payment id="ch_1", realm="api.example.com", method="\uabcd", intent="charge", request="e30"`)
+	require.NoError(t, err)
+	assert.Equal(t, "uabcd", got.Method)
+	assert.False(t, got.LegacyUnicodeEscape())
+	header, err := FormatChallenge(got)
+	require.NoError(t, err)
+	assert.Contains(t, header, `method="uabcd"`)
+}
+
+func TestLegacyUnicodeEscapeIsNotPartOfTheWireForm(t *testing.T) {
+	t.Parallel()
+
+	legacy, err := ParseChallenge(`Payment id="ch_1", realm="caf\u00e9.example.com", method="tempo", intent="charge", request="e30"`)
+	require.NoError(t, err)
+	plain, err := ParseChallenge(`Payment id="ch_1", realm="cafu00e9.example.com", method="tempo", intent="charge", request="e30"`)
+	require.NoError(t, err)
+	require.True(t, legacy.LegacyUnicodeEscape())
+	require.False(t, plain.LegacyUnicodeEscape())
+
+	legacyJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	plainJSON, err := json.Marshal(plain)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(plainJSON), string(legacyJSON))
+
+	// Formatting fails closed: the header it would write reparses as an
+	// ordinary offer.
+	_, err = FormatChallenge(legacy)
+	require.ErrorIs(t, err, ErrLegacyUnicodeEscapedChallenge)
+	_, err = FormatChallenge(plain)
+	require.NoError(t, err)
+	assert.Equal(t, plain.ToEcho(), legacy.ToEcho())
+	assert.False(t, (*Challenge)(nil).LegacyUnicodeEscape())
 }
 
 func TestFormatAuthenticateStrictRejectsLossyJCSRequest(t *testing.T) {
@@ -741,14 +890,14 @@ func TestParseCredential(t *testing.T) {
 			want:   headerCredential,
 		},
 		{
-			name:   "merged authorization header",
-			header: `Digest realm="alpha,beta", nonce="123", ` + credential.toAuthorization(),
-			want:   credential,
+			name:    "merged authorization header",
+			header:  `Digest realm="alpha,beta", nonce="123", ` + credential.toAuthorization(),
+			wantErr: `expected Payment scheme`,
 		},
 		{
 			name:    "multiple payment credentials",
 			header:  credential.toAuthorization() + ", " + credential.toAuthorization(),
-			wantErr: `multiple Payment credentials`,
+			wantErr: `single base64url token`,
 		},
 		{
 			name:    "missing payment scheme",

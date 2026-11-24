@@ -51,7 +51,7 @@ func TestCredentialExpiredGraceRequiresMarker(t *testing.T) {
 func TestExpiryGraceKeyReserved(t *testing.T) {
 	t.Parallel()
 
-	_, err := VerifyOrChallenge(t.Context(), VerifyParams{Meta: map[string]string{expiryGraceKey: "1"}})
+	_, err := VerifyOrChallenge(t.Context(), VerifyParams{SecretKey: "verify-test-secret-key-of-at-least-32-bytes", Meta: map[string]string{expiryGraceKey: "1"}})
 	assert.ErrorContains(t, err, "_mppx_expiry_grace is reserved")
 	assert.Equal(t, map[string]string{"plan": "pro"}, applicationMeta(map[string]string{"plan": "pro", expiryGraceKey: "1"}))
 }

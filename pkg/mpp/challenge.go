@@ -29,6 +29,20 @@ type Challenge struct {
 	// implicit default, Authorization. When set, it is advertised as the
 	// challenge header parameter and bound into the challenge ID.
 	Header string `json:"header,omitempty"`
+	// legacyUnicodeEscape records that ParseChallenge read a legacy \uXXXX
+	// escape in an ID-bound auth-param. It is not part of the wire form.
+	legacyUnicodeEscape bool
+}
+
+// LegacyUnicodeEscape reports whether c was parsed from a header in which an
+// auth-param bound into the challenge ID (not description or an unknown
+// extension) held a \uXXXX escape. Servers on older SDK releases wrote
+// characters above U+00FF that way; ParseChallenge reads it as an RFC 9110
+// quoted-pair ("\u00e9" reads "u00e9"), so the parsed value differs from the
+// one the ID binds and the server would reject a Credential for c. Clients
+// refuse to pay such a challenge with ErrLegacyUnicodeEscapedChallenge.
+func (c *Challenge) LegacyUnicodeEscape() bool {
+	return c != nil && c.legacyUnicodeEscape
 }
 
 // ChallengeEcho is the subset of a Challenge echoed back in a Credential.
@@ -344,9 +358,9 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 		if requestB64 == "" {
 			requestB64 = b64EncodeRequest(nil)
 		}
-		decoded, err := B64Decode(requestB64)
+		decoded, err := decodeRequestB64(requestB64)
 		if err != nil {
-			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+			return nil, "", err
 		}
 		return decoded, requestB64, nil
 	}
@@ -361,9 +375,9 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 		return decoded, requestB64, nil
 	}
 
-	decodedB64, err := B64Decode(requestB64)
+	decodedB64, err := decodeRequestB64(requestB64)
 	if err != nil {
-		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+		return nil, "", err
 	}
 	if !ChallengeBoundJSONEqual(decoded, decodedB64) {
 		return nil, "", fmt.Errorf("mpp: challenge request and requestB64 do not match")
@@ -377,9 +391,9 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 		if err := json.Unmarshal(trimmed, &requestB64); err != nil {
 			return nil, "", err
 		}
-		decoded, err := B64Decode(requestB64)
+		decoded, err := decodeRequestB64(requestB64)
 		if err != nil {
-			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+			return nil, "", err
 		}
 		return decoded, requestB64, nil
 	}
@@ -396,6 +410,19 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
 	}
 	return request, requestB64, nil
+}
+
+// decodeRequestB64 decodes a base64url challenge request, which must be a
+// JSON object, as ParseChallenge requires.
+func decodeRequestB64(requestB64 string) (map[string]any, error) {
+	decoded, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	if decoded == nil {
+		return nil, fmt.Errorf("mpp: invalid request encoding: must be a JSON object")
+	}
+	return decoded, nil
 }
 
 // decodeJSONOpaque decodes a JSON opaque value. For a base64url string it also

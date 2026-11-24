@@ -200,18 +200,15 @@ func ErrVerificationFailed(reason string) *PaymentError {
 	return newPaymentError(ErrorTypeVerificationFailed, reason)
 }
 
-// ErrCredentialReplayed returns a 403 verification-failed error for a
-// credential whose payment was already used: consumed by an earlier request or
-// claimed by a concurrent one. The payment itself was valid, so the response
-// carries no retry challenge and auto-paying clients do not pay again. The
-// problem type stays verification-failed; only the status differs.
+// ErrCredentialReplayed returns a 402 invalid-challenge error for a
+// credential whose Challenge or payment was already used: consumed by an
+// earlier request or claimed by a concurrent one. As the core specification
+// requires, servers answer it with a fresh Challenge; reason may be empty.
 func ErrCredentialReplayed(reason string) *PaymentError {
 	if reason == "" {
 		reason = "credential has already been used"
 	}
-	pe := newPaymentError(ErrorTypeVerificationFailed, reason)
-	pe.Status = http.StatusForbidden
-	return pe
+	return newPaymentError(ErrorTypeInvalidChallenge, reason)
 }
 
 // ErrPaymentExpired returns a 402 error for expired payment challenges.

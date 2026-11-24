@@ -3,13 +3,13 @@
 // them and the clients that compare Challenges strip the same keys.
 package challengemeta
 
-// NonceKey is the key of the random issuance nonce, as mppx's
-// ChallengeMeta.withNonce.
-const NonceKey = "_mppx_nonce"
+// NonceKey is the key of the random issuance nonce, the key every MPP SDK
+// uses.
+const NonceKey = "_mpp_nonce"
 
-// LegacyNonceKey is the issuance nonce key earlier mpp-go releases set,
-// still accepted on verification until those Challenges expire.
-const LegacyNonceKey = "_mpp_nonce"
+// LegacyNonceKey is the issuance nonce key mppx and mpp-go releases 0.7.0 to
+// 0.9.0 set, still accepted on verification.
+const LegacyNonceKey = "_mppx_nonce"
 
 // ExpiryGraceKey marks a Challenge whose intent accepts some of its
 // Credentials for a while after it expires, as mppx's

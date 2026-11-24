@@ -36,13 +36,15 @@ const methodCallTool = "tools/call"
 // when an OnChallenge hook declines, so errors.Is matches either.
 var ErrPaymentDeclined = mppclient.ErrPaymentDeclined
 
-// ErrPaymentReconciliationRequired indicates a submitted transfer must be reconciled
-// before retrying a tool call. Use errors.As to obtain its ReconciliationError.
+// ErrPaymentReconciliationRequired indicates a submitted payment must be
+// reconciled before retrying a tool call: a hash Credential's transfer is
+// already on chain, and an invalid-challenge rejection of any sent Credential
+// can mean it already settled (a replay), so paying the fresh Challenge could
+// pay twice. Use errors.As to obtain its ReconciliationError.
 var ErrPaymentReconciliationRequired = errors.New("mpp: reconcile the sent payment before paying another challenge")
 
-// ReconciliationError preserves the submitted hash or zone Credential and the
-// server failure.
-// A caller must reconcile Credential before attempting a new payment.
+// ReconciliationError preserves the submitted Credential and the server's
+// answer. A caller must reconcile Credential before attempting a new payment.
 type ReconciliationError struct {
 	Credential *mpp.Credential
 	Cause      error
@@ -198,6 +200,17 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 					return result, &ReconciliationError{Credential: sentPush, Cause: err}
 				}
 				return result, err
+			}
+			if last != nil && data.Problem["type"] == string(mpp.ErrorTypeInvalidChallenge) {
+				// invalid-challenge answering a sent Credential can mean it
+				// was already settled (a replay): paying the fresh Challenge
+				// would pay twice, so the answer is final, as in the HTTP
+				// Transport.
+				cause := err
+				if cause == nil {
+					cause = errors.New("mpp: tool result rejected the sent credential as invalid-challenge")
+				}
+				return result, &ReconciliationError{Credential: last, Cause: cause}
 			}
 			if attempt == maxPaymentAttempts {
 				if sentPush != nil {

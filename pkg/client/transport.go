@@ -91,10 +91,14 @@ type transportConfig struct {
 //   - return (nil, nil) to let the transport create the credential itself, or
 //     to use the one createCredential already made,
 //   - return a credential, from createCredential or built another way, to send it,
-//   - return an error to decline the payment: RoundTrip returns that error,
-//     wrapped, and does not pay. It matches ErrPaymentDeclined only when no
+//   - return an error wrapping ErrPaymentDeclined, without calling
+//     createCredential, to decline the payment: RoundTrip does not pay and
+//     returns the 402 response, body unread, with a nil error, as mppx does,
+//   - return any other error to stop: RoundTrip returns that error, wrapped,
+//     and does not pay. It matches ErrPaymentDeclined only when no
 //     credential was created: after createCredential succeeded the payment
-//     may already have been made, so the error is not reported as a decline.
+//     may already have been made, so the error is not reported as a decline,
+//     and an ErrPaymentDeclined returned then is an error, not a 402.
 //
 // It is not called when a 402 offers again the challenge the last request
 // answered: the transport resends that request's credential instead, unless
@@ -150,7 +154,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var sentCredential credentialKey
 	// A credential the caller set on the request is sent with the first
 	// round, so its outcome is as unknown as one the Transport created.
-	sent, sentChallenge, sentCred := callerCredential(baseRequest.Header)
+	// A Payment credential the caller set in Authorization or
+	// Payment-Authorization that the client cannot parse (callerUnreadable)
+	// may name a payment already made, so the client does not pay again for
+	// it.
+	sent, callerUnreadable, sentChallenge, sentCred := callerCredential(baseRequest.Header)
 	callerPaid, callerCred := sent, sentCred
 	if sentChallenge != nil && sentCred != nil {
 		sentCredential = newCredentialKey(sentCred.Challenge)
@@ -212,7 +220,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		challenges, errs := t.parseChallenges(resp.Header)
 		_ = errs // Non-Payment or malformed headers are silently skipped.
-		candidates := t.challengeCandidates(challenges, preferences, time.Now().UTC())
+		candidates, legacy := t.challengeCandidates(challenges, preferences, time.Now().UTC())
+		// Report a legacy-escaped offer only when it left nothing payable,
+		// not when the OrderChallenges hook removed the payable offers.
+		legacy = legacy && len(candidates) == 0
 		if len(candidates) > 0 && t.orderChallenges != nil {
 			candidates, err = t.orderCandidates(baseRequest.Context(), candidates)
 			if err != nil {
@@ -228,6 +239,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				return resp, nil
 			}
 			drainAndClose(resp.Body)
+			if legacy {
+				return nil, fmt.Errorf("%w: %w", mpp.ErrLegacyUnicodeEscapedChallenge, newNoMethodFoundError(challenges, t.configuredMethods()))
+			}
 			return nil, newNoMethodFoundError(challenges, t.configuredMethods())
 		}
 		var selected challengeCandidate
@@ -245,6 +259,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, rejected
 		}
 
+		if sent && problem != nil && problem.Type == mpp.ErrorTypeInvalidChallenge {
+			// invalid-challenge answering a sent credential can mean it was
+			// already settled (a replay): paying the fresh Challenge would pay
+			// twice, so the 402 is final.
+			return resp, nil
+		}
 		key := newCredentialKey(selected.challenge.ToEcho())
 		// The Challenge the last request answered is offered again: send the
 		// same Credential, without paying again, as mppx does. Any other
@@ -256,32 +276,50 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if sent && sentCred != nil && key == sentCredential && !invalidPayload {
 			cred = sentCred
 		}
-		if cred == nil && sent && sentCred != nil && isPushCredential(sentCred) {
+		if cred == nil && sent && ((sentCred != nil && isPushCredential(sentCred)) || callerUnreadable) {
 			// A push credential's payment (a hash credential's transfer or a
 			// zone credential's withdrawal) is already on chain: resending it
-			// is safe, but paying a new challenge would pay twice.
+			// is safe, but paying a new challenge would pay twice. A caller's
+			// credential the client cannot parse may be one too, so the
+			// caller reconciles it rather than the client paying again.
 			return resp, nil
 		}
-		drainAndClose(resp.Body)
 
 		// Prepare the retry before paying for it. A credential created for a
 		// request that cannot be sent again is spent without ever reaching
 		// the server.
 		retry, err := t.cloneRequest(baseRequest)
 		if err != nil {
+			drainAndClose(resp.Body)
 			// The inner RoundTripper already received, and closed, the
 			// request body: closing it again here would double-close it.
 			return nil, fmt.Errorf("mpp: cloning request for retry: %w", err)
 		}
 
-		if cred == nil {
+		created := cred == nil
+		if created {
 			cred, err = t.createCredential(baseRequest.Context(), selected, challengeOrigin(request.URL))
 			if err != nil {
 				if retry.Body != nil {
 					_ = retry.Body.Close()
 				}
+				// The OnChallenge hook declined with ErrPaymentDeclined
+				// before any credential was created: nothing was paid, so
+				// the 402 is the answer, returned with its body unread.
+				if hookDeclined(err) {
+					return resp, nil
+				}
+				drainAndClose(resp.Body)
 				return nil, err
 			}
+		}
+		if created {
+			// The method may already have broadcast a payment: close the 402
+			// without reading the rest of its body, which a stalled server
+			// could otherwise use to hold back the paid retry.
+			_ = resp.Body.Close()
+		} else {
+			drainAndClose(resp.Body)
 		}
 
 		authorization, err := mpp.FormatCredential(cred)
@@ -349,11 +387,49 @@ func (e *PaymentOutcomeUnknownError) Timeout() bool {
 }
 
 // callerCredential reports whether header carries a Payment credential the
-// caller set, in any field, and parses it when it can.
-func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential) {
-	value, ok := paymentCredentialValue(header)
-	if !ok {
-		return false, nil, nil
+// caller set, and parses it when it can. Authorization and
+// Payment-Authorization, the fields servers read credentials from, come first,
+// and every value of both is checked: of those that parse, a push credential
+// is preferred, since its payment is already on chain. unreadable reports a
+// Payment credential in either field that does not parse: it may name a
+// payment already made. Only when neither field holds a Payment credential is
+// another field used (a challenge may name a custom credential field), and a
+// Payment-shaped value there that does not parse is not unreadable, so
+// unrelated metadata such as "X-Status: Payment pending" cannot block payment.
+func callerCredential(header http.Header) (sent, unreadable bool, challenge *mpp.Challenge, cred *mpp.Credential) {
+	supported, other := paymentCredentialValues(header)
+	if len(supported) > 0 {
+		for _, value := range supported {
+			parsed, err := parseCallerCredential(value)
+			if err != nil {
+				unreadable = true
+				continue
+			}
+			if cred == nil || (!isPushCredential(cred) && isPushCredential(parsed)) {
+				cred = parsed
+			}
+		}
+		return true, unreadable, challengeFromEcho(cred), cred
+	}
+	if len(other) == 0 {
+		return false, false, nil, nil
+	}
+	cred, err := parseCallerCredential(other[0])
+	if err != nil {
+		return true, false, nil, nil
+	}
+	return true, false, challengeFromEcho(cred), cred
+}
+
+// parseCallerCredential parses a Payment credential the caller set.
+func parseCallerCredential(value string) (*mpp.Credential, error) {
+	// The caller's own credential is read as leniently as before
+	// ParseCredential became strict: any run of spaces and tabs may separate
+	// the scheme from the token. Servers still require one space or more.
+	if scheme, token, ok := strings.Cut(strings.TrimSpace(value), " "); ok {
+		value = scheme + " " + strings.TrimLeft(token, " \t")
+	} else if scheme, token, ok := strings.Cut(strings.TrimSpace(value), "\t"); ok {
+		value = scheme + " " + strings.TrimLeft(token, " \t")
 	}
 	cred, err := mpp.ParseCredential(value)
 	if errors.Is(err, mpp.ErrUnsupportedCredentialHeader) {
@@ -362,11 +438,16 @@ func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential
 		// credential's is already on chain), so read it without that header.
 		cred, err = parseCredentialWithoutHeader(value)
 	}
-	if err != nil {
-		return true, nil, nil
+	return cred, err
+}
+
+// challengeFromEcho returns the Challenge cred echoes, or nil for a nil cred.
+func challengeFromEcho(cred *mpp.Credential) *mpp.Challenge {
+	if cred == nil {
+		return nil
 	}
 	echo := cred.Challenge
-	return true, &mpp.Challenge{
+	return &mpp.Challenge{
 		ID:         echo.ID,
 		Method:     echo.Method,
 		Intent:     echo.Intent,
@@ -376,7 +457,7 @@ func callerCredential(header http.Header) (bool, *mpp.Challenge, *mpp.Credential
 		Expires:    echo.Expires,
 		Opaque:     echo.Opaque,
 		Header:     echo.Header,
-	}, cred
+	}
 }
 
 // parseCredentialWithoutHeader parses a Payment credential after removing the
@@ -399,25 +480,41 @@ func parseCredentialWithoutHeader(value string) (*mpp.Credential, error) {
 	return mpp.ParseCredential(mpp.SchemePayment + " " + base64.RawURLEncoding.EncodeToString(encoded))
 }
 
-// paymentCredentialValue returns the first header element, in any field
-// regardless of its name's case, that uses the Payment auth scheme. A
-// challenge may name a custom credential field, so every field is checked.
-func paymentCredentialValue(header http.Header) (string, bool) {
-	for _, values := range header {
+// paymentCredentialValues returns every header element that uses the Payment
+// auth scheme: supported holds those in Authorization and
+// Payment-Authorization (field names in any case), other those in every other
+// field, since a challenge may name a custom credential field. Values are
+// split as servers split them (mpp.SplitAuthenticate), so a comma inside a
+// quoted auth-param of another scheme does not start a Payment element.
+func paymentCredentialValues(header http.Header) (supported, other []string) {
+	for name, values := range header {
+		isSupported := strings.EqualFold(name, mpp.HeaderAuthorization) || strings.EqualFold(name, mpp.HeaderPaymentAuthorization)
 		for _, value := range values {
-			for _, part := range strings.Split(value, ",") {
+			for _, part := range mpp.SplitAuthenticate(value) {
 				part = strings.TrimSpace(part)
 				scheme, token, _ := strings.Cut(part, " ")
 				token = strings.TrimSpace(token)
+				// SplitAuthenticate keeps auth-params that follow a token
+				// ("Payment <token>, realm=x") in the same part. The caller's
+				// credential is the token before the first comma, read as
+				// "Payment <token>" in every field, as before strict parsing.
+				token, _, _ = strings.Cut(token, ",")
+				token = strings.TrimSpace(token)
 				// A credential is the scheme and one token; this keeps
 				// prose such as "payment received" in other fields out.
-				if strings.EqualFold(scheme, mpp.SchemePayment) && token != "" && !strings.ContainsAny(token, " \t") {
-					return part, true
+				if !strings.EqualFold(scheme, mpp.SchemePayment) || token == "" || strings.ContainsAny(token, " \t") {
+					continue
+				}
+				credential := scheme + " " + token
+				if isSupported {
+					supported = append(supported, credential)
+				} else {
+					other = append(other, credential)
 				}
 			}
 		}
 	}
-	return "", false
+	return supported, other
 }
 
 // closeRequestBody closes req.Body, as http.RoundTripper requires even when
@@ -471,6 +568,11 @@ func (t *Transport) createCredential(ctx context.Context, selected challengeCand
 		if created && createdErr != nil && errors.Is(err, createdErr) {
 			return nil, err
 		}
+		// A hook that declines after the method failed is not a clean
+		// decline either: the method may have paid before failing.
+		if created && createdErr != nil {
+			return nil, fmt.Errorf("mpp: onChallenge after creating credential failed: %w", errors.Join(err, createdErr))
+		}
 		// A hook that failed after createCredential made a credential did not
 		// decline: the method may already have paid.
 		if created && createdErr == nil {
@@ -493,6 +595,14 @@ type declinedError struct {
 func (e *declinedError) Error() string { return "mpp: onChallenge: " + e.err.Error() }
 
 func (e *declinedError) Unwrap() []error { return []error{ErrPaymentDeclined, e.err} }
+
+// hookDeclined reports whether err is an OnChallengeFunc's decline, made
+// before any credential was created, whose own error matches
+// ErrPaymentDeclined.
+func hookDeclined(err error) bool {
+	var declined *declinedError
+	return errors.As(err, &declined) && errors.Is(declined.err, ErrPaymentDeclined)
+}
 
 // orderCandidates runs the OrderChallenges hook on the ranked candidates and
 // returns its order. Entries without a Challenge or a Method for its method
@@ -552,8 +662,13 @@ type peekedBody struct {
 	io.Closer
 }
 
-func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) []challengeCandidate {
-	candidates := make([]challengeCandidate, 0, len(challenges))
+// challengeCandidates returns the Challenges a method can pay, ranked by
+// payment preference, then in offer order. legacy reports that a Challenge a method could otherwise pay was left out
+// because it holds a legacy \uXXXX escape in an ID-bound auth-param
+// (mpp.ErrLegacyUnicodeEscapedChallenge): its Credential would be rejected,
+// possibly after a pushed payment had moved funds.
+func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences []paymentPreference, now time.Time) (candidates []challengeCandidate, legacy bool) {
+	candidates = make([]challengeCandidate, 0, len(challenges))
 	for i := range challenges {
 		ch := &challenges[i]
 		if ch.Expires != "" {
@@ -581,6 +696,10 @@ func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences 
 			if matcher, ok := method.(ChallengeMatcher); ok && !matcher.CanHandleChallenge(ch) {
 				continue
 			}
+			if ch.LegacyUnicodeEscape() {
+				legacy = true
+				continue
+			}
 			candidates = append(candidates, challengeCandidate{
 				challenge: ch,
 				method:    method,
@@ -591,7 +710,7 @@ func (t *Transport) challengeCandidates(challenges []mpp.Challenge, preferences 
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].quality > candidates[j].quality
 	})
-	return candidates
+	return candidates, legacy
 }
 
 type challengeCandidate struct {

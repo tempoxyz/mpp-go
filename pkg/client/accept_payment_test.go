@@ -332,7 +332,7 @@ func TestTransportChallengeCandidates(t *testing.T) {
 				return nil, nil
 			}))
 
-			got := transport.challengeCandidates(tt.challenges, preferences, now)
+			got, _ := transport.challengeCandidates(tt.challenges, preferences, now)
 			ids := make([]string, len(got))
 			for i, candidate := range got {
 				ids[i] = candidate.challenge.ID

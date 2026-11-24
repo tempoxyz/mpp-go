@@ -2,6 +2,7 @@ package zone
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -132,8 +133,9 @@ func TestFindWithdrawalAndProcessedEvent(t *testing.T) {
 }
 
 type logsRPC struct {
-	blocks []string
-	logs   func(filter map[string]any) []any
+	blocks  []string
+	logs    func(filter map[string]any) []any
+	logsErr func(filter map[string]any) error
 }
 
 func (r *logsRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
@@ -145,6 +147,11 @@ func (r *logsRPC) SendRequest(_ context.Context, method string, params ...interf
 		}
 		return &temporpc.JSONRPCResponse{Result: block}, nil
 	case "eth_getLogs":
+		if r.logsErr != nil {
+			if err := r.logsErr(params[0].(map[string]any)); err != nil {
+				return nil, err
+			}
+		}
 		return &temporpc.JSONRPCResponse{Result: r.logs(params[0].(map[string]any))}, nil
 	}
 	return &temporpc.JSONRPCResponse{Error: &temporpc.JSONRPCError{Code: -1, Message: method}}, nil
@@ -167,7 +174,7 @@ func TestWaitForSettlement(t *testing.T) {
 	assert.Equal(t, uint64(0x2710-lookbackBlocks), start)
 	settlement, err := WaitForSettlement(context.Background(), rpc, portal, tag, nil, start, 5*time.Second)
 	require.NoError(t, err)
-	assert.Equal(t, Settlement{Hash: "0x" + repeat("ab", 32)}, settlement)
+	assert.Equal(t, Settlement{Hash: "0x" + repeat("ab", 32), SenderTag: tag}, settlement)
 	// The first poll looks back lookbackBlocks; the next only at new blocks.
 	assert.Equal(t, "0xaf0", filters[0]["fromBlock"])
 	assert.Equal(t, "0x2710", filters[0]["toBlock"])
@@ -246,7 +253,7 @@ func TestWaitForSettlementReportsBouncedPayout(t *testing.T) {
 			}}
 			settlement, err := WaitForSettlement(context.Background(), rpc, portal, tag, &to, 0, 0)
 			require.NoError(t, err)
-			assert.Equal(t, Settlement{Hash: hash, Bounced: test.bounced}, settlement)
+			assert.Equal(t, Settlement{Hash: hash, SenderTag: tag, Bounced: test.bounced}, settlement)
 		})
 	}
 }
@@ -307,4 +314,171 @@ func TestIsPortalAddress(t *testing.T) {
 	} {
 		assert.Equal(t, want, IsPortalAddress(common.HexToAddress(address)), address)
 	}
+}
+
+func TestSettlementScanRetainsProgressAfterRPCTimeout(t *testing.T) {
+	t.Parallel()
+	var next uint64 = 2800
+	rpc := &logsRPC{blocks: []string{hexutil.EncodeUint64(30_000)}, logs: func(map[string]any) []any { return nil }}
+	rpc.logsErr = func(filter map[string]any) error {
+		if hexutil.MustDecodeUint64(filter["fromBlock"].(string)) == 10001 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	_, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, uint64(10001), next)
+	rpc.logsErr = nil
+	rpc.logs = func(filter map[string]any) []any {
+		assert.Equal(t, "0x2711", filter["fromBlock"])
+		return []any{map[string]any{"transactionHash": "0x" + repeat("ab", 32)}}
+	}
+	settlement, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.NoError(t, err)
+	assert.NotEmpty(t, settlement.Hash)
+}
+
+func TestSettlementScanDoesNotCheckpointNearHeadEmptyLogs(t *testing.T) {
+	t.Parallel()
+	var next uint64 = 2800
+	rpc := &logsRPC{blocks: []string{hexutil.EncodeUint64(10001)}, logs: func(map[string]any) []any { return nil }}
+	_, err := WaitForSettlementWithProgress(context.Background(), rpc, PortalAddress(3), common.Hash{}, nil, next, 0, func(block uint64) { next = block })
+	require.Error(t, err)
+	assert.Equal(t, uint64(2800), next)
+}
+
+// zoneCallRPC is a Zone RPC whose outbox reports before at block 9 and after
+// at block 10.
+type zoneCallRPC struct {
+	before, after uint64
+	calls         []any
+}
+
+func (r *zoneCallRPC) SendRequest(_ context.Context, method string, params ...interface{}) (*temporpc.JSONRPCResponse, error) {
+	if method != "eth_call" {
+		return &temporpc.JSONRPCResponse{Error: &temporpc.JSONRPCError{Code: -1, Message: method}}, nil
+	}
+	r.calls = append(r.calls, params...)
+	nonce := r.after
+	if params[1] == "0x9" {
+		nonce = r.before
+	}
+	return &temporpc.JSONRPCResponse{Result: hexutil.Encode(common.BigToHash(new(big.Int).SetUint64(nonce)).Bytes())}, nil
+}
+
+func TestSenderTagCandidates(t *testing.T) {
+	t.Parallel()
+	sender := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	hash := common.HexToHash("0x" + repeat("ab", 32))
+
+	t.Run("derives one tag per nonce the block added", func(t *testing.T) {
+		t.Parallel()
+		rpc := &zoneCallRPC{before: 4, after: 6}
+		tags, err := SenderTagCandidates(context.Background(), rpc, 10, sender, hash)
+		require.NoError(t, err)
+		assert.Equal(t, []common.Hash{SenderTag(sender, hash, 5), SenderTag(sender, hash, 6)}, tags)
+		selector := hexutil.Encode(OutboxABI.Methods["lastFallbackNonce"].ID)
+		assert.Equal(t, []any{
+			map[string]any{"to": OutboxAddress.Hex(), "data": selector}, "0x9",
+			map[string]any{"to": OutboxAddress.Hex(), "data": selector}, "0xa",
+		}, rpc.calls)
+	})
+
+	t.Run("rejects a block that added no withdrawal", func(t *testing.T) {
+		t.Parallel()
+		_, err := SenderTagCandidates(context.Background(), &zoneCallRPC{before: 4, after: 4}, 10, sender, hash)
+		assert.ErrorContains(t, err, "did not request a withdrawal")
+		assert.ErrorIs(t, err, ErrSenderTagsUnresolved)
+		_, err = SenderTagCandidates(context.Background(), &zoneCallRPC{}, 0, sender, hash)
+		assert.ErrorContains(t, err, "did not request a withdrawal")
+	})
+
+	t.Run("rejects a nonce range no block could hold", func(t *testing.T) {
+		t.Parallel()
+		_, err := SenderTagCandidates(context.Background(), &zoneCallRPC{before: 0, after: 1 << 63}, 10, sender, hash)
+		assert.ErrorContains(t, err, "more than 64")
+		assert.ErrorIs(t, err, ErrSenderTagsUnresolved)
+	})
+
+	t.Run("derives the tags of a range ending at the largest nonce", func(t *testing.T) {
+		t.Parallel()
+		rpc := &zoneCallRPC{before: math.MaxUint64 - 2, after: math.MaxUint64}
+		tags, err := SenderTagCandidates(context.Background(), rpc, 10, sender, hash)
+		require.NoError(t, err)
+		assert.Equal(t, []common.Hash{SenderTag(sender, hash, math.MaxUint64-1), SenderTag(sender, hash, math.MaxUint64)}, tags)
+	})
+
+	t.Run("reports a failed read", func(t *testing.T) {
+		t.Parallel()
+		_, err := SenderTagCandidates(context.Background(), &logsRPC{}, 10, sender, hash)
+		assert.ErrorContains(t, err, "lastFallbackNonce")
+		assert.NotErrorIs(t, err, ErrSenderTagsUnresolved)
+	})
+}
+
+// WaitForSettledWithdrawal asks for every candidate tag at once and reports
+// the one the settlement carries.
+func TestWaitForSettledWithdrawal(t *testing.T) {
+	t.Parallel()
+	portal := PortalAddress(3)
+	to := common.HexToAddress("0x00000000000000000000000000000000000000c1")
+	token := common.HexToAddress("0x20c0000000000000000000000000000000000000")
+	tagA := common.HexToHash("0x" + repeat("a1", 32))
+	tagB := common.HexToHash("0x" + repeat("b2", 32))
+	other := common.HexToHash("0x" + repeat("c3", 32))
+	hash := "0x" + repeat("ab", 32)
+	var filters []map[string]any
+	rpc := &logsRPC{blocks: []string{"0x10"}, logs: func(filter map[string]any) []any {
+		filters = append(filters, filter)
+		unrelated := processedLog(t, portal, to, other, token, true)
+		unrelated["transactionHash"] = "0x" + repeat("cd", 32)
+		settled := processedLog(t, portal, to, tagB, token, true)
+		settled["transactionHash"] = hash
+		return []any{unrelated, settled}
+	}}
+	settlement, err := WaitForSettledWithdrawal(context.Background(), rpc, portal, []common.Hash{tagA, tagB}, &to, 0, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, Settlement{Hash: hash, SenderTag: tagB}, settlement)
+	assert.Equal(t, []any{ProcessedTopic.Hex(), common.BytesToHash(to.Bytes()).Hex(), []string{tagA.Hex(), tagB.Hex()}}, filters[0]["topics"])
+
+	_, err = WaitForSettledWithdrawal(context.Background(), rpc, portal, nil, &to, 0, 0, nil)
+	assert.ErrorContains(t, err, "needs at least one sender tag")
+
+	_, err = WaitForSettledWithdrawal(context.Background(), &logsRPC{blocks: []string{"0x1"}, logs: func(map[string]any) []any { return nil }}, portal, []common.Hash{tagA, tagB}, nil, 0, 0, nil)
+	assert.ErrorContains(t, err, "zone withdrawal "+tagA.Hex()+" or "+tagB.Hex()+" did not settle on Tempo")
+}
+
+// A WithdrawalProcessed log without its sender tag topic, returned for a
+// filter on several tags, does not say which withdrawal settled: the wait
+// fails rather than checkpoint past its range.
+func TestWaitForSettledWithdrawalFailsOnLogWithoutSenderTag(t *testing.T) {
+	t.Parallel()
+	portal := PortalAddress(3)
+	tagA := common.HexToHash("0x" + repeat("a1", 32))
+	tagB := common.HexToHash("0x" + repeat("b2", 32))
+	hash := "0x" + repeat("ab", 32)
+	rpc := &logsRPC{blocks: []string{"0x10"}, logs: func(map[string]any) []any {
+		return []any{map[string]any{"transactionHash": hash}}
+	}}
+	var checkpoints []uint64
+	_, err := WaitForSettledWithdrawal(context.Background(), rpc, portal, []common.Hash{tagA, tagB}, nil, 0, time.Second, func(next uint64) {
+		checkpoints = append(checkpoints, next)
+	})
+	assert.ErrorContains(t, err, "has no sender tag topic")
+	assert.Empty(t, checkpoints)
+
+	// One tag is still matched by the filter alone.
+	settlement, err := WaitForSettledWithdrawal(context.Background(), rpc, portal, []common.Hash{tagA}, nil, 0, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, Settlement{Hash: hash, SenderTag: tagA}, settlement)
+}
+
+func TestHasRequestedLog(t *testing.T) {
+	t.Parallel()
+	requested := map[string]any{"address": OutboxAddress.Hex(), "topics": []any{RequestedTopic.Hex()}, "data": "0x01"}
+	other := map[string]any{"address": PortalAddress(3).Hex(), "topics": []any{RequestedTopic.Hex()}}
+	assert.True(t, HasRequestedLog(map[string]any{"logs": []any{other, requested}}))
+	assert.False(t, HasRequestedLog(map[string]any{"logs": []any{other}}))
+	assert.False(t, HasRequestedLog(map[string]any{"logs": []any{}}))
 }

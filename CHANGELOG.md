@@ -1,5 +1,27 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.10.1`
+
+### Patch Changes
+
+- Changed `ParseChallenge` to read a backslash in a quoted auth-param as an RFC 9110 quoted-pair, so `realm="a\u2014b"` parses as `au2014b`, and made `FormatChallenge` reject characters above U+00FF in every auth-param but `description`, which keeps its `\uXXXX` escape. A server whose realm holds such a character can no longer issue HTTP Challenges (each 402 becomes a 500), so change it to an ASCII realm before upgrading. Made clients refuse to pay a Challenge from an older server that escaped an ID-bound auth-param as `\uXXXX` (`Challenge.LegacyUnicodeEscape`), before signing or broadcasting anything, and fail with `mpp.ErrLegacyUnicodeEscapedChallenge` when no other Challenge is payable. (by @brendanjryan, [#331](https://github.com/tempoxyz/mpp-go/pull/331))
+- Prevented duplicate Zone payments when an unresolved withdrawal outlives its challenge's redemption window. (by @brendanjryan, [#337](https://github.com/tempoxyz/mpp-go/pull/337))
+- `B64Decode`, and so Challenge, Credential and Payment-Receipt parsing, started rejecting characters outside the base64url alphabet, including the CR and LF that `encoding/base64` skipped. Challenge parsing and formatting rejected a request that decoded to JSON `null`, matching mppx, and the HTTP client returned a 402 unpaid when a credential the caller set could not be parsed. (by @brendanjryan, [#333](https://github.com/tempoxyz/mpp-go/pull/333))
+- `ParseCredential` started requiring the value to be exactly `Payment` followed by one base64url token, as mppx does, and its errors no longer quote the value. The HTTP client returned a 402 to the caller, without paying again, when a credential the caller set could not be parsed. (by @brendanjryan, [#336](https://github.com/tempoxyz/mpp-go/pull/336))
+
+## `github.com/tempoxyz/mpp-go@0.10.0`
+
+### Minor Changes
+
+- Added Zone payments to the Tempo charge method, as in mppx: servers accept them with `Config.Zones` or `ChargeParams.Zones` and verify `zone` credentials against the Zone portal's settlement on Tempo, and clients pay from a Zone balance with `Config.Zone`. One payment intent never makes two withdrawals: a retried or new challenge for the same terms resumes the pending withdrawal (or fails with `ZoneSettlementPendingError`), the HTTP and MCP clients retry the same challenge while it settles, `ZoneCredentialGrace` lets servers accept a zone credential settled before its challenge expired, hash credentials never redeem a Zone portal's transfers, and the withdrawal fee counts against `PaymentPolicy` limits. (by @brendanjryan, [#311](https://github.com/tempoxyz/mpp-go/pull/311))
+
+### Patch Changes
+
+- Restricted the challenge `header` auth-param to `Payment-Authorization`, as the spec requires: a received challenge with any other value (including `Authorization` or empty) now fails with `mpp.ErrUnsupportedCredentialHeader` and gets no credential, while clients still pay another challenge in the same response. `WithHeader` and `VerifyParams.Header` now reject names other than Authorization and Payment-Authorization. (by @brendanjryan, [#325](https://github.com/tempoxyz/mpp-go/pull/325))
+- Changed the HTTP and MCP clients to resend the same Credential when a payment-required answer offers the Challenge just answered again (signing a new one only after an invalid-payload problem), and to pay any other Challenge with a new Credential, at most three times, as mppx does. Changed the MCP client to treat only -32042 errors, -32043 errors whose httpStatus is 402 or absent, and -32602 errors with an invalid-payload problem as payment-required, so other errors are the call's final answer. (by @brendanjryan, [#328](https://github.com/tempoxyz/mpp-go/pull/328))
+- Fixed formatting a parsed receipt so an explicitly empty `externalId` or `subscriptionId` is kept instead of dropped, as in mppx. (by @brendanjryan, [#326](https://github.com/tempoxyz/mpp-go/pull/326))
+- Zone clients resumed a pending withdrawal instead of withdrawing again and refused expired or cross-origin challenges, as mppx does. Servers granted `ZoneCredentialGrace` only to challenges carrying the `_mppx_expiry_grace` marker and rejected it with a Relay. (by @brendanjryan, [#327](https://github.com/tempoxyz/mpp-go/pull/327))
+
 ## `github.com/tempoxyz/mpp-go@0.9.1`
 
 ### Patch Changes

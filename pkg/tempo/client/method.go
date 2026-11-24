@@ -201,7 +201,10 @@ type Method struct {
 	// zoneReceiptTimeout bounds the wait for a Zone withdrawal's receipt;
 	// zero means zoneReceiptTimeout.
 	zoneReceiptTimeout time.Duration
-	zoneMu             sync.Mutex
+	// zoneSenderTagReadTimeout bounds the outbox reads that derive candidate
+	// sender tags; zero means zoneSenderTagReadTimeout.
+	zoneSenderTagReadTimeout time.Duration
+	zoneMu                   sync.Mutex
 	// zoneWithdrawals holds Zone withdrawals sent for a challenge, by the
 	// challenge's JSON, so a retry resumes them instead of paying again.
 	zoneWithdrawals map[string]*zoneWithdrawal
@@ -329,6 +332,10 @@ func (m *Method) Intent() string {
 
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
 //
+// It refuses, with mpp.ErrLegacyUnicodeEscapedChallenge and before signing
+// anything, a challenge parsed with a legacy \uXXXX escape in an ID-bound
+// auth-param (mpp.Challenge.LegacyUnicodeEscape).
+//
 // Concurrent calls for the same challenge share one in-flight signing, so they
 // cannot produce two independently settleable transactions. Once that signing
 // finishes, successfully or not, a later call signs afresh. Calls share a
@@ -337,6 +344,11 @@ func (m *Method) Intent() string {
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge == nil {
 		return nil, fmt.Errorf("tempo client: challenge is required")
+	}
+	// The server would reject a Credential for this challenge, after a hash
+	// or zone payment had already been broadcast.
+	if challenge.LegacyUnicodeEscape() {
+		return nil, fmt.Errorf("tempo client: %w", mpp.ErrLegacyUnicodeEscapedChallenge)
 	}
 	encoded, err := json.Marshal(challenge)
 	if err != nil {
@@ -366,7 +378,7 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 			origin := zoneOrigin(paymentctx.Origin(ctx))
 			if errors.As(call.err, &pending) && (origin == "" || origin != call.origin) {
 				redacted := *pending
-				redacted.TransactionHash, redacted.SenderTag, redacted.Err = "", "", nil
+				redacted.TransactionHash, redacted.SenderTag, redacted.SenderTags, redacted.Err = "", "", nil, nil
 				return nil, &redacted
 			}
 			return nil, call.err
@@ -518,7 +530,12 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	if err := m.authorizePayment(ctx, request, chainID); err != nil {
 		return nil, err
 	}
-	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
+	// A server-set methodDetails.memo must be carried exactly; otherwise the
+	// primary transfer carries an attribution memo binding it to the challenge.
+	memo := request.MethodDetails.Memo
+	if memo == "" {
+		memo = tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
+	}
 
 	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, chainID, challenge.Expires, sponsored)
 	if err != nil {
@@ -598,7 +615,31 @@ func (m *Method) buildTransfer(
 	gasLimit := tempo.DefaultGasLimit
 	if len(transfers) == 1 {
 		dataHex := transferDataHex(transfers[0])
-		if estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex); err == nil && estimated+5_000 > gasLimit {
+		// Name the signing access key in the estimate so the node checks its
+		// spending limits, as viem does. A key this transaction still has to
+		// authorize is not on the keychain yet, so its estimate runs as the
+		// account. The authorization is read again just before signing.
+		var estimateKey *common.Address
+		if m.accessKey != nil {
+			pending, err := m.pendingKeyAuthorization(ctx, rpc)
+			if err != nil {
+				return "", err
+			}
+			if pending == nil {
+				estimateKey = m.accessKeyAddress()
+			}
+		}
+		estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex, estimateKey)
+		if err != nil {
+			// The estimate simulates the transfer as the signing key. A
+			// spending-limit or balance revert there would also revert on
+			// chain, at the fee payer's cost when sponsored, so stop before
+			// signing, as mppx does. Other estimate failures keep the default
+			// gas limit.
+			if simulated := simulationError(err, m.account(), m.accessKeyAddress()); simulated != nil {
+				return "", simulated
+			}
+		} else if estimated+5_000 > gasLimit {
 			gasLimit = estimated + 5_000
 		}
 	}
@@ -776,6 +817,16 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 	return uint64(validBefore), nil
 }
 
+// accessKeyAddress returns the address of the access key that signs, or nil
+// when the account signs for itself.
+func (m *Method) accessKeyAddress() *common.Address {
+	if m.accessKey == nil {
+		return nil
+	}
+	address := m.signer.Address()
+	return &address
+}
+
 // account is the address that pays and is named as the credential source:
 // the access key's root account, or the signer's address.
 func (m *Method) account() common.Address {
@@ -921,12 +972,17 @@ func (m *Method) estimateGas(
 	rpc tempo.RPCClient,
 	to string,
 	data string,
+	keyID *common.Address,
 ) (uint64, error) {
-	response, err := rpc.SendRequest(ctx, "eth_estimateGas", map[string]any{
+	request := map[string]any{
 		"from": m.account().Hex(),
 		"to":   to,
 		"data": data,
-	})
+	}
+	if keyID != nil {
+		request["keyId"] = keyID.Hex()
+	}
+	response, err := rpc.SendRequest(ctx, "eth_estimateGas", request)
 	if err != nil {
 		return 0, err
 	}

@@ -19,7 +19,7 @@ func TestVerifyOrChallengeAcceptsLowercaseBoundCredentialHeader(t *testing.T) {
 	request := map[string]any{"amount": "100", "currency": "0xabc", "recipient": "0xdef"}
 	expires := mpp.ExpiresIn(5 * time.Minute)
 	id, err := mpp.GenerateChallengeIDWithError(mpp.GenerateChallengeIDInput{
-		SecretKey: "secret-key",
+		SecretKey: "verify-test-secret-key-of-at-least-32-bytes",
 		Realm:     "api.example.com",
 		Method:    "tempo",
 		Intent:    "charge",
@@ -44,7 +44,7 @@ func TestVerifyOrChallengeAcceptsLowercaseBoundCredentialHeader(t *testing.T) {
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
-		SecretKey:     "secret-key",
+		SecretKey:     "verify-test-secret-key-of-at-least-32-bytes",
 		Method:        "tempo",
 		Header:        mpp.HeaderPaymentAuthorization,
 		Expires:       expires,
@@ -60,7 +60,7 @@ func TestVerifyOrChallengeAcceptsLowercaseBoundCredentialHeader(t *testing.T) {
 		Intent:        verifyTestIntent{},
 		Request:       request,
 		Realm:         "api.example.com",
-		SecretKey:     "secret-key",
+		SecretKey:     "verify-test-secret-key-of-at-least-32-bytes",
 		Method:        "tempo",
 		Header:        mpp.HeaderPaymentAuthorization,
 		Expires:       expires,

@@ -154,6 +154,12 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		return nil, err
 	}
 	modes := resolvedModes(params.SupportedModes, m.supportedModes)
+	if params.Memo != "" {
+		modes, err = modesWithoutPush(modes)
+		if err != nil {
+			return nil, err
+		}
+	}
 	zones := params.Zones
 	if zones == nil {
 		zones = m.zones
@@ -167,6 +173,7 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		ExternalID:     params.ExternalID,
 		ChainID:        chainID,
 		FeePayer:       feePayer,
+		Memo:           params.Memo,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
 		SupportedModes: modes,
 		Zones:          zones,
@@ -229,6 +236,28 @@ func validateSponsoredChallengeExpiry(expires string, now time.Time) error {
 		return fmt.Errorf("tempo server: sponsored charge challenges must expire at least %s after issuance, got Expires %q", tempo.FeePayerMinRemainingValidity, expires)
 	}
 	return nil
+}
+
+// modesWithoutPush removes push mode from a route that sets
+// ChargeParams.Memo. A configured memo is shared by every payer on the
+// route, so it cannot tie an unsigned hash credential to one Challenge;
+// such a route accepts only pull (transaction) credentials. Empty modes,
+// which allow both, become pull only, and a push-only route is a
+// configuration error.
+func modesWithoutPush(modes []tempo.ChargeMode) ([]tempo.ChargeMode, error) {
+	if len(modes) == 0 {
+		return []tempo.ChargeMode{tempo.ChargeModePull}, nil
+	}
+	pull := make([]tempo.ChargeMode, 0, len(modes))
+	for _, mode := range modes {
+		if mode != tempo.ChargeModePush {
+			pull = append(pull, mode)
+		}
+	}
+	if len(pull) == 0 {
+		return nil, fmt.Errorf("tempo server: ChargeParams.Memo cannot be combined with push-only SupportedModes; push (hash) credentials need the Challenge's attribution memo, so allow pull mode or leave Memo empty")
+	}
+	return pull, nil
 }
 
 func resolvedModes(requestModes, defaultModes []tempo.ChargeMode) []tempo.ChargeMode {

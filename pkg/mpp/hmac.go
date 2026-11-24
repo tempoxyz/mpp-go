@@ -103,6 +103,14 @@ func generateChallengeID(opts GenerateChallengeIDInput, encodedOpaque string) (s
 // than Authorization or Payment-Authorization. Match it with errors.Is.
 var ErrUnsupportedCredentialHeader = errors.New("mpp: unsupported credential header: challenges may only select Payment-Authorization")
 
+// ErrLegacyUnicodeEscapedChallenge reports a challenge whose ID-bound
+// auth-params hold a \uXXXX escape (see Challenge.LegacyUnicodeEscape).
+// Clients refuse to pay such a challenge before creating, signing or
+// broadcasting anything, since the server would reject the Credential after a
+// pushed payment had already moved funds. Upgrade the server. Match it with
+// errors.Is.
+var ErrLegacyUnicodeEscapedChallenge = errors.New("mpp: legacy unicode-escaped challenge: the server escaped a bound parameter as \\uXXXX; upgrade the server")
+
 // AdvertisedCredentialHeader returns a challenge header parameter value, or
 // empty for the implicit Authorization default (empty, or Authorization in
 // any case). Any other value is returned unchanged, so a received

@@ -168,7 +168,6 @@ func TestCreateCredentialHashWithAttributionMemo(t *testing.T) {
 	}
 
 	challenge := buildChallenge(t, params)
-	challenge.Request["methodDetails"].(map[string]any)["memo"] = "0x" + strings.Repeat("ab", 32)
 	credential, err := method.CreateCredential(context.Background(), challenge)
 	if !assert.NoErrorf(t, err, "CreateCredential() error = %v", err) {
 		return
@@ -191,6 +190,49 @@ func TestCreateCredentialHashWithAttributionMemo(t *testing.T) {
 		hexutil.Encode(tx.Calls[0].Data), request, challenge.Realm, challenge.ID,
 	), "MatchTransferCalldata() = false, want challenge-bound attribution transfer") {
 		return
+	}
+}
+
+func TestCreateCredentialUsesMethodDetailsMemo(t *testing.T) {
+	t.Parallel()
+
+	for _, credentialType := range []tempo.CredentialType{tempo.CredentialTypeHash, tempo.CredentialTypeTransaction} {
+		t.Run(string(credentialType), func(t *testing.T) {
+			t.Parallel()
+			rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
+			method, err := New(Config{PaymentPolicy: func(context.Context, tempo.ChargeRequest) error { return nil },
+				ChainID:        42431,
+				CredentialType: credentialType,
+				PrivateKey:     testPrivateKey,
+				RPC:            rpc,
+			})
+			require.NoError(t, err)
+
+			// The server's memo replaces the attribution memo.
+			memo := "0x" + strings.Repeat("ab", 32)
+			challenge := buildChallenge(t, tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+				Memo:      "0x" + strings.Repeat("AB", 32),
+			})
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			require.NoError(t, err)
+			raw := credential.Payload["signature"]
+			if credentialType == tempo.CredentialTypeHash {
+				require.Len(t, rpc.sentRawTxs, 1)
+				raw = rpc.sentRawTxs[0]
+			}
+			tx, err := deserializeTestTx(raw.(string))
+			require.NoError(t, err)
+			require.Len(t, tx.Calls, 1)
+			data := tx.Calls[0].Data
+			require.Len(t, data, tempo.TransferWithMemoCalldataLength)
+			assert.Equal(t, tempo.TransferWithMemoSelector, hexutil.Encode(data[:4])[2:])
+			assert.Equal(t, memo, hexutil.Encode(data[68:100]))
+		})
 	}
 }
 
@@ -306,6 +348,48 @@ func buildChallenge(t *testing.T, params tempo.ChargeRequestParams) *mpp.Challen
 		request.Map(),
 		mpp.WithExpires(mpp.ExpiresIn(5*time.Minute)),
 	)
+}
+
+func TestCreateCredentialRefusesLegacyUnicodeEscapedChallenge(t *testing.T) {
+	t.Parallel()
+
+	for _, realm := range []string{`caf\u00e9.example.com`, `merchant\u2014api.example.com`} {
+		t.Run(realm, func(t *testing.T) {
+			t.Parallel()
+
+			rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
+			var policyCalls atomic.Int32
+			method, err := New(Config{
+				PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+					policyCalls.Add(1)
+					return nil
+				},
+				ChainID:        42431,
+				CredentialType: tempo.CredentialTypeHash,
+				PrivateKey:     testPrivateKey,
+				RPC:            rpc,
+			})
+			require.NoError(t, err)
+
+			header := mpptest.FormatChallenge(buildChallenge(t, tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+			}))
+			legacyHeader := strings.Replace(header, `realm="`+testRealm+`"`, `realm="`+realm+`"`, 1)
+			require.NotEqual(t, header, legacyHeader)
+			challenge, err := mpp.ParseChallenge(legacyHeader)
+			require.NoError(t, err)
+
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			require.ErrorIs(t, err, mpp.ErrLegacyUnicodeEscapedChallenge)
+			assert.Nil(t, credential)
+			assert.Empty(t, rpc.sentRawTxs, "nothing may be broadcast")
+			assert.Zero(t, policyCalls.Load())
+		})
+	}
 }
 
 func TestHashCredentialSizePreflight(t *testing.T) {
