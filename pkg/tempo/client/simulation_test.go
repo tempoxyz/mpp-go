@@ -180,7 +180,6 @@ func TestEstimateNamesAConfiguredKeyOnceItIsOnChain(t *testing.T) {
 		{name: "authorized key", onChain: true},
 		{name: "key this payment authorizes", onChain: false},
 	} {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			rpc := &revertingEstimateRPC{mockRPC: &mockRPC{chainID: 42431, gasPrice: "0x1"}, data: testSpendingLimitExceeded}
