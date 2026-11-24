@@ -1,28 +1,44 @@
 version: 2
 
-multi-ecosystem-groups:
-  weekly-dependencies:
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Los_Angeles
-
+# Patch and minor updates are grouped per ecosystem and merge on their own
+# through the Dependabot workflow once checks pass. A major update opens its
+# own pull request, so a breaking release holds back only itself. Security
+# updates are grouped separately and are not held to the weekly schedule.
 updates:
   # tests/ is a separate module that replaces mpp-go with ../ and repeats the
   # root requirements: update both so they stay in step.
   - package-ecosystem: gomod
     directories: [/, /tests]
-    patterns: ["*"]
-    multi-ecosystem-group: weekly-dependencies
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    groups:
+      weekly-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
     cooldown:
       default-days: 7
       semver-major-days: 7
 
   - package-ecosystem: github-actions
     directory: /
-    patterns: ["*"]
-    multi-ecosystem-group: weekly-dependencies
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    groups:
+      weekly-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
     cooldown:
       # Buffer the scanner's seven-day minimum: Dependabot reads date-only tag metadata.
       default-days: 8
@@ -30,8 +46,18 @@ updates:
   # The mppx server the cross-SDK smoke workflow runs.
   - package-ecosystem: npm
     directory: /.github/smoke-cross-sdk
-    patterns: ["*"]
-    multi-ecosystem-group: weekly-dependencies
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    groups:
+      weekly-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
     cooldown:
       default-days: 7
       semver-major-days: 7
