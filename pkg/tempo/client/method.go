@@ -598,7 +598,17 @@ func (m *Method) buildTransfer(
 	gasLimit := tempo.DefaultGasLimit
 	if len(transfers) == 1 {
 		dataHex := transferDataHex(transfers[0])
-		if estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex); err == nil && estimated+5_000 > gasLimit {
+		estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex)
+		if err != nil {
+			// The estimate simulates the transfer as the signing key. A
+			// spending-limit or balance revert there would also revert on
+			// chain, at the fee payer's cost when sponsored, so stop before
+			// signing, as mppx does. Other estimate failures keep the default
+			// gas limit.
+			if simulated := simulationError(err, m.account(), m.accessKeyAddress()); simulated != nil {
+				return "", simulated
+			}
+		} else if estimated+5_000 > gasLimit {
 			gasLimit = estimated + 5_000
 		}
 	}
@@ -778,6 +788,16 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 
 // account is the address that pays and is named as the credential source:
 // the access key's root account, or the signer's address.
+// accessKeyAddress returns the address of the access key that signs, or nil
+// when the account signs for itself.
+func (m *Method) accessKeyAddress() *common.Address {
+	if m.accessKey == nil {
+		return nil
+	}
+	address := m.signer.Address()
+	return &address
+}
+
 func (m *Method) account() common.Address {
 	if m.accessKey != nil {
 		return m.accessKey.Account
@@ -922,11 +942,18 @@ func (m *Method) estimateGas(
 	to string,
 	data string,
 ) (uint64, error) {
-	response, err := rpc.SendRequest(ctx, "eth_estimateGas", map[string]any{
+	request := map[string]any{
 		"from": m.account().Hex(),
 		"to":   to,
 		"data": data,
-	})
+	}
+	// Name the signing access key so the node checks its spending limits, as
+	// viem does. A key this transaction still has to authorize is not on the
+	// keychain yet, so its estimate runs as the account.
+	if m.accessKey != nil && m.accessKey.KeyAuthorization == nil {
+		request["keyId"] = m.signer.Address().Hex()
+	}
+	response, err := rpc.SendRequest(ctx, "eth_estimateGas", request)
 	if err != nil {
 		return 0, err
 	}
