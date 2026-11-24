@@ -1,5 +1,19 @@
 # Changelog
 
+## `github.com/tempoxyz/mpp-go@0.11.0`
+
+### Minor Changes
+
+- Aligned servers and clients with the core and Tempo charge specifications: replays now get 402 invalid-challenge with a fresh Challenge, Challenges carry a 16-byte `_mpp_nonce` (`_mppx_nonce` still verifies), credentials are checked in the specified order with multiple credentials rejected as 400 and unselected or bare ones ignored, and `VerifyOrChallenge` refuses secrets under 32 bytes. Tempo servers enforce a new `methodDetails.memo` (`ChargeParams.Memo`) on the primary transfer, and routes that set it accept only pull (transaction) payments: push is dropped from their `supportedModes`, hash credentials are refused, and `Memo` with push-only `SupportedModes` is a configuration error. Push (hash) payments must still carry the Challenge's attribution memo, while pull payments may carry it, another memo or none, but never an attribution memo for another realm or Challenge. An `OnChallenge` hook returning `client.ErrPaymentDeclined` before the method runs now returns the 402 without paying. The HTTP and MCP clients no longer pay a fresh Challenge that answers a sent Credential with invalid-challenge: the MCP client returns a `ReconciliationError` holding the sent Credential. Tempo servers now reject a pull (transaction) credential whose transaction is already on chain before their own broadcast with verification-failed, as mppx does, instead of settling it from its receipt, unless the server broadcast that transaction itself for the same Challenge: it records each broadcast in the replay Store first, so a retry after an unknown outcome, a receipt timeout or a failed replay store write settles the landed transaction once. (by @brendanjryan, [#316](https://github.com/tempoxyz/mpp-go/pull/316))
+
+### Patch Changes
+
+- Added `SpendingLimitExceededError` and `InsufficientBalanceError` to the Tempo charge client. The client now returns one of them, instead of signing, when the gas estimate before signing reverts because the access key's spending limit or the account's balance cannot cover the payment. (by @brendanjryan, [#339](https://github.com/tempoxyz/mpp-go/pull/339))
+- Payment retries stopped creating a Credential once the call's context was canceled, such as during `OnPaymentRequired` approval. A cancel after a pending settlement now returns the cause joined with the pending error. (by @brendanjryan, [#330](https://github.com/tempoxyz/mpp-go/pull/330))
+- Raised the minimum Go version to 1.26.11. (by @horsefacts, [#317](https://github.com/tempoxyz/mpp-go/pull/317))
+- Zone clients paid from a Zone whose RPC redacts the outbox's `WithdrawalRequested` event from receipts, deriving the sender tag from the outbox's `lastFallbackNonce`; a failed read of it is retried with the challenge without withdrawing again. `ZoneSettlementPendingError` gained `SenderTags`, every candidate tag, with `SenderTag` empty when more than one remains. (by @brendanjryan, [#338](https://github.com/tempoxyz/mpp-go/pull/338))
+- Prevented duplicate Zone payments when a previous withdrawal remains unresolved, went out late or settled after its challenge's redemption window: matching challenges now fail closed until the caller reconciles it. Added `Method.ResetZoneWithdrawal` to permit a new payment after manual reconciliation, `Method.ZoneWithdrawalTransactionHash`, and `ZoneSettlementPendingError.TransactionHash`. (by @brendanjryan, [#329](https://github.com/tempoxyz/mpp-go/pull/329))
+
 ## `github.com/tempoxyz/mpp-go@0.10.1`
 
 ### Patch Changes
