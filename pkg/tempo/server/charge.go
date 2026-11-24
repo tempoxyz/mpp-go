@@ -25,10 +25,13 @@ import (
 	temposigner "github.com/tempoxyz/tempo-go/pkg/signer"
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/challengemeta"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	mppserver "github.com/tempoxyz/mpp-go/pkg/server"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/rpccache"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/txsend"
+	"github.com/tempoxyz/mpp-go/pkg/tempo/internal/zone"
 )
 
 const receiptRetryDelay = 500 * time.Millisecond
@@ -140,7 +143,25 @@ type IntentConfig struct {
 	// (no memo, another memo or a server-set methodDetails.memo) is not bound
 	// to it, so its replay keys are still kept forever.
 	ExpireReplayKeys bool
+	// ZoneCredentialGrace is how long after its challenge expires a zone
+	// credential is still accepted, for a withdrawal that settled on Tempo
+	// before the challenge expired, as mppx's zoneCredentialGraceMs. It lets a
+	// payer whose withdrawal settled late in the challenge's lifetime redeem
+	// it on retry. Other credential types get no grace. It must be between
+	// zero (the default) and MaxZoneCredentialGrace (5 minutes). With it set,
+	// issued challenges carry the HMAC-bound _mppx_expiry_grace marker, and
+	// only a challenge carrying it gets the grace. It can't be combined with
+	// a Relay.
+	//
+	// Replay keys outlast it: they are kept forever, or with ExpireReplayKeys
+	// until ten minutes after the grace ends.
+	ZoneCredentialGrace time.Duration
 }
+
+// MaxZoneCredentialGrace is the longest ZoneCredentialGrace a verifier
+// accepts, and how long after a challenge's expiry a Zone client stops
+// resuming its withdrawal.
+const MaxZoneCredentialGrace = zone.RedemptionGrace
 
 // Intent verifies Tempo charge Credentials and returns Receipts.
 type Intent struct {
@@ -160,6 +181,8 @@ type Intent struct {
 	// expireReplayKeys claims replay keys with tempo.ExpiringStore; see
 	// IntentConfig.ExpireReplayKeys.
 	expireReplayKeys bool
+	// zoneCredentialGrace is IntentConfig.ZoneCredentialGrace.
+	zoneCredentialGrace time.Duration
 	// rpcClients holds the RPC clients built from URLs, so each is built
 	// once rather than per credential.
 	rpcClients *rpccache.Cache
@@ -167,7 +190,47 @@ type Intent struct {
 	now func() time.Time
 }
 
-var _ mppserver.BroadcastingIntent = (*Intent)(nil)
+var (
+	_ mppserver.BroadcastingIntent = (*Intent)(nil)
+	_ mppserver.ExpiryGraceIntent  = (*Intent)(nil)
+	_ mppserver.ExpiryGraceIssuer  = (*Intent)(nil)
+)
+
+// ExpiryGrace returns how long after its challenge expires credential is
+// still accepted: IntentConfig.ZoneCredentialGrace for a zone credential,
+// whose settlement validateZone then requires to predate the expiry, and
+// none for every other credential type.
+func (i *Intent) ExpiryGrace(credential *mpp.Credential) time.Duration {
+	if credential == nil || i.zoneCredentialGrace <= 0 || !isZoneCredential(credential) {
+		return 0
+	}
+	// Only a challenge issued with the grace on carries the marker, bound by
+	// its HMAC: one issued without it, by an earlier release whose replay
+	// claims end at the expiry or with no grace, gets none.
+	if credential.Challenge.Opaque[expiryGraceKey] != challengemeta.ExpiryGraceValue {
+		return 0
+	}
+	return i.zoneCredentialGrace
+}
+
+// IssuesExpiryGrace reports whether the challenges issued for this intent
+// carry the expiry grace marker (_mppx_expiry_grace) that ExpiryGrace
+// requires: whenever IntentConfig.ZoneCredentialGrace is set. It implements
+// server.ExpiryGraceIssuer.
+func (i *Intent) IssuesExpiryGrace() bool {
+	return i.zoneCredentialGrace > 0
+}
+
+// expiryGraceKey is the opaque metadata key of the expiry grace marker that
+// server.Mpp sets on challenges issued for an intent whose IssuesExpiryGrace
+// reports true, as mppx's _mppx_expiry_grace.
+const expiryGraceKey = challengemeta.ExpiryGraceKey
+
+// isZoneCredential reports whether credential pays with a Zone withdrawal.
+func isZoneCredential(credential *mpp.Credential) bool {
+	kind, _ := credential.Payload["type"].(string)
+	return kind == string(tempo.CredentialTypeZone)
+}
 
 type validatedChargeCredential struct {
 	payload tempo.ChargeCredentialPayload
@@ -219,6 +282,9 @@ func newIntent(config IntentConfig) (*Intent, error) {
 		}
 		feePayerSigner = resolved
 	}
+	if config.ZoneCredentialGrace < 0 || config.ZoneCredentialGrace > MaxZoneCredentialGrace {
+		return nil, fmt.Errorf("tempo server: ZoneCredentialGrace must be between 0 and %s", MaxZoneCredentialGrace)
+	}
 	store := config.Store
 	if config.ExpireReplayKeys {
 		if _, ok := store.(tempo.ExpiringStore); !ok {
@@ -266,17 +332,18 @@ func newIntent(config IntentConfig) (*Intent, error) {
 		}
 	}
 	return &Intent{
-		rpc:              config.RPC,
-		rpcURL:           config.RPCURL,
-		rpcClients:       new(rpccache.Cache),
-		feePayerSigner:   feePayerSigner,
-		feePayerPolicy:   feePayerPolicy,
-		feeTokens:        feeTokens,
-		feeToken:         feeToken,
-		hostedFeePayer:   hosted,
-		sponsorPolicy:    resolveSponsorPolicy(config),
-		store:            store,
-		expireReplayKeys: config.ExpireReplayKeys,
+		rpc:                 config.RPC,
+		rpcURL:              config.RPCURL,
+		rpcClients:          new(rpccache.Cache),
+		feePayerSigner:      feePayerSigner,
+		feePayerPolicy:      feePayerPolicy,
+		feeTokens:           feeTokens,
+		feeToken:            feeToken,
+		hostedFeePayer:      hosted,
+		sponsorPolicy:       resolveSponsorPolicy(config),
+		store:               store,
+		expireReplayKeys:    config.ExpireReplayKeys,
+		zoneCredentialGrace: config.ZoneCredentialGrace,
 	}, nil
 }
 
@@ -310,9 +377,10 @@ func (i *Intent) Validate(
 		}
 	}
 	mode := string(tempo.ChargeModePull)
-	if validated.payload.Type == tempo.CredentialTypeHash {
+	switch validated.payload.Type {
+	case tempo.CredentialTypeHash, tempo.CredentialTypeZone:
 		mode = string(tempo.ChargeModePush)
-	} else if validated.payload.Type == tempo.CredentialTypeProof {
+	case tempo.CredentialTypeProof:
 		mode = string(tempo.CredentialTypeProof)
 	}
 	details := map[string]any{"mode": mode}
@@ -325,6 +393,7 @@ func (i *Intent) Validate(
 	if validated.payload.Type == tempo.CredentialTypeTransaction {
 		details["serializedTransaction"] = validated.payload.Signature
 	}
+	source := credential.Source
 	return &mppserver.Validation{
 		Challenge:  credential.Challenge,
 		Credential: credential,
@@ -332,7 +401,7 @@ func (i *Intent) Validate(
 		Intent:     tempo.IntentCharge,
 		Method:     tempo.MethodName,
 		Request:    requestMap,
-		Source:     credential.Source,
+		Source:     source,
 	}, nil
 }
 
@@ -369,7 +438,7 @@ func (i *Intent) Broadcast(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateChallengeExpiry(credential); err != nil {
+	if err := validateChallengeExpiry(credential, i.ExpiryGrace(credential)); err != nil {
 		return nil, err
 	}
 	return i.broadcastCredential(ctx, credential, validated)
@@ -403,6 +472,13 @@ func (i *Intent) validateCredential(
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload(err.Error())
 	}
+	// Nothing binds a zone credential's source to the withdrawal, which pays
+	// from a Zone sender the server cannot see, so a source on one could name
+	// any account as the payer. Zone clients send none (mppx reports
+	// payer: undefined for zone credentials), so refuse one that does.
+	if payload.Type == tempo.CredentialTypeZone && credential.Source != "" {
+		return nil, mpp.ErrInvalidPayload("zone credentials must not carry a source")
+	}
 	source, err := parseSourceDID(credential.Source)
 	if err != nil {
 		return nil, mpp.ErrInvalidPayload("credential source is invalid")
@@ -417,7 +493,19 @@ func (i *Intent) validateCredential(
 		return nil, mpp.ErrInvalidPayload("zero-amount challenges require a proof credential")
 	}
 	if !request.Allows(payload.Type) {
+		if payload.Type == tempo.CredentialTypeZone {
+			return nil, mpp.ErrVerificationFailed("zone credentials are not supported for this challenge")
+		}
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("credential type %q is not allowed for this challenge", payload.Type))
+	}
+	if payload.Type == tempo.CredentialTypeZone {
+		// Check what the challenge allows before any RPC, as mppx does.
+		if !tempo.ZoneAccepted(request.MethodDetails.Zones, payload.ZoneID) {
+			return nil, mpp.ErrVerificationFailed(fmt.Sprintf("zone is not accepted for this challenge (zoneId %d)", payload.ZoneID))
+		}
+		if len(request.MethodDetails.Splits) > 0 {
+			return nil, mpp.ErrVerificationFailed("zone credentials do not support split payments")
+		}
 	}
 
 	rpc, err := i.resolveRPC(request)
@@ -442,6 +530,10 @@ func (i *Intent) validateCredential(
 		}
 	case tempo.CredentialTypeTransaction:
 		if err := i.validateTransaction(ctx, credential, validated); err != nil {
+			return nil, err
+		}
+	case tempo.CredentialTypeZone:
+		if err := i.validateZone(ctx, credential, validated); err != nil {
 			return nil, err
 		}
 	default:
@@ -484,12 +576,141 @@ func (i *Intent) validateHash(
 	if err != nil {
 		return err
 	}
+	// A Zone portal's settlement transaction settles many withdrawals, each
+	// paid for by its own zone credential, whose replay key is the sender
+	// tag. Redeeming it as a hash credential too would pay twice for one
+	// withdrawal, so a receipt with a WithdrawalProcessed event, from any
+	// address, is refused, as in mpp-rs.
+	if hasZoneSettlementLog(receiptMap) {
+		return mpp.ErrVerificationFailed("zone settlement transactions can't be redeemed as hash credentials; use a zone credential")
+	}
 	transfers, ok := receiptTransfers(receiptMap, request, source.address)
 	if !ok || !matchTransfers(transfers, expectedPushTransfers(request), credential.Challenge.Realm, credential.Challenge.ID) {
 		return mpp.ErrVerificationFailed("transaction receipt does not satisfy the charge request")
 	}
 	validated.challengeBound = boundToChallenge(transfers, credential.Challenge.Realm, credential.Challenge.ID)
 	validated.sender = common.HexToAddress(source.address)
+	return nil
+}
+
+// hasZoneSettlementLog reports whether a receipt has a log whose first topic
+// is the Zone portal WithdrawalProcessed event signature.
+func hasZoneSettlementLog(receipt map[string]any) bool {
+	logs, _ := receipt["logs"].([]any)
+	for _, rawLog := range logs {
+		entry, ok := rawLog.(map[string]any)
+		if !ok {
+			continue
+		}
+		topics, ok := entry["topics"].([]any)
+		if ok && len(topics) > 0 && strings.EqualFold(asString(topics[0]), zone.ProcessedTopic.Hex()) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateZone verifies a payment that a Zone withdrawal settled on Tempo,
+// as mppx's validateZoneCredential: the Zone's portal emitted
+// WithdrawalProcessed for the sender tag in the settlement transaction, the
+// payout succeeded, and the withdrawal in that transaction's
+// processWithdrawals calldata pays the request's amount of its currency to its
+// recipient, without a callback, with a memo bound to this challenge. The
+// event carries no memo, so the calldata shows what was paid and for which
+// challenge. validateCredential has already checked the Zone and mode.
+func (i *Intent) validateZone(
+	ctx context.Context,
+	credential *mpp.Credential,
+	validated *validatedChargeCredential,
+) error {
+	request := validated.request
+	payload := validated.payload
+	portal := zone.PortalAddress(payload.ZoneID)
+	senderTag := common.HexToHash(payload.SenderTag)
+	// Refuse a credential past its grace before any RPC.
+	if err := validateChallengeExpiry(credential, i.ExpiryGrace(credential)); err != nil {
+		return err
+	}
+	receipt, err := fetchReceipt(ctx, validated.rpc, payload.Hash)
+	if err != nil {
+		if isTransactionReverted(err) {
+			return mpp.ErrVerificationFailed("settlement transaction reverted")
+		}
+		// fetchReceipt passes a JSON-RPC error's text on; keep the upstream
+		// node's message out of the client's problem response.
+		return mpp.ErrVerificationFailed("failed to fetch settlement receipt")
+	}
+	event, ok := zone.FindProcessedEvent(receipt, portal, senderTag)
+	if !ok {
+		return mpp.ErrVerificationFailed("zone withdrawal not settled")
+	}
+	if !event.CallbackSuccess {
+		return mpp.ErrVerificationFailed("zone withdrawal bounced")
+	}
+	response, err := validated.rpc.SendRequest(ctx, "eth_getTransactionByHash", payload.Hash)
+	if err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement transaction")
+	}
+	if err := response.CheckError(); err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement transaction")
+	}
+	transaction, _ := response.Result.(map[string]any)
+	var calls []any
+	if rawCalls, ok := transaction["calls"].([]any); ok {
+		calls = rawCalls
+	} else if to := asString(transaction["to"]); to != "" {
+		calls = []any{map[string]any{"to": to, "input": transaction["input"]}}
+	}
+	withdrawal, ok := zone.FindWithdrawal(calls, portal, senderTag)
+	if !ok ||
+		withdrawal.GasLimit != 0 ||
+		!strings.EqualFold(withdrawal.To.Hex(), request.Recipient) ||
+		!strings.EqualFold(withdrawal.Token.Hex(), request.Currency) ||
+		withdrawal.Amount.String() != request.Amount {
+		return mpp.ErrVerificationFailed("zone withdrawal not found")
+	}
+	memo := hexutil.Encode(withdrawal.Memo[:])
+	if !tempo.VerifyAttributionServer(memo, credential.Challenge.Realm) || !tempo.VerifyAttributionChallenge(memo, credential.Challenge.ID) {
+		return mpp.ErrCredentialReplayed("memo is not bound to this challenge")
+	}
+	// The withdrawal's attribution memo names this challenge, so no other
+	// challenge accepts it and its replay key may expire with the challenge.
+	validated.challengeBound = true
+	// A credential presented after its challenge expired is accepted only for
+	// a withdrawal that settled before then; see
+	// IntentConfig.ZoneCredentialGrace.
+	return validateZoneSettledBeforeExpiry(ctx, validated.rpc, credential, receipt, i.clock())
+}
+
+// validateZoneSettledBeforeExpiry rejects a zone credential presented after
+// its challenge expired unless the block of its settlement receipt was
+// produced before the expiry. A credential presented before the expiry needs
+// no lookup.
+func validateZoneSettledBeforeExpiry(ctx context.Context, rpc tempo.RPCClient, credential *mpp.Credential, receipt map[string]any, now time.Time) error {
+	expiresValue := credential.Challenge.Expires
+	expires, err := parseExpires(expiresValue)
+	if err != nil || now.Before(expires) {
+		return nil
+	}
+	blockNumber := asString(receipt["blockNumber"])
+	if blockNumber == "" {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	response, err := rpc.SendRequest(ctx, "eth_getBlockByNumber", blockNumber, false)
+	if err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	if err := response.CheckError(); err != nil {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	block, _ := response.Result.(map[string]any)
+	timestamp, err := hexutil.DecodeUint64(asString(block["timestamp"]))
+	if err != nil || timestamp > math.MaxInt64 {
+		return mpp.ErrVerificationFailed("failed to fetch settlement block")
+	}
+	if !time.Unix(int64(timestamp), 0).Before(expires) {
+		return mpp.ErrPaymentExpired(expiresValue)
+	}
 	return nil
 }
 
@@ -721,6 +942,23 @@ func (i *Intent) broadcastCredential(
 		return mpp.Success(tempo.MethodName, challengeID, mpp.WithExternalID(validated.request.ExternalID)), nil
 	case tempo.CredentialTypeTransaction:
 		return i.broadcastTransaction(ctx, credential, validated)
+	case tempo.CredentialTypeZone:
+		// One withdrawal pays one challenge: claim its portal and sender tag,
+		// since one settlement transaction can settle several withdrawals.
+		key := tempo.ChargeZoneWithdrawalStoreKey(zone.PortalAddress(validated.payload.ZoneID).Hex(), validated.payload.SenderTag)
+		accepted, err := i.claimReplayKey(ctx, credential, validated, key, validated.payload.Hash)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			return nil, mpp.ErrCredentialReplayed("zone withdrawal has already been used")
+		}
+		// validateZone checked that the withdrawal paid the request's
+		// currency, so the receipt reports it as the funding currency, as for
+		// hash and transaction payments.
+		return mpp.Success(tempo.MethodName, validated.payload.Hash,
+			mpp.WithExternalID(validated.request.ExternalID),
+			mpp.WithFundingCurrency(validated.request.Currency)), nil
 	default:
 		return nil, mpp.ErrInvalidPayload(fmt.Sprintf("unsupported credential type %q", validated.payload.Type))
 	}
@@ -1027,7 +1265,7 @@ func (i *Intent) broadcastTransaction(
 			return nil, err
 		}
 	}
-	if err := validateChallengeExpiry(credential); err != nil {
+	if err := validateChallengeExpiry(credential, 0); err != nil {
 		return nil, err
 	}
 	if request.MethodDetails.FeePayer {
@@ -1075,7 +1313,7 @@ func (i *Intent) broadcastTransaction(
 		// anyone who saw it pending. Its receipt proves nothing for this
 		// credential unless a transfer carries this challenge's attribution
 		// memo, and this attempt's record must not let a retry settle it.
-		if isDuplicateSubmission(err) && recordedHash && !request.MethodDetails.FeePayer && !validated.challengeBound {
+		if txsend.IsDuplicateSubmission(err) && recordedHash && !request.MethodDetails.FeePayer && !validated.challengeBound {
 			forgetRefused()
 			return nil, mpp.ErrVerificationFailed("transaction was already submitted elsewhere")
 		}
@@ -1177,7 +1415,9 @@ func hashPaymentFundedByCurrency(ctx context.Context, credential *mpp.Credential
 	return matchTransfers(actual, expected, credential.Challenge.Realm, credential.Challenge.ID)
 }
 
-func validateChallengeExpiry(credential *mpp.Credential) error {
+// validateChallengeExpiry requires credential's challenge to carry a
+// well-formed expiry that has not passed, or that passed less than grace ago.
+func validateChallengeExpiry(credential *mpp.Credential, grace time.Duration) error {
 	if credential == nil {
 		return mpp.ErrMalformedCredential("credential is required")
 	}
@@ -1189,7 +1429,7 @@ func validateChallengeExpiry(credential *mpp.Credential) error {
 	if err != nil {
 		return mpp.ErrInvalidChallenge(credential.Challenge.ID, "invalid expires format")
 	}
-	if !time.Now().UTC().Before(expires) {
+	if !time.Now().UTC().Before(expires.Add(max(grace, 0))) {
 		return mpp.ErrPaymentExpired(expiresValue)
 	}
 	return nil
@@ -1275,7 +1515,15 @@ func broadcastOutcomeUnknown(challengeID string) error {
 func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential, validated *validatedChargeCredential, key, value string) (bool, error) {
 	if store, ok := i.store.(tempo.ExpiringStore); ok && i.expireReplayKeys && validated.challengeBound {
 		if expiresAt, ok := replayClaimExpiry(credential); ok {
-			return store.PutIfAbsentUntil(ctx, key, value, expiresAt)
+			// Held through the grace too, while the credential can still be
+			// presented. A zone withdrawal is held through the longest grace
+			// any verifier may grant, not only this one's, so a verifier with
+			// a longer grace on the same store can't accept it again.
+			grace := i.ExpiryGrace(credential)
+			if isZoneCredential(credential) {
+				grace = MaxZoneCredentialGrace
+			}
+			return store.PutIfAbsentUntil(ctx, key, value, expiresAt.Add(grace))
 		}
 	}
 	return i.store.PutIfAbsent(ctx, key, value)
@@ -1286,15 +1534,18 @@ func (i *Intent) claimReplayKey(ctx context.Context, credential *mpp.Credential,
 //
 // It applies only to credentials bound to their challenge
 // (validatedChargeCredential.challengeBound): a proof, whose key is the
-// challenge ID, or a hash or transaction credential with a transfer carrying
+// challenge ID, a hash or transaction credential with a transfer carrying
 // an attribution memo for the challenge's realm and ID, which every other
-// challenge rejects. The attribution memo is optional, so a payment without
-// one could pay a later challenge once its key expired: claimReplayKey keeps
-// those keys forever. The challenge ID is an HMAC over the challenge's
-// expiry, which server.Mpp verifies before settlement, and credentials are
-// only accepted before that expiry, so after it no challenge can accept the
-// same bound proof, transaction or hash again. The grace absorbs clock skew
-// between verifier replicas and the store.
+// challenge rejects, or a zone credential, whose withdrawal must carry that
+// attribution memo. The attribution memo is optional on transfers, so a
+// payment without one could pay a later challenge once its key expired:
+// claimReplayKey keeps those keys forever. The challenge ID is an HMAC over
+// the challenge's expiry, which server.Mpp verifies before settlement, and
+// credentials are only accepted before that expiry (a zone credential until
+// IntentConfig.ZoneCredentialGrace after it, which claimReplayKey adds), so
+// after it no challenge can accept the same bound proof, transaction or hash
+// again. The grace absorbs clock skew between verifier replicas and the
+// store.
 func replayClaimExpiry(credential *mpp.Credential) (time.Time, bool) {
 	if credential == nil || credential.Challenge.Expires == "" {
 		return time.Time{}, false
@@ -1440,7 +1691,7 @@ func lookupConfirmedReceipt(ctx context.Context, rpc tempo.RPCClient, serialized
 // transaction may still land.
 func isBroadcastRefused(err error) bool {
 	var rpcErr *temporpc.JSONRPCError
-	if !errors.As(err, &rpcErr) || isDuplicateSubmission(err) {
+	if !errors.As(err, &rpcErr) || txsend.IsDuplicateSubmission(err) {
 		return false
 	}
 	if rpcErr.Code == -32603 || rpcErr.Code == 4 {
@@ -1448,25 +1699,6 @@ func isBroadcastRefused(err error) bool {
 	}
 	message := strings.ToLower(rpcErr.Message)
 	return !strings.Contains(message, "timeout") && !strings.Contains(message, "timed out")
-}
-
-// isDuplicateSubmission reports whether eth_sendRawTransaction failed because
-// the node already holds the transaction, as geth- and reth-based nodes answer
-// a re-broadcast of a pending transaction, and as Tempo answers with
-// ExpiringNonceReplay when an expiring-nonce transaction with this hash was
-// already accepted, such as when a transport retries a send the node took.
-func isDuplicateSubmission(err error) bool {
-	var rpcErr *temporpc.JSONRPCError
-	if !errors.As(err, &rpcErr) {
-		return false
-	}
-	message := strings.ToLower(rpcErr.Message)
-	for _, marker := range []string{"already known", "known transaction", "already imported", "alreadyknown", "expiringnoncereplay"} {
-		if strings.Contains(message, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // rejectIncludedTransaction looks up, once and without polling, the receipt
@@ -1673,6 +1905,13 @@ func receiptTransfers(receipt map[string]any, request tempo.ChargeRequest, sourc
 		}
 		fromAddress := tempo.ParseTopicAddress(asString(topics[1]))
 		toAddress := tempo.ParseTopicAddress(asString(topics[2]))
+		// A Zone portal's payout pays a withdrawal, which only its zone
+		// credential redeems; a settlement transaction batches many, so its
+		// hash can't be claimed for one. Skip portal transfers whatever the
+		// source, so a hash credential never redeems them.
+		if zone.IsPortalAddress(common.HexToAddress(fromAddress)) {
+			continue
+		}
 		if sourceAddress != "" && !strings.EqualFold(fromAddress, sourceAddress) {
 			continue
 		}

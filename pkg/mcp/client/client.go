@@ -20,6 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mcp/internal/payment"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
@@ -158,15 +159,21 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			return next(ctx, method, req)
 		}
 		config := w.config.Load()
-		// Credentials are reused per Challenge for the whole call, like the
-		// HTTP Transport, so a rejected or re-offered Challenge is not paid
-		// twice. Only an invalid-payload rejection discards the Credential.
-		credentials := make(map[credentialKey]*mpp.Credential)
-		var sent credentialKey
-		// sentCredential is the Credential the last request carried, the
-		// caller's own or one created here; sentHash is the hash Credential
-		// sent during this call, if any.
-		var sentCredential, sentHash *mpp.Credential
+		// last is the Credential the last call carried, by the caller or by
+		// this middleware, and lastKey the Challenge it answers. As in
+		// mppx's client Fetch and the HTTP Transport, a payment-required
+		// answer that offers that same Challenge again gets the same
+		// Credential, without paying again; any other Challenge gets a new
+		// Credential. After an invalid-payload problem the rejected
+		// Credential is never sent again: the Challenge gets a new one.
+		var last *mpp.Credential
+		var lastKey credentialKey
+		// sentPush is the last push credential (a Tempo hash or zone
+		// credential, whose payment is already on chain) submitted for this
+		// call, by the caller or by this middleware: as in the HTTP
+		// Transport, the call may then only resend it, never pay a new
+		// Challenge, which would pay twice.
+		var sentPush *mpp.Credential
 		authorization, parseErr := payment.Authorization(params.Meta)
 		if parseErr != nil {
 			return nil, parseErr
@@ -176,21 +183,25 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if parseErr != nil {
 				return nil, parseErr
 			}
-			sentCredential = credential
-			if credential.Payload["type"] == "hash" {
-				sentHash = credential
+			key, keyErr := echoCredentialKey(credential.Challenge)
+			if keyErr != nil {
+				return nil, keyErr
+			}
+			last, lastKey = credential, key
+			if isPushCredential(credential) {
+				sentPush = credential
 			}
 		}
 		result, err := next(ctx, method, req)
 		for attempt := 0; ; attempt++ {
 			data, invalidPayload, ok := paymentRequired(result, err)
 			if !ok {
-				if sentHash != nil && err != nil {
-					return result, &ReconciliationError{Credential: sentHash, Cause: err}
+				if sentPush != nil && err != nil {
+					return result, &ReconciliationError{Credential: sentPush, Cause: err}
 				}
 				return result, err
 			}
-			if sentCredential != nil && data.Problem["type"] == string(mpp.ErrorTypeInvalidChallenge) {
+			if last != nil && data.Problem["type"] == string(mpp.ErrorTypeInvalidChallenge) {
 				// invalid-challenge answering a sent Credential can mean it
 				// was already settled (a replay): paying the fresh Challenge
 				// would pay twice, so the answer is final, as in the HTTP
@@ -199,32 +210,40 @@ func (w *wrapper) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 				if cause == nil {
 					cause = errors.New("mpp: tool result rejected the sent credential as invalid-challenge")
 				}
-				return result, &ReconciliationError{Credential: sentCredential, Cause: cause}
+				return result, &ReconciliationError{Credential: last, Cause: cause}
 			}
 			if attempt == maxPaymentAttempts {
-				if sentHash != nil {
-					return result, &ReconciliationError{Credential: sentHash, Cause: err}
+				if sentPush != nil {
+					return result, &ReconciliationError{Credential: sentPush, Cause: err}
 				}
 				return result, err
-			}
-			if invalidPayload {
-				delete(credentials, sent)
 			}
 			cause := err
 			if cause == nil {
 				cause = errors.New("mpp: tool result requires payment")
 			}
-			paid, key, payErr := config.pay(ctx, session, params, data, credentials, cause, sentHash != nil)
-			if payErr != nil && sentHash != nil {
-				return result, &ReconciliationError{Credential: sentHash, Cause: errors.Join(err, payErr)}
+			resend := last
+			if invalidPayload {
+				// The server rejected the Credential itself: sending it
+				// again cannot succeed, so a new one is created.
+				resend = nil
+			}
+			paid, key, credential, unpayable, payErr := config.pay(ctx, session, params, data, resend, lastKey, cause, sentPush != nil)
+			if payErr != nil && sentPush != nil {
+				return result, &ReconciliationError{Credential: sentPush, Cause: errors.Join(err, payErr)}
+			}
+			if unpayable && last != nil {
+				// A payment-required answer to a Credential without a
+				// Challenge this client may pay (such as a rejected
+				// Credential) is the server's final answer, as in mppx.
+				return result, err
 			}
 			if payErr != nil {
 				return nil, payErr
 			}
-			sent = key
-			sentCredential = credentials[key]
-			if sentCredential != nil && sentCredential.Payload["type"] == "hash" {
-				sentHash = sentCredential
+			last, lastKey = credential, key
+			if isPushCredential(credential) {
+				sentPush = credential
 			}
 			result, err = next(ctx, method, &mcp.ClientRequest[mcp.Params]{Session: session, Params: paid})
 		}
@@ -241,39 +260,70 @@ type credentialKey struct {
 
 func newCredentialKey(challenge *mpp.Challenge) (credentialKey, error) {
 	// The echo is what a Credential for challenge carries.
-	encoded, err := json.Marshal(challenge.ToEcho())
+	return echoCredentialKey(challenge.ToEcho())
+}
+
+// echoCredentialKey returns the key of the Challenge a Credential echoes.
+// The echo leaves out display fields such as the description.
+func echoCredentialKey(echo mpp.ChallengeEcho) (credentialKey, error) {
+	echo.Header = mpp.AdvertisedCredentialHeader(echo.Header)
+	encoded, err := json.Marshal(echo)
 	if err != nil {
 		return credentialKey{}, fmt.Errorf("mpp: encoding challenge: %w", err)
 	}
-	return credentialKey{id: challenge.ID, method: challenge.Method, intent: challenge.Intent, challenge: string(encoded)}, nil
+	return credentialKey{id: echo.ID, method: echo.Method, intent: echo.Intent, challenge: string(encoded)}, nil
 }
 
-// pay selects a Challenge, approves and pays it (or reuses the Credential
-// already created for it), and returns a copy of the original call's params
-// with the Credential in their metadata.
+// isPushCredential reports whether a credential names a payment the client
+// already made on chain: a Tempo hash or zone credential.
+func isPushCredential(credential *mpp.Credential) bool {
+	if credential == nil {
+		return false
+	}
+	switch credential.Payload["type"] {
+	case "hash", "zone":
+		return true
+	}
+	return false
+}
+
+// pay selects a Challenge and returns a copy of the original call's params
+// with a Credential for it in their metadata, the Challenge's key and the
+// Credential. When last is set and the selected Challenge is the one it
+// answers (lastKey), it sends last again; otherwise it approves and pays the
+// Challenge. With pushSent, it only resends last and returns
+// ErrPaymentReconciliationRequired instead of creating a Credential.
+// unpayable reports that the answer offers no Challenge a Method may pay.
 func (config *Config) pay(
 	ctx context.Context,
 	session *mcp.ClientSession,
 	original *mcp.CallToolParams,
 	data *mpp.MCPPaymentRequiredData,
-	credentials map[credentialKey]*mpp.Credential,
+	last *mpp.Credential,
+	lastKey credentialKey,
 	cause error,
-	hashSent bool,
-) (*mcp.CallToolParams, credentialKey, error) {
+	pushSent bool,
+) (params *mcp.CallToolParams, key credentialKey, credential *mpp.Credential, unpayable bool, err error) {
 	offered := make([]mpp.Challenge, 0, len(data.Challenges))
 	for _, challenge := range data.Challenges {
 		if challenge != nil {
 			offered = append(offered, *challenge)
 		}
 	}
+	if len(offered) == 0 {
+		// Every offered Challenge selected an unsupported credential header
+		// and was dropped: none may be paid.
+		return nil, credentialKey{}, nil, true, fmt.Errorf("%w: every offered challenge selects an unsupported credential header: %w: %w",
+			mppclient.ErrNoMethodFound, mpp.ErrUnsupportedCredentialHeader, cause)
+	}
 	candidates, err := mppclient.SelectChallengeCandidates(offered, config.Methods, config.PaymentPreferences)
 	if err != nil {
-		return nil, credentialKey{}, err
+		return nil, credentialKey{}, nil, false, err
 	}
 	if config.OrderChallenges != nil {
 		candidates, err = config.OrderChallenges(ctx, candidates)
 		if err != nil {
-			return nil, credentialKey{}, err
+			return nil, credentialKey{}, nil, false, err
 		}
 	}
 	if len(candidates) == 0 {
@@ -285,7 +335,7 @@ func (config *Config) pay(
 		for i, method := range config.Methods {
 			installed[i] = method.Name() + "." + method.Intent()
 		}
-		return nil, credentialKey{}, fmt.Errorf(
+		return nil, credentialKey{}, nil, true, fmt.Errorf(
 			"mpp: no compatible payment method; server offers: %s; client has: %s: %w",
 			strings.Join(available, ", "),
 			strings.Join(installed, ", "),
@@ -302,21 +352,22 @@ func (config *Config) pay(
 		payable = append(payable, candidate)
 	}
 	if len(payable) == 0 {
-		return nil, credentialKey{}, fmt.Errorf("%w: %w", rejected, cause)
+		return nil, credentialKey{}, nil, false, fmt.Errorf("%w: %w", rejected, cause)
 	}
 	selected := payable[0]
-	key, err := newCredentialKey(selected.Challenge)
+	key, err = newCredentialKey(selected.Challenge)
 	if err != nil {
-		return nil, credentialKey{}, err
+		return nil, credentialKey{}, nil, false, err
 	}
-	if credential, ok := credentials[key]; ok {
-		return withCredential(original, credential), key, nil
+	if last != nil && key == lastKey {
+		// The same Challenge again: the outcome of its Credential is still
+		// pending, so send that Credential again rather than paying twice.
+		return withCredential(original, last), key, last, false, nil
 	}
-
-	// A hash proves an already-broadcast transfer. A fresh challenge (or a
-	// rejected payload) must not create another transfer for the same tool call.
-	if hashSent {
-		return nil, credentialKey{}, ErrPaymentReconciliationRequired
+	// A hash or zone credential proves an already-broadcast payment. A fresh
+	// challenge must not create another payment for the same tool call.
+	if pushSent {
+		return nil, credentialKey{}, nil, false, ErrPaymentReconciliationRequired
 	}
 
 	approve := config.OnPaymentRequired
@@ -326,28 +377,31 @@ func (config *Config) pay(
 	if approve != nil {
 		approved, err := approve(ctx, selected.Challenge)
 		if err != nil {
-			return nil, credentialKey{}, err
+			return nil, credentialKey{}, nil, false, err
 		}
 		if !approved {
-			return nil, credentialKey{}, fmt.Errorf("%w: %w", ErrPaymentDeclined, cause)
+			return nil, credentialKey{}, nil, false, fmt.Errorf("%w: %w", ErrPaymentDeclined, cause)
 		}
 	}
 
-	credential, err := selected.Method.CreateCredential(ctx, selected.Challenge)
+	// A payment still settling is resumed for the same challenge, not paid
+	// again under a new one. MCP carries no origin for the method to check.
+	credential, err = paymentctx.RetryPending(ctx, maxPaymentAttempts, func() (*mpp.Credential, error) {
+		return selected.Method.CreateCredential(ctx, selected.Challenge)
+	})
 	if err != nil {
-		return nil, credentialKey{}, fmt.Errorf("mpp: creating credential for method %q: %w", selected.Challenge.Method, err)
+		return nil, credentialKey{}, nil, false, fmt.Errorf("mpp: creating credential for method %q: %w", selected.Challenge.Method, err)
 	}
 	// Send the Credential in its canonical wire form.
 	authorization, err := mpp.FormatCredential(credential)
 	if err != nil {
-		return nil, credentialKey{}, err
+		return nil, credentialKey{}, nil, false, err
 	}
 	credential, err = mpp.ParseCredential(authorization)
 	if err != nil {
-		return nil, credentialKey{}, err
+		return nil, credentialKey{}, nil, false, err
 	}
-	credentials[key] = credential
-	return withCredential(original, credential), key, nil
+	return withCredential(original, credential), key, credential, false, nil
 }
 
 func withCredential(original *mcp.CallToolParams, credential *mpp.Credential) *mcp.CallToolParams {
@@ -408,17 +462,26 @@ func (config *Config) checkOrigin(ctx context.Context, session *mcp.ClientSessio
 	return tempoproof.RealmError(challenge.Realm, tempoproof.Origin(origin), "trust it with the Tempo method's Config.TrustedProofRealms")
 }
 
-// IsPaymentRequiredError reports whether err is an MCP payment-required or
-// payment-verification-failed error that carries at least one Challenge.
+// IsPaymentRequiredError reports whether err is an MCP payment-required error,
+// a payment-verification-failed error whose httpStatus is 402 or absent, or an
+// invalid-params error with an invalid-payload problem, that offers at least
+// one Challenge,
+// including one whose every Challenge selects an unsupported credential
+// header (mpp.ErrUnsupportedCredentialHeader), which no Method may pay.
 func IsPaymentRequiredError(err error) bool {
 	_, _, ok := paymentRequired(nil, err)
 	return ok
 }
 
 // paymentRequired returns the payment-required data of a tool call's error
-// or, when it succeeded, of its result metadata. invalidPayload reports an
-// invalid-payload rejection (-32602 with payment data), whose Credential must
-// be recreated, as the HTTP Transport does.
+// or, when it succeeded, of its result metadata. Only a payment-required
+// answer starts a new round, as in mppx: a -32042 error, a -32043 error whose
+// httpStatus is 402 or absent, a result with payment-required metadata, or an
+// invalid-params (-32602) error whose problem is invalid-payload, which is how
+// servers report a rejected Credential payload. Any other answer, such as
+// another invalid-params error, is final. invalidPayload reports an
+// invalid-payload problem, whose Credential must be created again, as the
+// HTTP Transport does.
 func paymentRequired(result mcp.Result, err error) (data *mpp.MCPPaymentRequiredData, invalidPayload, ok bool) {
 	if err != nil {
 		var wireErr *jsonrpc.Error
@@ -426,17 +489,23 @@ func paymentRequired(result mcp.Result, err error) (data *mpp.MCPPaymentRequired
 			return nil, false, false
 		}
 		switch wireErr.Code {
-		case mpp.MCPPaymentRequiredCode, mpp.MCPPaymentVerificationFailedCode:
+		case mpp.MCPPaymentRequiredCode:
 			data, ok = decodePaymentRequired(wireErr.Data)
-			return data, false, ok
-		case mpp.MCPInvalidParamsCode:
+		case mpp.MCPPaymentVerificationFailedCode:
 			data, ok = decodePaymentRequired(wireErr.Data)
-			if !ok || data.Problem["type"] != string(mpp.ErrorTypeInvalidPayload) {
+			if ok && data.HTTPStatus != 0 && data.HTTPStatus != http.StatusPaymentRequired {
 				return nil, false, false
 			}
-			return data, true, true
+		case mpp.MCPInvalidParamsCode:
+			data, ok = decodePaymentRequired(wireErr.Data)
+			if ok && !isInvalidPayload(data) {
+				return nil, false, false
+			}
 		}
-		return nil, false, false
+		if !ok {
+			return nil, false, false
+		}
+		return data, isInvalidPayload(data), true
 	}
 	toolResult, isTool := result.(*mcp.CallToolResult)
 	if !isTool || toolResult == nil {
@@ -451,7 +520,16 @@ func paymentRequired(result mcp.Result, err error) (data *mpp.MCPPaymentRequired
 		return nil, false, false
 	}
 	data, ok = decodePaymentRequired(raw)
-	return data, false, ok
+	if !ok {
+		return nil, false, false
+	}
+	return data, isInvalidPayload(data), true
+}
+
+// isInvalidPayload reports whether data's problem is invalid-payload: the
+// server rejected the Credential's payload.
+func isInvalidPayload(data *mpp.MCPPaymentRequiredData) bool {
+	return data.Problem["type"] == string(mpp.ErrorTypeInvalidPayload)
 }
 
 func decodePaymentRequired(raw json.RawMessage) (*mpp.MCPPaymentRequiredData, bool) {
@@ -467,10 +545,21 @@ func decodePaymentRequired(raw json.RawMessage) (*mpp.MCPPaymentRequiredData, bo
 			return nil, false
 		}
 	}
-	if len(data.Challenges) == 0 {
+	if len(data.Challenges) == 0 && !offeredChallenges(raw) {
 		return nil, false
 	}
 	return &data, true
+}
+
+// offeredChallenges reports whether payment-required data lists any
+// Challenge, including ones MCPPaymentRequiredData dropped because they
+// select an unsupported credential header: such a response still requires
+// payment, but has no Challenge a Method may pay.
+func offeredChallenges(raw json.RawMessage) bool {
+	var offered struct {
+		Challenges []json.RawMessage `json:"challenges"`
+	}
+	return json.Unmarshal(raw, &offered) == nil && len(offered.Challenges) > 0
 }
 
 // Receipt returns the payment receipt in a tool result's

@@ -24,9 +24,12 @@ func ReceiptFromResponse(resp *http.Response) (*Receipt, error) {
 // ChallengesFromResponse parses every Payment challenge of a 402 response, in
 // order, as mppx's Challenge.fromResponseList does. It reads every
 // WWW-Authenticate field, splits values that merge several challenges, and
-// ignores other authentication schemes. It returns an error when resp is nil
-// or not a 402, when it carries no Payment challenge, or when one fails to
-// parse.
+// ignores other authentication schemes. A challenge that selects an
+// unsupported credential header is unrecognized and skipped, so another
+// challenge of the response stays usable. It returns an error when resp is
+// nil or not a 402, when it carries no Payment challenge (wrapping
+// ErrUnsupportedCredentialHeader when every one was skipped for it), or when
+// one fails to parse for another reason.
 func ChallengesFromResponse(resp *http.Response) ([]*Challenge, error) {
 	if resp == nil {
 		return nil, errors.New("mpp: response is nil")
@@ -35,6 +38,7 @@ func ChallengesFromResponse(resp *http.Response) ([]*Challenge, error) {
 		return nil, fmt.Errorf("mpp: response status is %d, not 402", resp.StatusCode)
 	}
 	var challenges []*Challenge
+	var unsupported error
 	for _, field := range resp.Header.Values(HeaderWWWAuthenticate) {
 		for _, value := range SplitAuthenticate(field) {
 			scheme, _, _ := strings.Cut(value, " ")
@@ -42,11 +46,18 @@ func ChallengesFromResponse(resp *http.Response) ([]*Challenge, error) {
 				continue
 			}
 			challenge, err := ParseChallenge(value)
+			if errors.Is(err, ErrUnsupportedCredentialHeader) {
+				unsupported = err
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
 			challenges = append(challenges, challenge)
 		}
+	}
+	if len(challenges) == 0 && unsupported != nil {
+		return nil, fmt.Errorf("mpp: no usable Payment challenge in %s header: %w", HeaderWWWAuthenticate, unsupported)
 	}
 	if len(challenges) == 0 {
 		return nil, fmt.Errorf("mpp: missing Payment challenge in %s header", HeaderWWWAuthenticate)

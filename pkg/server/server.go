@@ -43,6 +43,31 @@ type BroadcastingIntent interface {
 	Broadcast(ctx context.Context, credential *mpp.Credential, request map[string]any) (*mpp.Receipt, error)
 }
 
+// ExpiryGraceIntent may be implemented by an Intent that keeps accepting some
+// Credentials for a bounded time after their Challenge expires: payments the
+// intent can prove completed before the expiry, but whose Credential arrived
+// later. The intent enforces that proof itself. ExpiryGrace returns how long
+// after the expiry it still accepts credential; zero or less gives none. A
+// well-formed expires is still required.
+//
+// The grace applies only to a Challenge that carries the expiry grace marker
+// (_mppx_expiry_grace) in its HMAC-bound opaque metadata, as in mppx. Server
+// issuance sets it when the intent is an ExpiryGraceIssuer that reports
+// IssuesExpiryGrace, so a Challenge issued without it, by an earlier release
+// or with no grace configured, is rejected at its expiry.
+type ExpiryGraceIntent interface {
+	Intent
+	ExpiryGrace(credential *mpp.Credential) time.Duration
+}
+
+// ExpiryGraceIssuer may be implemented by an ExpiryGraceIntent whose grace
+// is configured: when IssuesExpiryGrace reports true, the Challenges issued
+// for it carry the expiry grace marker that the grace requires.
+type ExpiryGraceIssuer interface {
+	ExpiryGraceIntent
+	IssuesExpiryGrace() bool
+}
+
 // Validation describes a credential accepted without consuming or broadcasting it.
 type Validation struct {
 	// Challenge is the server-issued challenge echoed by the credential.
@@ -380,6 +405,10 @@ type ChargeParams struct {
 	FeePayerURL string
 	// SupportedModes advertises the Tempo submission modes allowed for this challenge.
 	SupportedModes []tempoparams.ChargeMode
+	// Zones overrides the Tempo method's accepted Zones for this challenge
+	// (methodDetails.zones): clients may then pay it with a withdrawal from
+	// one of those Zones.
+	Zones *tempoparams.Zones
 	// ChainID overrides the method's default Tempo chain ID.
 	ChainID int
 	// Meta stores opaque Challenge metadata.

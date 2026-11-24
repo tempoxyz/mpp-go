@@ -350,6 +350,48 @@ func buildChallenge(t *testing.T, params tempo.ChargeRequestParams) *mpp.Challen
 	)
 }
 
+func TestCreateCredentialRefusesLegacyUnicodeEscapedChallenge(t *testing.T) {
+	t.Parallel()
+
+	for _, realm := range []string{`caf\u00e9.example.com`, `merchant\u2014api.example.com`} {
+		t.Run(realm, func(t *testing.T) {
+			t.Parallel()
+
+			rpc := &mockRPC{chainID: 42431, gasPrice: "0x1", estimateGas: "0x5208"}
+			var policyCalls atomic.Int32
+			method, err := New(Config{
+				PaymentPolicy: func(context.Context, tempo.ChargeRequest) error {
+					policyCalls.Add(1)
+					return nil
+				},
+				ChainID:        42431,
+				CredentialType: tempo.CredentialTypeHash,
+				PrivateKey:     testPrivateKey,
+				RPC:            rpc,
+			})
+			require.NoError(t, err)
+
+			header := mpptest.FormatChallenge(buildChallenge(t, tempo.ChargeRequestParams{
+				Amount:    "0.50",
+				Currency:  testCurrency,
+				Recipient: testRecipient,
+				Decimals:  6,
+				ChainID:   42431,
+			}))
+			legacyHeader := strings.Replace(header, `realm="`+testRealm+`"`, `realm="`+realm+`"`, 1)
+			require.NotEqual(t, header, legacyHeader)
+			challenge, err := mpp.ParseChallenge(legacyHeader)
+			require.NoError(t, err)
+
+			credential, err := method.CreateCredential(context.Background(), challenge)
+			require.ErrorIs(t, err, mpp.ErrLegacyUnicodeEscapedChallenge)
+			assert.Nil(t, credential)
+			assert.Empty(t, rpc.sentRawTxs, "nothing may be broadcast")
+			assert.Zero(t, policyCalls.Load())
+		})
+	}
+}
+
 func TestHashCredentialSizePreflight(t *testing.T) {
 	// 9000 produces a credential above 16 KiB from a challenge that fits its own
 	// limit; mppx accepts it. 60000 exceeds the 64 KiB credential limit.

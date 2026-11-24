@@ -24,6 +24,7 @@ type methodConfig struct {
 	ChainID        int64
 	FeePayer       bool
 	SupportedModes []tempo.ChargeMode
+	Zones          *tempo.Zones
 }
 
 // Method adapts Tempo charge configuration to the generic server interfaces.
@@ -40,8 +41,11 @@ type Method struct {
 	// mppx.
 	sponsors bool
 	// relay is set when a relay verifies credentials and sponsors them.
-	relay                bool
-	supportedModes       []tempo.ChargeMode
+	relay          bool
+	supportedModes []tempo.ChargeMode
+	// zones lists the Zones every challenge accepts withdrawals from, unless
+	// ChargeParams.Zones overrides it.
+	zones                *tempo.Zones
 	supportsUnknownChain bool
 }
 
@@ -78,6 +82,7 @@ func newMethod(config methodConfig) *Method {
 		feePayer:             config.FeePayer,
 		sponsors:             intent.sponsors(),
 		supportedModes:       append([]tempo.ChargeMode(nil), config.SupportedModes...),
+		zones:                config.Zones,
 		supportsUnknownChain: intent.rpc != nil || intent.rpcURL != "",
 	}
 }
@@ -155,6 +160,10 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 			return nil, err
 		}
 	}
+	zones := params.Zones
+	if zones == nil {
+		zones = m.zones
+	}
 	request, err := tempo.NormalizeChargeRequest(tempo.ChargeRequestParams{
 		Amount:         params.Amount,
 		Currency:       currency,
@@ -167,6 +176,7 @@ func (m *Method) BuildChargeRequest(params mppserver.ChargeParams) (map[string]a
 		Memo:           params.Memo,
 		Splits:         append([]tempo.SplitParams(nil), params.Splits...),
 		SupportedModes: modes,
+		Zones:          zones,
 	})
 	if err != nil {
 		return nil, err
