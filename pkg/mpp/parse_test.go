@@ -1088,3 +1088,61 @@ func TestIssuedChallengeVerifiesAfterWireRoundTrip(t *testing.T) {
 			"challenge for amount %d was issued by this server and must verify", amount)
 	}
 }
+
+func TestParseChallengeRequiresCommaSeparatedTokenAuthParams(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		header string
+	}{
+		{name: "params without commas", header: `Payment method="tempo" realm="api" intent="charge" request="e30" id="a"`},
+		{name: "text after a closing quote", header: `Payment id="a", method="tempo", intent="charge", request="e30", realm="p"ay.example.com:8443"`},
+		{name: "unquoted value followed by another param without a comma", header: `Payment id="a", method=tempo realm="api", intent="charge", request="e30"`},
+		{name: "unquoted value with a non-token character", header: `Payment id="a", realm=api/v1, method="tempo", intent="charge", request="e30"`},
+		{name: "empty unquoted value", header: `Payment id="a", realm=, method="tempo", intent="charge", request="e30"`},
+		{name: "unquoted description with a space", header: `Payment id="a", realm="api", method="tempo", intent="charge", description=two words, request="e30"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseChallenge(tt.header)
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), "malformed auth-param")
+			}
+		})
+	}
+}
+
+func TestParseChallengeReadsTokenValuesWithOWSAroundCommas(t *testing.T) {
+	t.Parallel()
+
+	got, err := ParseChallenge("Payment id=a ,realm=api.example.com ,  method=tempo,intent=charge , request=e30 ")
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, "a", got.ID)
+	assert.Equal(t, "api.example.com", got.Realm)
+	assert.Equal(t, "tempo", got.Method)
+	assert.Equal(t, "charge", got.Intent)
+}
+
+func TestChallengesFromHeadersBesideOtherSchemes(t *testing.T) {
+	t.Parallel()
+
+	for _, header := range []string{
+		`Payment id="a", realm="api", method="tempo", intent="charge", request="e30", Basic realm="x"`,
+		`Basic realm="x", Payment id="a", realm="api", method="tempo", intent="charge", request="e30"`,
+		`Payment id=a, realm=api, method=tempo, intent=charge, request=e30, Bearer token68==`,
+	} {
+		var found *Challenge
+		for _, part := range SplitAuthenticate(header) {
+			if c, err := ParseChallenge(part); err == nil {
+				found = c
+			}
+		}
+		if assert.NotNilf(t, found, "no Payment challenge in %q", header) {
+			assert.Equal(t, "a", found.ID)
+			assert.Equal(t, "api", found.Realm)
+		}
+	}
+}
