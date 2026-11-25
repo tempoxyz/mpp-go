@@ -75,6 +75,7 @@ func parseAuthParams(s string) (params map[string]string, legacy bool, err error
 			i++
 		}
 
+		quoted := i < len(s) && s[i] == '"'
 		value, next, escaped, err := readAuthParamValue(s, i)
 		if err != nil {
 			return nil, false, err
@@ -98,7 +99,7 @@ func parseAuthParams(s string) (params map[string]string, legacy bool, err error
 			// Legacy challenges may contain unescaped quotes in the optional
 			// description. Keep the value up to the quote and ignore the
 			// malformed, non-semantic suffix.
-			if name == "description" {
+			if name == "description" && quoted {
 				break
 			}
 			return nil, false, fmt.Errorf("mpp: malformed auth-param separator")
@@ -198,11 +199,16 @@ func readAuthParamValue(input string, start int) (value string, next int, escape
 	if start < len(input) && input[start] == '"' {
 		return readQuotedAuthParamValue(input, start+1)
 	}
+	// An unquoted value is a token (1*tchar, RFC 9110 §5.6.2); the caller
+	// then requires OWS and a comma or the end of the list.
 	end := start
-	for end < len(input) && input[end] != ',' {
+	for end < len(input) && isTokenChar(input[end]) {
 		end++
 	}
-	return strings.TrimSpace(input[start:end]), end, false, nil
+	if end == start {
+		return "", 0, false, fmt.Errorf("mpp: malformed auth-param")
+	}
+	return input[start:end], end, false, nil
 }
 
 func readQuotedAuthParamValue(input string, start int) (value string, next int, escaped bool, err error) {
