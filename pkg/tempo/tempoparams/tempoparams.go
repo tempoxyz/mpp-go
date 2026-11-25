@@ -4,7 +4,8 @@
 // go-ethereum, go-redis or tempo-go through pkg/tempo.
 //
 // pkg/tempo re-exports every identifier here (tempo.ChargeMode,
-// tempo.SplitParams and the ChargeMode constants); use those names.
+// tempo.SplitParams, tempo.Zones and the ChargeMode constants); use those
+// names.
 package tempoparams
 
 // ChargeMode declares which Tempo credential flow a challenge accepts.
@@ -25,4 +26,15 @@ type SplitParams struct {
 	Memo string
 	// Recipient is the split recipient address.
 	Recipient string
+}
+
+// Zones selects the Zones a Tempo charge accepts withdrawals from
+// (methodDetails.zones), as mppx's zones option: Any accepts any Zone on the
+// challenge's chain (zones: true); otherwise IDs lists the accepted Zone IDs,
+// which must be positive. Set one of them, not both.
+type Zones struct {
+	// Any accepts a withdrawal from any Zone on the challenge's chain.
+	Any bool
+	// IDs lists the accepted Zone IDs.
+	IDs []uint32
 }

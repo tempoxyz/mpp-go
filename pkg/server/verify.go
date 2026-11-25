@@ -3,24 +3,23 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"time"
 
+	"github.com/tempoxyz/mpp-go/pkg/internal/challengemeta"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
 
 // VerifyParams contains the parameters for VerifyOrChallenge.
 type VerifyParams struct {
 	// DisableChallengeNonce issues Challenges without the random, HMAC-bound
-	// _mppx_nonce that by default makes every issued Challenge unique, as in
-	// mppx. Use it only while some replica still runs a verifier that rejects
-	// _mppx_nonce. Verification accepts Challenges with and without a nonce
-	// either way. Mpp.Charge sets it for a handler created
-	// WithChallengeNonce(false).
+	// _mpp_nonce that by default makes every issued Challenge unique.
+	// Verification accepts Challenges with and without a nonce either way.
+	// Mpp.Charge sets it for a handler created WithChallengeNonce(false).
 	DisableChallengeNonce bool
 	// Authorization is the incoming Authorization header value.
 	Authorization string
@@ -37,7 +36,8 @@ type VerifyParams struct {
 	Body any
 	// Realm is the expected server realm.
 	Realm string
-	// SecretKey signs and verifies Challenge IDs.
+	// SecretKey signs and verifies Challenge IDs. It must be at least 32
+	// bytes, as the core specification requires.
 	SecretKey string
 	// Method is the payment method token, for example "tempo".
 	Method string
@@ -47,8 +47,10 @@ type VerifyParams struct {
 	Meta map[string]string
 	// Expires overrides the default Challenge expiry.
 	Expires string
-	// Header selects the HTTP field for the Payment credential. Empty defaults
-	// to Authorization. Payment-Authorization is advertised when set.
+	// Header selects the HTTP field for the Payment credential. Empty or
+	// Authorization selects the default, Authorization, which is not
+	// advertised; Payment-Authorization is advertised when set. Any other
+	// value fails Challenge creation with mpp.ErrUnsupportedCredentialHeader.
 	Header string
 }
 
@@ -74,15 +76,24 @@ func (r *VerifyResult) IsChallenge() bool {
 // Logic:
 //  1. If no authorization header, create new challenge
 //  2. Extract "Payment" scheme from Authorization header
-//  3. Parse credential
+//  3. Parse credential (malformed-credential)
 //  4. Recompute expected challenge ID from echoed parameters via HMAC
 //  5. Constant-time compare IDs
-//  6. Verify echoed fields match (realm, method, intent name, request)
-//  7. Check expiry
-//  8. Verify body digest, if present
-//  9. Validate then broadcast split intents, or call legacy intent.Verify
-//  10. Return result
+//  6. Verify echoed fields match (realm, method, intent name, request,
+//     opaque metadata, body digest): invalid-challenge
+//  7. Check expiry (payment-expired)
+//  8. Validate then broadcast split intents, or call legacy intent.Verify;
+//     the method reports replays (invalid-challenge) before verifying the
+//     payment (verification-failed or invalid-payload)
+//  9. Return result
+//
+// This is the check order the core specification sets. Every rejected
+// credential gets a fresh Challenge, except a method's verification-failed
+// error, which keeps the echoed one.
 func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult, error) {
+	if len(params.SecretKey) < minimumSecretKeyBytes {
+		return nil, fmt.Errorf("server: secret key must be at least %d bytes", minimumSecretKeyBytes)
+	}
 	expires := params.Expires
 	if expires == "" {
 		expires = mpp.ExpiresIn(5 * time.Minute)
@@ -94,23 +105,28 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if params.Description != "" {
 		opts = append(opts, mpp.WithDescription(params.Description))
 	}
-	for _, key := range challengeNonceKeys {
+	for _, key := range challengemeta.ReservedKeys {
 		if _, reserved := params.Meta[key]; reserved {
 			// Meta is server configuration: a reserved key is a server bug.
 			return nil, fmt.Errorf("server: %s is reserved for challenge issuance", key)
 		}
 	}
 	meta := maps.Clone(params.Meta)
+	if issuer, ok := params.Intent.(ExpiryGraceIssuer); ok && issuer.IssuesExpiryGrace() {
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta[expiryGraceKey] = expiryGraceValue
+	}
 	if !params.DisableChallengeNonce {
 		if meta == nil {
 			meta = make(map[string]string)
 		}
-		nonce := make([]byte, 32)
+		nonce := make([]byte, challengeNonceBytes)
 		if _, err := rand.Read(nonce); err != nil {
 			return nil, fmt.Errorf("generating challenge nonce: %w", err)
 		}
-		// mppx's ChallengeMeta.withNonce: 32 random bytes as 0x-prefixed hex.
-		meta[challengeNonceKey] = "0x" + hex.EncodeToString(nonce)
+		meta[challengeNonceKey] = base64.RawURLEncoding.EncodeToString(nonce)
 	}
 	if meta != nil {
 		opts = append(opts, mpp.WithMeta(meta))
@@ -144,7 +160,11 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 		return &VerifyResult{Challenge: challenge}, nil
 	}
 
-	// 2. Extract the Payment credential from Authorization.
+	// 2. Extract the Payment credential from Authorization. A credential
+	// over the size servers must accept is malformed.
+	if len(params.Authorization) > maxCredentialBytes {
+		return challengeResultError(challenge, mpp.ErrMalformedCredential("Payment credential exceeds maximum size"))
+	}
 	authHeader, err := mpp.FindPaymentAuthorizationStrict(params.Authorization)
 	if err != nil {
 		return nil, mpp.ErrBadRequest(err.Error())
@@ -215,17 +235,12 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			mpp.ErrInvalidChallenge(echoed.ID, "missing required expires"),
 		)
 	}
-	// 7. Check expiry before body-digest validation so expired credentials
-	// consistently return the payment-expired 402 path.
 	expiresTime, err := mpp.ParseExpires(echoed.Expires)
 	if err != nil {
 		return challengeResultError(
 			challenge,
 			mpp.ErrInvalidChallenge(echoed.ID, "invalid expires format"),
 		)
-	}
-	if challengeExpired(expiresTime, time.Now()) {
-		return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
 	}
 	// The nonce is authenticated by the echoed HMAC, not compared with the
 	// fresh challenge. Application metadata must still match exactly.
@@ -238,6 +253,11 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 	if err := verifyBodyDigest(echoed.ID, echoed.Digest, params.Body); err != nil {
 		return challengeResultError(challenge, err)
 	}
+	// 7. Check expiry once the credential is known to be bound to this
+	// route, as the core specification orders the checks.
+	if credentialExpired(params.Intent, credential, expiresTime, time.Now()) {
+		return challengeResultError(challenge, mpp.ErrPaymentExpired(echoed.Expires))
+	}
 
 	// 9. Dispatch split intents through Broadcast and legacy intents through Verify.
 	receipt, err := broadcastCredential(ctx, params.Intent, credential, params.Request)
@@ -247,7 +267,9 @@ func VerifyOrChallenge(ctx context.Context, params VerifyParams) (*VerifyResult,
 			if pe.Status != http.StatusPaymentRequired {
 				return nil, pe
 			}
-			if pe.Type == mpp.ErrorTypeInvalidPayload {
+			// A replayed credential (invalid-challenge) and an invalid
+			// payload get a fresh Challenge.
+			if pe.Type == mpp.ErrorTypeInvalidPayload || pe.Type == mpp.ErrorTypeInvalidChallenge {
 				return challengeResultError(challenge, pe)
 			}
 			return challengeResultError(echoedChallenge, pe)
@@ -322,23 +344,46 @@ func echoedChallengeOpts(cred *mpp.Credential) []mpp.ChallengeOption {
 		opts = append(opts, mpp.WithMeta(cred.Challenge.Opaque))
 	}
 	if cred.Challenge.Header != "" {
-		opts = append(opts, mpp.WithHeader(cred.Challenge.Header))
+		// Bind the echoed spelling as-is: the challenge ID was computed over
+		// the value the issuing server sent.
+		opts = append(opts, mpp.WithEchoedHeader(cred.Challenge.Header))
 	}
 	return opts
 }
 
-// challengeNonceKey is the opaque metadata key of the issuance nonce, as in
-// mppx (ChallengeMeta.withNonce).
-const challengeNonceKey = "_mppx_nonce"
+// challengeNonceKey is the opaque metadata key of the issuance nonce, the
+// key every MPP SDK uses. Verification also accepts the legacy _mppx_nonce
+// that mppx and releases 0.7.0 to 0.9.0 issued; neither takes part in
+// matching a Credential's opaque metadata against the route's
+// (challengemeta.ReservedKeys).
+const challengeNonceKey = challengemeta.NonceKey
 
-// challengeNonceKeys are the reserved issuance nonce keys: mppx's and the
-// _mpp_nonce that earlier mpp-go releases issued, still accepted on
-// verification until those Challenges expire.
-var challengeNonceKeys = [...]string{challengeNonceKey, "_mpp_nonce"}
+// challengeNonceBytes is the size of the random issuance nonce, which is
+// encoded as base64url without padding.
+const challengeNonceBytes = 16
+
+// maxCredentialBytes is the largest Payment credential field value servers
+// accept (65536 octets): the core specification lets servers reject larger
+// ones as malformed.
+const maxCredentialBytes = 64 * 1024
+
+// expiryGraceKey is the reserved opaque metadata key marking a Challenge
+// whose intent accepts some of its Credentials for a while after it expires,
+// as mppx's ChallengeMeta.withExpiryGrace. The Challenge HMAC binds it, so a
+// Challenge issued without it never gets that grace.
+const expiryGraceKey = challengemeta.ExpiryGraceKey
+
+// expiryGraceValue is the value of expiryGraceKey on a marked Challenge.
+const expiryGraceValue = challengemeta.ExpiryGraceValue
+
+// hasExpiryGrace reports whether opaque carries the expiry grace marker.
+func hasExpiryGrace(opaque map[string]string) bool {
+	return opaque[expiryGraceKey] == expiryGraceValue
+}
 
 func applicationMeta(meta map[string]string) map[string]string {
 	result := maps.Clone(meta)
-	for _, key := range challengeNonceKeys {
+	for _, key := range challengemeta.ReservedKeys {
 		delete(result, key)
 	}
 	return result

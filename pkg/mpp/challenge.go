@@ -29,6 +29,20 @@ type Challenge struct {
 	// implicit default, Authorization. When set, it is advertised as the
 	// challenge header parameter and bound into the challenge ID.
 	Header string `json:"header,omitempty"`
+	// legacyUnicodeEscape records that ParseChallenge read a legacy \uXXXX
+	// escape in an ID-bound auth-param. It is not part of the wire form.
+	legacyUnicodeEscape bool
+}
+
+// LegacyUnicodeEscape reports whether c was parsed from a header in which an
+// auth-param bound into the challenge ID (not description or an unknown
+// extension) held a \uXXXX escape. Servers on older SDK releases wrote
+// characters above U+00FF that way; ParseChallenge reads it as an RFC 9110
+// quoted-pair ("\u00e9" reads "u00e9"), so the parsed value differs from the
+// one the ID binds and the server would reject a Credential for c. Clients
+// refuse to pay such a challenge with ErrLegacyUnicodeEscapedChallenge.
+func (c *Challenge) LegacyUnicodeEscape() bool {
+	return c != nil && c.legacyUnicodeEscape
 }
 
 // ChallengeEcho is the subset of a Challenge echoed back in a Credential.
@@ -79,8 +93,21 @@ func WithMeta(meta map[string]string) ChallengeOption {
 }
 
 // WithHeader sets the HTTP field that must carry the Payment credential.
-// Authorization is the implicit default and is not advertised on the wire.
+// Authorization is the implicit default and is not advertised on the wire;
+// Payment-Authorization (any case) is advertised canonically. Any other value
+// makes NewChallengeWithError fail with ErrUnsupportedCredentialHeader.
 func WithHeader(header string) ChallengeOption {
+	return func(c *challengeConfig) { c.header = canonicalCredentialHeader(header) }
+}
+
+// WithEchoedHeader sets the credential header a received credential's
+// challenge echo carries, keeping its spelling, so a server rebuilding the
+// challenge to check its ID binds the same value it issued (such as a
+// lowercase payment-authorization). Use WithHeader for challenges you issue.
+// As with WithHeader, Authorization is the implicit default and any value
+// other than Payment-Authorization (compared case-insensitively) makes
+// NewChallengeWithError fail with ErrUnsupportedCredentialHeader.
+func WithEchoedHeader(header string) ChallengeOption {
 	return func(c *challengeConfig) { c.header = AdvertisedCredentialHeader(header) }
 }
 
@@ -164,7 +191,10 @@ func (c Challenge) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON accepts the standard JSON challenge shape and computes the
-// cached RequestB64 field used by header serialization.
+// cached RequestB64 field used by header serialization. As ParseChallenge,
+// it accepts a header member only when it is Payment-Authorization (compared
+// case-insensitively, kept as received) or null (treated as absent), and
+// otherwise fails with ErrUnsupportedCredentialHeader.
 func (c *Challenge) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		ID          string          `json:"id"`
@@ -177,7 +207,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 		Expires     string          `json:"expires,omitempty"`
 		Description string          `json:"description,omitempty"`
 		Opaque      json.RawMessage `json:"opaque,omitempty"`
-		Header      string          `json:"header,omitempty"`
+		Header      json.RawMessage `json:"header,omitempty"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
@@ -191,7 +221,7 @@ func (c *Challenge) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	header, err := parseAdvertisedCredentialHeader(decoded.Header)
+	header, err := decodeJSONCredentialHeader(decoded.Header)
 	if err != nil {
 		return err
 	}
@@ -246,12 +276,28 @@ func (c *Challenge) verify(secretKey, realm string) bool {
 }
 
 // CredentialHeader returns the HTTP field a client must use for the payment
-// credential. Challenges that omit header default to Authorization.
+// credential. Challenges that omit header default to Authorization, and
+// Payment-Authorization is returned canonically in any case.
 func (c *Challenge) CredentialHeader() string {
-	if AdvertisedCredentialHeader(c.Header) == "" {
+	header := canonicalCredentialHeader(c.Header)
+	if header == "" {
 		return HeaderAuthorization
 	}
-	return c.Header
+	return header
+}
+
+// decodeJSONCredentialHeader validates the raw header member of a JSON
+// challenge: absent or null selects Authorization, and only a
+// Payment-Authorization string may be present.
+func decodeJSONCredentialHeader(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return parseReceivedCredentialHeader("", false)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", ErrUnsupportedCredentialHeader
+	}
+	return parseReceivedCredentialHeader(value, true)
 }
 
 // ToEcho returns the ChallengeEcho representation suitable for inclusion
@@ -312,9 +358,9 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 		if requestB64 == "" {
 			requestB64 = b64EncodeRequest(nil)
 		}
-		decoded, err := B64Decode(requestB64)
+		decoded, err := decodeRequestB64(requestB64)
 		if err != nil {
-			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+			return nil, "", err
 		}
 		return decoded, requestB64, nil
 	}
@@ -329,9 +375,9 @@ func decodeJSONRequest(request json.RawMessage, requestB64 string) (map[string]a
 		return decoded, requestB64, nil
 	}
 
-	decodedB64, err := B64Decode(requestB64)
+	decodedB64, err := decodeRequestB64(requestB64)
 	if err != nil {
-		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+		return nil, "", err
 	}
 	if !ChallengeBoundJSONEqual(decoded, decodedB64) {
 		return nil, "", fmt.Errorf("mpp: challenge request and requestB64 do not match")
@@ -345,9 +391,9 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 		if err := json.Unmarshal(trimmed, &requestB64); err != nil {
 			return nil, "", err
 		}
-		decoded, err := B64Decode(requestB64)
+		decoded, err := decodeRequestB64(requestB64)
 		if err != nil {
-			return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
+			return nil, "", err
 		}
 		return decoded, requestB64, nil
 	}
@@ -364,6 +410,19 @@ func parseJSONRequestValue(trimmed json.RawMessage) (map[string]any, string, err
 		return nil, "", fmt.Errorf("mpp: invalid request encoding: %w", err)
 	}
 	return request, requestB64, nil
+}
+
+// decodeRequestB64 decodes a base64url challenge request, which must be a
+// JSON object, as ParseChallenge requires.
+func decodeRequestB64(requestB64 string) (map[string]any, error) {
+	decoded, err := B64Decode(requestB64)
+	if err != nil {
+		return nil, fmt.Errorf("mpp: invalid request encoding: %w", err)
+	}
+	if decoded == nil {
+		return nil, fmt.Errorf("mpp: invalid request encoding: must be a JSON object")
+	}
+	return decoded, nil
 }
 
 // decodeJSONOpaque decodes a JSON opaque value. For a base64url string it also

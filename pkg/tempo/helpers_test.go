@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 )
@@ -83,6 +84,44 @@ func TestNormalizeChargeRequest_RoundTripsCanonicalShape(t *testing.T) {
 		return
 	}
 
+}
+
+func TestChargeRequest_RoundTripsPrimaryMemo(t *testing.T) {
+	t.Parallel()
+
+	request, err := NormalizeChargeRequest(ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  "0x20c0000000000000000000000000000000000001",
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Decimals:  6,
+		Memo:      "0X" + strings.Repeat("AB", 32),
+	})
+	require.NoError(t, err)
+	memo := "0x" + strings.Repeat("ab", 32)
+	assert.Equal(t, memo, request.MethodDetails.Memo)
+	assert.Equal(t, map[string]any{"memo": memo}, request.Map()["methodDetails"])
+
+	parsed, err := ParseChargeRequest(request.Map())
+	require.NoError(t, err)
+	assert.Equal(t, request, parsed)
+
+	// Wire challenges are canonicalized and validated like split memos.
+	wire := request.Map()
+	wire["methodDetails"] = map[string]any{"memo": strings.Repeat("AB", 32)}
+	parsed, err = ParseChargeRequest(wire)
+	require.NoError(t, err)
+	assert.Equal(t, memo, parsed.MethodDetails.Memo)
+	wire["methodDetails"] = map[string]any{"memo": "0x1234"}
+	_, err = ParseChargeRequest(wire)
+	assert.ErrorContains(t, err, "memo must be exactly 32 bytes")
+
+	_, err = NormalizeChargeRequest(ChargeRequestParams{
+		Amount:    "0.50",
+		Currency:  "0x20c0000000000000000000000000000000000001",
+		Recipient: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+		Memo:      "0x" + strings.Repeat("zz", 32),
+	})
+	assert.ErrorContains(t, err, "memo must be hex encoded")
 }
 
 func TestParseChargeRequest_KeepsChainIDFromWireChallenge(t *testing.T) {
@@ -298,7 +337,7 @@ func TestMatchTransferCalldata_Attribution(t *testing.T) {
 		return
 	}
 	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "other.example.com", "challenge-1"),
-		"MatchTransferCalldata() = true, want false for wrong attribution realm") {
+		"MatchTransferCalldata() = true, want false for another realm's attribution memo") {
 		return
 	}
 	if !assert.False(t, MatchTransferCalldata(attributedCalldata, implicitRequest, "api.example.com", "challenge-2"),
@@ -306,6 +345,26 @@ func TestMatchTransferCalldata_Attribution(t *testing.T) {
 		return
 	}
 
+	// The attribution memo is optional: a plain transfer and a memo in
+	// another layout are accepted.
+	plainCalldata := EncodeTransfer(recipient, amount)
+	assert.True(t, MatchTransferCalldata(plainCalldata, implicitRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = false, want true for a transfer without memo")
+	customMemo := "0x" + strings.Repeat("ab", 32)
+	customCalldata, err := EncodeTransferWithMemo(recipient, amount, customMemo)
+	require.NoError(t, err)
+	assert.True(t, MatchTransferCalldata(customCalldata, implicitRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = false, want true for a non-attribution memo")
+
+	// A server-set methodDetails.memo must be carried exactly.
+	memoRequest := implicitRequest
+	memoRequest.MethodDetails.Memo = "0x" + strings.Repeat("AB", 32)
+	assert.True(t, MatchTransferCalldata(customCalldata, memoRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = false, want true for the server memo")
+	assert.False(t, MatchTransferCalldata(plainCalldata, memoRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = true, want false for a transfer without the server memo")
+	assert.False(t, MatchTransferCalldata(attributedCalldata, memoRequest, "api.example.com", "challenge-1"),
+		"MatchTransferCalldata() = true, want false for an attribution memo instead of the server memo")
 }
 
 func TestParseChargeCredentialPayload_CanonicalizesHash(t *testing.T) {

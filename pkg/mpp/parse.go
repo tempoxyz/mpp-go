@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -22,10 +21,29 @@ const maxHeaderPayload = 16 * 1024
 // encoding. This matches mppx.
 const maxAuthorizationPayload = 64 * 1024
 
+// boundAuthParams are the auth-params bound into the challenge ID (the id
+// itself and the inputs of its HMAC). A legacy \uXXXX escape in one of them
+// changes what the client echoes, so the server rejects the Credential.
+// method is left out: ParseChallenge accepts only lowercase ASCII method
+// names, which older servers never escaped, so "\uabcd" there is a plain
+// quoted-pair spelling of "uabcd".
+var boundAuthParams = map[string]bool{
+	"id":      true,
+	"realm":   true,
+	"intent":  true,
+	"request": true,
+	"expires": true,
+	"digest":  true,
+	"opaque":  true,
+	"header":  true,
+}
+
 // parseAuthParams parses a comma-separated list of key=value or key="value"
-// pairs from an auth-param list (RFC 9110 §11.2).
-func parseAuthParams(s string) (map[string]string, error) {
-	params := make(map[string]string)
+// pairs from an auth-param list (RFC 9110 §11.2). legacy reports whether the
+// raw quoted value of an auth-param bound into the challenge ID held a legacy
+// \uXXXX escape (see ErrLegacyUnicodeEscapedChallenge).
+func parseAuthParams(s string) (params map[string]string, legacy bool, err error) {
+	params = make(map[string]string)
 	for i := 0; i < len(s); {
 		for i < len(s) && (s[i] == ',' || s[i] == ' ' || s[i] == '\t') {
 			i++
@@ -40,7 +58,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 		}
 		key := s[start:i]
 		if key == "" {
-			return nil, fmt.Errorf("mpp: malformed auth-param")
+			return nil, false, fmt.Errorf("mpp: malformed auth-param")
 		}
 		// Auth-param names are case-insensitive (RFC 9110 §11.2).
 		name := strings.ToLower(key)
@@ -49,7 +67,7 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 		if i >= len(s) || s[i] != '=' {
-			return nil, fmt.Errorf("mpp: malformed auth-param")
+			return nil, false, fmt.Errorf("mpp: malformed auth-param")
 		}
 		i++
 
@@ -57,14 +75,20 @@ func parseAuthParams(s string) (map[string]string, error) {
 			i++
 		}
 
-		value, next, err := readAuthParamValue(s, i)
+		value, next, escaped, err := readAuthParamValue(s, i)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if _, exists := params[name]; exists {
-			return nil, fmt.Errorf("mpp: duplicate auth-param %q", key)
+			return nil, false, fmt.Errorf("mpp: duplicate auth-param %q", key)
 		}
 		params[name] = value
+		// Only auth-params bound into the challenge ID matter: description
+		// and unknown extensions are not bound, so their legacy escapes
+		// only change how they display.
+		if escaped && boundAuthParams[name] {
+			legacy = true
+		}
 		i = next
 
 		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
@@ -77,10 +101,10 @@ func parseAuthParams(s string) (map[string]string, error) {
 			if name == "description" {
 				break
 			}
-			return nil, fmt.Errorf("mpp: malformed auth-param separator")
+			return nil, false, fmt.Errorf("mpp: malformed auth-param separator")
 		}
 	}
-	return params, nil
+	return params, legacy, nil
 }
 
 // SplitAuthenticate splits a potentially merged authentication header value into
@@ -167,7 +191,10 @@ func isTokenChar(ch byte) bool {
 	}
 }
 
-func readAuthParamValue(input string, start int) (string, int, error) {
+// readAuthParamValue reads a token or quoted-string auth-param value starting
+// at start. escaped reports whether a quoted value held a legacy \uXXXX
+// escape.
+func readAuthParamValue(input string, start int) (value string, next int, escaped bool, err error) {
 	if start < len(input) && input[start] == '"' {
 		return readQuotedAuthParamValue(input, start+1)
 	}
@@ -175,62 +202,54 @@ func readAuthParamValue(input string, start int) (string, int, error) {
 	for end < len(input) && input[end] != ',' {
 		end++
 	}
-	return strings.TrimSpace(input[start:end]), end, nil
+	return strings.TrimSpace(input[start:end]), end, false, nil
 }
 
-func readQuotedAuthParamValue(input string, start int) (string, int, error) {
+func readQuotedAuthParamValue(input string, start int) (value string, next int, escaped bool, err error) {
 	var builder strings.Builder
 	for i := start; i < len(input); {
 		switch ch := input[i]; ch {
 		case '\\':
 			i++
 			if i >= len(input) {
-				return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+				return "", 0, false, fmt.Errorf("mpp: unterminated quoted auth-param")
 			}
-			if r, next, ok := readUnicodeEscape(input, i); ok {
-				builder.WriteRune(r)
-				i = next
-				continue
+			// Servers on older SDK releases wrote characters above U+00FF
+			// as \uXXXX. Record it so clients refuse to pay the challenge.
+			if isLegacyUnicodeEscape(input[i:]) {
+				escaped = true
 			}
+			// RFC 9110 quoted-pair: drop the backslash and keep the next
+			// octet as is. \uXXXX is not an escape, so "\u2014" reads "u2014".
 			builder.WriteByte(input[i])
 			i++
 		case '"':
-			return builder.String(), i + 1, nil
+			return builder.String(), i + 1, escaped, nil
 		default:
 			builder.WriteByte(ch)
 			i++
 		}
 	}
-	return "", 0, fmt.Errorf("mpp: unterminated quoted auth-param")
+	return "", 0, false, fmt.Errorf("mpp: unterminated quoted auth-param")
 }
 
-func readUnicodeEscape(input string, i int) (rune, int, bool) {
-	unit, next, ok := readEscapedCodeUnit(input, i)
-	if !ok {
-		return 0, 0, false
+// isLegacyUnicodeEscape reports whether s, the text after a backslash in a
+// quoted-string, starts with "u" and four hex digits, the \uXXXX escape that
+// older servers wrote.
+func isLegacyUnicodeEscape(s string) bool {
+	if len(s) < 5 || s[0] != 'u' {
+		return false
 	}
-	if !utf16.IsSurrogate(rune(unit)) {
-		return rune(unit), next, true
-	}
-	if next < len(input) && input[next] == '\\' {
-		if low, after, ok := readEscapedCodeUnit(input, next+1); ok {
-			if r := utf16.DecodeRune(rune(unit), rune(low)); r != utf8.RuneError {
-				return r, after, true
-			}
+	for _, ch := range []byte(s[1:5]) {
+		if !isHexDigit(ch) {
+			return false
 		}
 	}
-	return utf8.RuneError, next, true
+	return true
 }
 
-func readEscapedCodeUnit(input string, i int) (uint16, int, bool) {
-	if i >= len(input) || input[i] != 'u' || i+5 > len(input) {
-		return 0, 0, false
-	}
-	value, err := strconv.ParseUint(input[i+1:i+5], 16, 16)
-	if err != nil {
-		return 0, 0, false
-	}
-	return uint16(value), i + 5, true
+func isHexDigit(ch byte) bool {
+	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
 }
 
 // ParseChallenge parses a Payment challenge from a WWW-Authenticate header value.
@@ -245,7 +264,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
 	}
 
-	params, err := parseAuthParams(rest)
+	params, legacy, err := parseAuthParams(rest)
 	if err != nil {
 		return nil, err
 	}
@@ -267,11 +286,16 @@ func ParseChallenge(header string) (*Challenge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mpp: invalid request field: %w", err)
 	}
+	if request == nil {
+		// mppx requires the request to be a JSON object; null is not one.
+		return nil, fmt.Errorf("mpp: invalid request field: must be a JSON object")
+	}
 
 	expires := params["expires"]
 	digest := params["digest"]
 	description := params["description"]
-	credentialHeader, err := parseAdvertisedCredentialHeader(params["header"])
+	rawHeader, hasHeader := params["header"]
+	credentialHeader, err := parseReceivedCredentialHeader(rawHeader, hasHeader)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +327,8 @@ func ParseChallenge(header string) (*Challenge, error) {
 		Opaque:      opaque,
 		Header:      credentialHeader,
 
-		opaqueB64: preservedOpaque,
+		opaqueB64:           preservedOpaque,
+		legacyUnicodeEscape: legacy,
 	}, nil
 }
 
@@ -314,14 +339,21 @@ func ParseChallenge(header string) (*Challenge, error) {
 //
 // It writes c.Realm, the realm the challenge ID binds. It rejects a nil
 // challenge, values that cannot be safely represented in quoted auth-params,
-// an invalid advertised credential header, empty required auth-params (id,
-// realm, method, intent, request), which would otherwise be omitted and yield
-// a challenge ParseChallenge rejects, a method that is not a valid method name
+// a credential header other than Authorization (never advertised) or
+// Payment-Authorization (ErrUnsupportedCredentialHeader), empty required
+// auth-params (id, realm, method, intent, request), which would otherwise be
+// omitted and yield a challenge ParseChallenge rejects, a method that is not a valid method name
 // (lowercase ASCII letters), a RequestB64 that is not base64url-encoded JSON,
-// and a header over the size limit.
+// a header over the size limit, and a challenge parsed with a legacy \uXXXX
+// escape in an ID-bound auth-param (ErrLegacyUnicodeEscapedChallenge).
 func FormatChallenge(c *Challenge) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("mpp: challenge is nil")
+	}
+	// Formatting would drop the escape and yield a header that reparses as
+	// an ordinary, payable offer whose ID the server still rejects.
+	if c.legacyUnicodeEscape {
+		return "", ErrLegacyUnicodeEscapedChallenge
 	}
 	return formatAuthenticateStrict(c, c.Realm)
 }
@@ -344,6 +376,9 @@ func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error)
 		}
 		if strict && strings.ContainsAny(v, "\r\n") {
 			return fmt.Errorf("mpp: invalid %s auth-param: contains CR or LF", k)
+		}
+		if strict && k != "description" && hasRuneAboveLatin1(v) {
+			return fmt.Errorf("mpp: invalid %s auth-param: contains characters above U+00FF", k)
 		}
 		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeQuoted(v)))
 		return nil
@@ -370,8 +405,12 @@ func formatAuthenticate(c *Challenge, realm string, strict bool) (string, error)
 
 	reqB64 := c.RequestB64
 	if strict && reqB64 != "" {
-		if _, err := B64Decode(reqB64); err != nil {
+		request, err := B64Decode(reqB64)
+		if err != nil {
 			return "", fmt.Errorf("mpp: invalid challenge request: %w", err)
+		}
+		if request == nil {
+			return "", fmt.Errorf("mpp: invalid challenge request: must be a JSON object")
 		}
 	}
 	if reqB64 == "" {
@@ -455,12 +494,33 @@ func escapeQuoted(value string) string {
 				builder.WriteRune(r)
 				continue
 			}
+			// Only description gets here in strict mode. It is not bound into
+			// the challenge ID, so it keeps mppx's \uXXXX escape: header values
+			// must be ByteStrings, and parsers read it back as quoted-pairs
+			// ("u2014"), which only changes how it displays.
 			for _, unit := range utf16.Encode([]rune{r}) {
 				fmt.Fprintf(&builder, `\u%04x`, unit)
 			}
 		}
 	}
 	return builder.String()
+}
+
+// hasRuneAboveLatin1 reports whether value holds a character above U+00FF.
+// A quoted-string has no escape for such characters (a quoted-pair only
+// quotes the next octet) and fetch-based peers read header values as Latin-1
+// ByteStrings, so FormatChallenge rejects them in every auth-param but
+// description rather than emit a value another SDK would read differently,
+// which for realm and the other bound fields changes the challenge ID.
+func hasRuneAboveLatin1(value string) bool {
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r > 0xff && size > 1 {
+			return true
+		}
+		value = value[size:]
+	}
+	return false
 }
 
 // ParseCredential parses a Payment credential from an Authorization header value.
@@ -472,20 +532,25 @@ func ParseCredential(header string) (*Credential, error) {
 		return nil, fmt.Errorf("mpp: Authorization header exceeds maximum size")
 	}
 
-	header, err := FindPaymentAuthorizationStrict(header)
-	if err != nil {
-		return nil, err
-	}
+	// The value must be exactly "Payment" 1*SP token, as mppx requires: a
+	// comma-separated list of credentials or text after the token is
+	// rejected. Callers that accept a merged header extract the Payment
+	// credential first with FindPaymentAuthorizationStrict.
+	header = strings.Trim(header, " \t")
 	if header == "" {
 		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
+	// Errors never quote the value: without a space it is the token itself.
 	scheme, rest, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, SchemePayment) {
-		return nil, fmt.Errorf("mpp: expected Payment scheme, got %q", scheme)
+		return nil, fmt.Errorf("mpp: expected Payment scheme")
 	}
 
-	b64 := strings.TrimSpace(rest)
+	b64 := strings.TrimLeft(rest, " ")
+	if !isCredentialToken(b64) {
+		return nil, fmt.Errorf("mpp: invalid credential: expected Payment scheme followed by a single base64url token")
+	}
 	data, err := B64Decode(b64)
 	if err != nil {
 		return nil, fmt.Errorf("mpp: invalid credential encoding: %w", err)
@@ -518,7 +583,14 @@ func ParseCredential(header string) (*Credential, error) {
 		Expires: anyStr(challengeMap["expires"]),
 		Digest:  anyStr(challengeMap["digest"]),
 	}
-	credentialHeader, err := parseAdvertisedCredentialHeader(anyStr(challengeMap["header"]))
+	// A null header is absent, as for JSON challenges.
+	rawHeader, hasHeader := challengeMap["header"]
+	hasHeader = hasHeader && rawHeader != nil
+	headerValue, isString := rawHeader.(string)
+	if hasHeader && !isString {
+		return nil, ErrUnsupportedCredentialHeader
+	}
+	credentialHeader, err := parseReceivedCredentialHeader(headerValue, hasHeader)
 	if err != nil {
 		return nil, err
 	}
@@ -537,6 +609,10 @@ func ParseCredential(header string) (*Credential, error) {
 	}
 	if echo.Request == "" {
 		return nil, fmt.Errorf("mpp: credential challenge missing required field: request")
+	}
+	if _, ok := challengeMap["request"].(string); !ok {
+		// The echo carries the request as its base64url string, as mppx requires.
+		return nil, fmt.Errorf("mpp: credential challenge request must be a string")
 	}
 
 	if opaqueRaw, ok := challengeMap["opaque"]; ok {
@@ -725,13 +801,21 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 	}
 
 	var externalID string
+	var emptyExternalID bool
 	if v, ok := data["externalId"]; ok {
 		externalID = anyStr(v)
+		// An explicitly empty externalId differs from an absent one: keep
+		// it so formatting the receipt preserves the field, as mppx does.
+		s, isString := v.(string)
+		emptyExternalID = isString && s == ""
 	}
 
 	var subscriptionID string
+	var emptySubscriptionID bool
 	if v, ok := data["subscriptionId"]; ok {
 		subscriptionID = anyStr(v)
+		s, isString := v.(string)
+		emptySubscriptionID = isString && s == ""
 	}
 
 	var fundingCurrency string
@@ -755,14 +839,16 @@ func receiptFromFields(data map[string]any) (*Receipt, error) {
 	}
 
 	return &Receipt{
-		Status:          status,
-		Timestamp:       ts,
-		Reference:       reference,
-		Method:          method,
-		ExternalID:      externalID,
-		SubscriptionID:  subscriptionID,
-		FundingCurrency: fundingCurrency,
-		Extensions:      extensions,
+		Status:              status,
+		Timestamp:           ts,
+		Reference:           reference,
+		Method:              method,
+		ExternalID:          externalID,
+		SubscriptionID:      subscriptionID,
+		FundingCurrency:     fundingCurrency,
+		Extensions:          extensions,
+		emptyExternalID:     emptyExternalID,
+		emptySubscriptionID: emptySubscriptionID,
 	}, nil
 }
 
@@ -852,10 +938,10 @@ func receiptFields(r *Receipt) map[string]any {
 	if r.Method != "" {
 		data["method"] = r.Method
 	}
-	if r.ExternalID != "" {
+	if r.ExternalID != "" || r.emptyExternalID {
 		data["externalId"] = r.ExternalID
 	}
-	if r.SubscriptionID != "" {
+	if r.SubscriptionID != "" || r.emptySubscriptionID {
 		data["subscriptionId"] = r.SubscriptionID
 	}
 	if r.FundingCurrency != "" {
@@ -877,6 +963,14 @@ func receiptFields(r *Receipt) map[string]any {
 	return data
 }
 
+// isCredentialToken reports whether value is one non-empty token: no
+// whitespace or comma, so a second credential or trailing text is rejected
+// here. Characters outside the base64url alphabet are left to B64Decode,
+// which reports them as a base64.CorruptInputError.
+func isCredentialToken(value string) bool {
+	return value != "" && !strings.ContainsAny(value, " \t\r\n,")
+}
+
 // b64EncodeAny encodes a value as compact JSON then base64url without padding.
 func b64EncodeAny(data map[string]any) string {
 	b, _ := encodeStableJSON(data)
@@ -893,19 +987,10 @@ func isMethodName(value string) bool {
 	return value != ""
 }
 
-func isHTTPHeaderName(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := 0; i < len(value); i++ {
-		if !isTokenChar(value[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// B64Decode decodes a base64url (no padding) string into a map.
+// B64Decode decodes a base64url (no padding) string into a map. It rejects
+// any character outside the base64url alphabet ([A-Za-z0-9_-]), including the
+// CR and LF that encoding/base64 skips, as mppx does. JSON null decodes to a
+// nil map.
 //
 // Numbers decode as json.Number rather than float64. The challenge ID is an
 // HMAC over the re-encoded request, so a decode that cannot reproduce the
@@ -913,6 +998,11 @@ func isHTTPHeaderName(value string) bool {
 // of mantissa, and any JSON integer above 2^53 comes back rounded, making a
 // challenge the server itself issued fail to verify.
 func B64Decode(s string) (map[string]any, error) {
+	if i := invalidBase64URLIndex(s); i >= 0 {
+		// Wrap the error encoding/base64 itself reports, so callers can
+		// still match it with errors.As.
+		return nil, fmt.Errorf("base64 decode: %w", base64.CorruptInputError(i))
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode: %w", err)
@@ -922,6 +1012,20 @@ func B64Decode(s string) (map[string]any, error) {
 		return nil, fmt.Errorf("json decode: %w", err)
 	}
 	return m, nil
+}
+
+// invalidBase64URLIndex returns the index of the first byte of s outside the
+// base64url alphabet, or -1. encoding/base64 skips CR and LF while decoding,
+// so they must be rejected before it runs.
+func invalidBase64URLIndex(s string) int {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return i
+	}
+	return -1
 }
 
 func decodeJSONMap(raw []byte) (map[string]any, error) {

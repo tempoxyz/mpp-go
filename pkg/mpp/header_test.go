@@ -81,7 +81,7 @@ func TestChallengeCreationRejectsInvalidCredentialHeader(t *testing.T) {
 		map[string]any{"amount": "1000000"},
 		WithHeader("Payment Authorization"),
 	)
-	require.EqualError(t, err, "mpp: invalid HTTP header name")
+	require.ErrorIs(t, err, ErrUnsupportedCredentialHeader)
 }
 
 func TestChallengeIDRejectsInvalidCredentialHeader(t *testing.T) {
@@ -95,7 +95,7 @@ func TestChallengeIDRejectsInvalidCredentialHeader(t *testing.T) {
 		Request:   map[string]any{"amount": "1000000"},
 		Header:    "Payment Authorization",
 	})
-	require.EqualError(t, err, "mpp: invalid HTTP header name")
+	require.ErrorIs(t, err, ErrUnsupportedCredentialHeader)
 }
 
 func TestFormatAuthenticateStrictRejectsInvalidCredentialHeader(t *testing.T) {
@@ -110,5 +110,5 @@ func TestFormatAuthenticateStrictRejectsInvalidCredentialHeader(t *testing.T) {
 		Header:  "Payment Authorization",
 	}
 	_, err := challenge.toAuthenticateStrict(challenge.Realm)
-	require.EqualError(t, err, "mpp: invalid HTTP header name")
+	require.ErrorIs(t, err, ErrUnsupportedCredentialHeader)
 }

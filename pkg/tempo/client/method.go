@@ -23,6 +23,7 @@ import (
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
 	mppclient "github.com/tempoxyz/mpp-go/pkg/client"
+	"github.com/tempoxyz/mpp-go/pkg/internal/paymentctx"
 	"github.com/tempoxyz/mpp-go/pkg/internal/tempoproof"
 	"github.com/tempoxyz/mpp-go/pkg/mpp"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
@@ -60,6 +61,9 @@ type Config struct {
 	// currency or recipient allowlist applies to them too. Check the normalized amount (including splits),
 	// currency, recipient, and verified RPC chain; enforce cumulative budgets atomically if needed.
 	// The callback may run concurrently and must not mutate the request.
+	// For a payment from a Zone balance (Config.Zone), it runs once the
+	// withdrawal fee is known, with the amount plus that fee, the total the
+	// withdrawal debits, so MaxAmount and MaxAtomicAmount cap the fee too.
 	//
 	// Build it from the PaymentPolicy helpers, for example at most 0.50 OUSD
 	// per payment on mainnet:
@@ -83,6 +87,61 @@ type Config struct {
 	// fee, such as a key limited to OUSD fees paying a USDC.e charge.
 	// Sponsored transactions ignore it: the fee payer chooses the fee token.
 	FeeToken string
+	// Zone pays from a Zone balance instead of the account's Tempo balance
+	// when a challenge accepts that Zone (methodDetails.zones), as mppx's
+	// zone option. Other challenges, and split payments, are paid on Tempo
+	// as usual. See Zone.
+	Zone *Zone
+}
+
+// Zone configures payments from a Zone balance. The method withdraws the
+// charge from the Zone to the recipient with a challenge-bound memo, waits for
+// the withdrawal to settle on Tempo, and sends a zone credential naming the
+// settlement. A Zone payment is a push payment: it is used only when the
+// challenge allows push and Config.CredentialType is empty or hash.
+type Zone struct {
+	// RPC is the Zone chain's JSON-RPC client. Zone RPCs authorize the
+	// paying account: build it with tempo.NewRPCClientWithOptions and the
+	// Zone's authorization token header.
+	RPC tempo.RPCClient
+	// ChainID is the Zone chain ID. It is required.
+	ChainID int64
+	// ZoneID is the Zone ID. When zero, it is derived from ChainID.
+	ZoneID uint32
+	// ParentChainID is the Tempo chain the Zone settles on. When zero, it is
+	// derived from ChainID. Zone IDs are unique per parent chain, so the
+	// method pays from the Zone only for challenges on this chain.
+	ParentChainID int64
+	// Signer signs the withdrawal on the Zone. When nil, Config.Signer or
+	// Config.PrivateKey signs it; with Config.AccessKey, set it.
+	Signer *temposigner.Signer
+	// SettlementTimeout bounds the wait for the withdrawal to settle on
+	// Tempo, cut short at the challenge expiry. Zero waits
+	// zone.DefaultSettlementTimeout (60 seconds); it must not be negative.
+	SettlementTimeout time.Duration
+	// MaxWithdrawalFee, when set, caps the Zone outbox fee a withdrawal may
+	// pay on top of the charge amount, in base units of the charge currency.
+	// PaymentPolicy also sees the amount plus the fee; this caps the fee on
+	// its own. A higher fee fails with
+	// ErrZoneWithdrawalFeeTooHigh before anything is signed. It must not be
+	// negative.
+	MaxWithdrawalFee *big.Int
+}
+
+// zoneConfig is a validated Zone.
+type zoneConfig struct {
+	rpc               tempo.RPCClient
+	chainID           int64
+	id                uint32
+	parentChainID     int64
+	signer            *temposigner.Signer
+	settlementTimeout time.Duration
+	maxWithdrawalFee  *big.Int
+	// nonceLock, a one-slot semaphore, serializes withdrawals from the
+	// signer on the Zone chain (one per zoneConfig, and so per Method): it is
+	// held from the nonce lookup until the send's outcome is known, so
+	// concurrent payments of different challenges never sign with one nonce.
+	nonceLock chan struct{}
 }
 
 // AccessKey is a Tempo access key that pays on behalf of Account. Payments
@@ -136,10 +195,24 @@ type Method struct {
 
 	signingMu sync.Mutex
 	signing   map[string]*signingCall
+
+	// zone pays from a Zone balance; nil pays on Tempo only.
+	zone *zoneConfig
+	// zoneReceiptTimeout bounds the wait for a Zone withdrawal's receipt;
+	// zero means zoneReceiptTimeout.
+	zoneReceiptTimeout time.Duration
+	// zoneSenderTagReadTimeout bounds the outbox reads that derive candidate
+	// sender tags; zero means zoneSenderTagReadTimeout.
+	zoneSenderTagReadTimeout time.Duration
+	zoneMu                   sync.Mutex
+	// zoneWithdrawals holds Zone withdrawals sent for a challenge, by the
+	// challenge's JSON, so a retry resumes them instead of paying again.
+	zoneWithdrawals map[string]*zoneWithdrawal
 }
 
 // signingCall is one in-flight CreateCredential shared by concurrent callers.
 type signingCall struct {
+	origin     string
 	done       chan struct{}
 	waiters    int
 	credential *mpp.Credential
@@ -204,6 +277,10 @@ func New(config Config) (*Method, error) {
 		address := common.HexToAddress(config.FeeToken)
 		feeToken = &address
 	}
+	zoneSettings, err := resolveZone(config.Zone, signer, accessKey != nil)
+	if err != nil {
+		return nil, err
+	}
 	rpc := config.RPC
 	if rpc == nil && config.RPCURL != "" {
 		// Build the client once rather than per credential.
@@ -220,6 +297,7 @@ func New(config Config) (*Method, error) {
 		paymentPolicy:  config.PaymentPolicy,
 		trustedRealms:  trustedRealms,
 		feeToken:       feeToken,
+		zone:           zoneSettings,
 	}, nil
 }
 
@@ -254,6 +332,10 @@ func (m *Method) Intent() string {
 
 // CreateCredential turns a Tempo charge Challenge into a Tempo Credential.
 //
+// It refuses, with mpp.ErrLegacyUnicodeEscapedChallenge and before signing
+// anything, a challenge parsed with a legacy \uXXXX escape in an ID-bound
+// auth-param (mpp.Challenge.LegacyUnicodeEscape).
+//
 // Concurrent calls for the same challenge share one in-flight signing, so they
 // cannot produce two independently settleable transactions. Once that signing
 // finishes, successfully or not, a later call signs afresh. Calls share a
@@ -262,6 +344,11 @@ func (m *Method) Intent() string {
 func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge) (*mpp.Credential, error) {
 	if challenge == nil {
 		return nil, fmt.Errorf("tempo client: challenge is required")
+	}
+	// The server would reject a Credential for this challenge, after a hash
+	// or zone payment had already been broadcast.
+	if challenge.LegacyUnicodeEscape() {
+		return nil, fmt.Errorf("tempo client: %w", mpp.ErrLegacyUnicodeEscapedChallenge)
 	}
 	encoded, err := json.Marshal(challenge)
 	if err != nil {
@@ -287,11 +374,18 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 			if (errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded)) && ctx.Err() == nil {
 				continue
 			}
+			var pending *ZoneSettlementPendingError
+			origin := zoneOrigin(paymentctx.Origin(ctx))
+			if errors.As(call.err, &pending) && (origin == "" || origin != call.origin) {
+				redacted := *pending
+				redacted.TransactionHash, redacted.SenderTag, redacted.SenderTags, redacted.Err = "", "", nil, nil
+				return nil, &redacted
+			}
 			return nil, call.err
 		}
 		return cloneCredential(call.credential), nil
 	}
-	call := &signingCall{done: make(chan struct{})}
+	call := &signingCall{done: make(chan struct{}), origin: zoneOrigin(paymentctx.Origin(ctx))}
 	if m.signing == nil {
 		m.signing = map[string]*signingCall{}
 	}
@@ -395,6 +489,25 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 			Source: tempo.ProofSource(chainID, m.account()),
 		}, nil
 	}
+	fromZone, err := m.paysFromZone(challenge, request, chainID)
+	if err != nil {
+		return nil, err
+	}
+	if fromZone {
+		// The policy authorizes only a withdrawal about to be sent, under the
+		// claim on the challenge: a resumed payment does not reserve the same
+		// charge again, and no new withdrawal is sent without it. It sees the
+		// amount plus the withdrawal fee, the total the withdrawal debits.
+		authorize := func(ctx context.Context, total *big.Int) error {
+			charged := request
+			charged.Amount = total.String()
+			if err := m.authorizePayment(ctx, charged, chainID); err != nil {
+				return fmt.Errorf("tempo client: charge amount plus Zone withdrawal fee (%s): %w", total, err)
+			}
+			return nil
+		}
+		return m.createZoneCredential(ctx, rpc, challenge, request, authorize)
+	}
 	if !request.Allows(credentialType) {
 		return nil, fmt.Errorf("tempo client: credential type %q is not allowed for this challenge", credentialType)
 	}
@@ -414,16 +527,15 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 		}
 	}
 
-	if m.paymentPolicy == nil {
-		return nil, fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
+	if err := m.authorizePayment(ctx, request, chainID); err != nil {
+		return nil, err
 	}
-	policyRequest := request
-	verifiedChainID := chainID
-	policyRequest.MethodDetails.ChainID = &verifiedChainID
-	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
-		return nil, fmt.Errorf("tempo client: payment rejected by policy: %w", err)
+	// A server-set methodDetails.memo must be carried exactly; otherwise the
+	// primary transfer carries an attribution memo binding it to the challenge.
+	memo := request.MethodDetails.Memo
+	if memo == "" {
+		memo = tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 	}
-	memo := tempo.EncodeAttribution(challenge.Realm, m.clientID, challenge.ID)
 
 	rawTx, err := m.buildTransfer(ctx, rpc, request, memo, chainID, challenge.Expires, sponsored)
 	if err != nil {
@@ -466,6 +578,21 @@ func (m *Method) createCredential(ctx context.Context, challenge *mpp.Challenge)
 	return credential, nil
 }
 
+// authorizePayment runs Config.PaymentPolicy on a nonzero payment, with the
+// chain ID verified against the RPC.
+func (m *Method) authorizePayment(ctx context.Context, request tempo.ChargeRequest, chainID int64) error {
+	if m.paymentPolicy == nil {
+		return fmt.Errorf("tempo client: a PaymentPolicy is required to authorize nonzero payments")
+	}
+	policyRequest := request
+	verifiedChainID := chainID
+	policyRequest.MethodDetails.ChainID = &verifiedChainID
+	if err := m.paymentPolicy(ctx, policyRequest); err != nil {
+		return fmt.Errorf("tempo client: payment rejected by policy: %w", err)
+	}
+	return nil
+}
+
 func (m *Method) buildTransfer(
 	ctx context.Context,
 	rpc tempo.RPCClient,
@@ -488,7 +615,31 @@ func (m *Method) buildTransfer(
 	gasLimit := tempo.DefaultGasLimit
 	if len(transfers) == 1 {
 		dataHex := transferDataHex(transfers[0])
-		if estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex); err == nil && estimated+5_000 > gasLimit {
+		// Name the signing access key in the estimate so the node checks its
+		// spending limits, as viem does. A key this transaction still has to
+		// authorize is not on the keychain yet, so its estimate runs as the
+		// account. The authorization is read again just before signing.
+		var estimateKey *common.Address
+		if m.accessKey != nil {
+			pending, err := m.pendingKeyAuthorization(ctx, rpc)
+			if err != nil {
+				return "", err
+			}
+			if pending == nil {
+				estimateKey = m.accessKeyAddress()
+			}
+		}
+		estimated, err := m.estimateGas(ctx, rpc, token.Hex(), dataHex, estimateKey)
+		if err != nil {
+			// The estimate simulates the transfer as the signing key. A
+			// spending-limit or balance revert there would also revert on
+			// chain, at the fee payer's cost when sponsored, so stop before
+			// signing, as mppx does. Other estimate failures keep the default
+			// gas limit.
+			if simulated := simulationError(err, m.account(), m.accessKeyAddress()); simulated != nil {
+				return "", simulated
+			}
+		} else if estimated+5_000 > gasLimit {
 			gasLimit = estimated + 5_000
 		}
 	}
@@ -666,6 +817,16 @@ func sponsoredValidBefore(expires string, now time.Time) (uint64, error) {
 	return uint64(validBefore), nil
 }
 
+// accessKeyAddress returns the address of the access key that signs, or nil
+// when the account signs for itself.
+func (m *Method) accessKeyAddress() *common.Address {
+	if m.accessKey == nil {
+		return nil
+	}
+	address := m.signer.Address()
+	return &address
+}
+
 // account is the address that pays and is named as the credential source:
 // the access key's root account, or the signer's address.
 func (m *Method) account() common.Address {
@@ -811,12 +972,17 @@ func (m *Method) estimateGas(
 	rpc tempo.RPCClient,
 	to string,
 	data string,
+	keyID *common.Address,
 ) (uint64, error) {
-	response, err := rpc.SendRequest(ctx, "eth_estimateGas", map[string]any{
+	request := map[string]any{
 		"from": m.account().Hex(),
 		"to":   to,
 		"data": data,
-	})
+	}
+	if keyID != nil {
+		request["keyId"] = keyID.Hex()
+	}
+	response, err := rpc.SendRequest(ctx, "eth_estimateGas", request)
 	if err != nil {
 		return 0, err
 	}

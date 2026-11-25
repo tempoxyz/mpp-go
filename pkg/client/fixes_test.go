@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +257,62 @@ func TestTransport_RoundTrip_ReportsUnknownOutcomeForUnparseableCallerCredential
 	assert.Contains(t, err.Error(), "do not blindly retry")
 }
 
+// TestTransport_RoundTrip_ReadsTabSpacedPushCredential reads the caller's
+// own credential leniently: tabs or extra spaces after the scheme still name
+// a push payment already on chain, in Authorization or a custom field, so the
+// 402 is returned instead of paying again.
+func TestTransport_RoundTrip_ReadsTabSpacedPushCredential(t *testing.T) {
+	challenge := challengeForURL(t, "http://api.example.com", "tempo", map[string]any{"amount": "1"})
+	inner := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		header := http.Header{}
+		header.Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: http.NoBody}, nil
+	})
+	push := &mpp.Credential{Challenge: challenge.ToEcho(), Payload: map[string]any{"type": "hash", "hash": "0xabc"}}
+	authorization, err := mpp.FormatCredential(push)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(authorization, "Payment ")
+	for _, header := range []string{"Authorization", "x-custom-payment"} {
+		for _, sep := range []string{" \t", "  "} {
+			t.Run(header+fmt.Sprintf("%q", sep), func(t *testing.T) {
+				method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+				req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+				require.NoError(t, err)
+				req.Header[http.CanonicalHeaderKey(header)] = []string{"Payment" + sep + token}
+
+				resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
+				assert.Zero(t, method.calls)
+			})
+		}
+	}
+}
+
+func TestTransport_RoundTrip_PaysDespitePaymentShapedOtherHeader(t *testing.T) {
+	challenge := challengeForURL(t, "http://api.example.com", "tempo", map[string]any{"amount": "1"})
+	var calls atomic.Int32
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) > 1 {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+		}
+		header := http.Header{}
+		header.Set("WWW-Authenticate", mpptest.FormatChallenge(challenge))
+		return &http.Response{StatusCode: http.StatusPaymentRequired, Header: header, Body: http.NoBody}, nil
+	})
+	method := &mockMethod{name: "tempo", cred: newTestCredential("tempo")}
+	req, err := http.NewRequest(http.MethodGet, "http://api.example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Note", "Payment e30")
+
+	resp, err := newTestTransport([]Method{method}, inner).RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, method.calls)
+}
+
 func TestClient_Do_RunsCallerRedirectHookFirst(t *testing.T) {
 	var otherHits atomic.Int32
 	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -489,8 +546,6 @@ func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.
 				original.Header = header
 			}
 			_, authorization := callerAuthorization(t, original)
-			replacement := *original
-			replacement.ID = "replacement"
 			fresh := *original
 			fresh.ID = "fresh"
 			rounds := 0
@@ -500,12 +555,11 @@ func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.
 				body := ""
 				switch rounds {
 				case 1:
+					// The caller's Challenge offered again: its Credential
+					// is resent, not replaced.
 					assert.Equal(t, authorization, req.Header.Get(header))
-					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(&replacement))
-				case 2:
-					assert.NotEqual(t, authorization, req.Header.Get(header))
 					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(original))
-				case 3:
+				case 2:
 					assert.Equal(t, authorization, req.Header.Get(header))
 					h.Set(mpp.HeaderWWWAuthenticate, mpptest.FormatChallenge(&fresh))
 					h.Set("Content-Type", "application/problem+json")
@@ -524,8 +578,8 @@ func TestTransport_ReselectedCallerCredentialRetainsExpiryProtection(t *testing.
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
-			assert.Equal(t, 1, method.calls)
-			assert.Equal(t, 3, rounds)
+			assert.Zero(t, method.calls)
+			assert.Equal(t, 2, rounds)
 		})
 	}
 }
